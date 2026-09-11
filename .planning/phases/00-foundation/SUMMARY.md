@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented and locally verified on 2026-09-11. Docker image build, Compose interpolation and container-runtime isolation remain pending because Docker is not available on the current host.
+Implemented and verified locally and on a remote Debian 13 Docker host on 2026-09-11.
 
 ## Delivered
 
@@ -36,24 +36,33 @@ plugin live probe: {"service":"plugin-runner","status":"ok","protocol":"musicdl.
 Compose YAML/static contract: passed
 secret-shape scan: clean
 temporary Uvicorn listeners after cleanup: none
+remote Docker Engine 29.8.0 / Compose v5.5.1: config and no-cache build passed
+remote Compose runtime: both services healthy
+container identity: uid/gid 10001:10001 for both services
+runtime hardening: read-only roots, cap_drop ALL and no-new-privileges observed
+network boundary: plugin has only the internal control network, no host port and no external DNS/HTTP egress
+secret boundary: plugin has no mounts and no Redis/Telegram/API/secret/token/password/session-shaped environment keys
+storage boundary: only the main service mounts app, media and Telegram-session volumes
 ```
+
+The first remote build exposed pip root and Debian system-user UID warnings. A TDD correction added failing Dockerfile contract assertions, then switched to explicit pip warning suppression and a fixed non-system nologin user. Commit `9a13d7f` passed the 27-test suite and a second no-cache remote build without those warnings.
 
 ## Commits
 
 - `ac3b4a9` — dependency and Phase 0 planning baseline;
 - `1752af9` — versioned configuration, redaction and plugin contracts;
 - `e67d00a` — secure two-service scaffold and static deployment tests.
+- `9a13d7f` — warning-free fixed-UID Docker user setup and regression tests.
 
-All three commits contain SSH signatures and were pushed to `origin/codex/phase-0-foundation`.
+All implementation commits contain SSH signatures and were pushed to `origin/codex/phase-0-foundation`.
 
 ## Deferred verification
 
-- Docker images were not built;
-- `docker compose config/up/ps` was not run;
-- container UID/GID, read-only filesystem, capability dropping and internal network isolation were not observed at runtime;
-- no Redis, WeCom, Telegram, AI or external plugin connection was attempted.
+- no real external Redis connection was attempted because Phase 0 used the documented invalid placeholder URL;
+- no WeCom, Telegram, AI provider or third-party plugin connection was attempted;
+- container resource limits and allowlisted plugin egress remain Phase 6 work.
 
-These are explicit deployment/next-phase gates, not inferred successes.
+These are explicit later-phase gates, not inferred successes. The temporary remote Compose stacks and their volumes, networks, images, source directories and archives were removed after validation.
 
 ## Next phase
 
