@@ -1,0 +1,12 @@
+.git
+.venv
+.env
+**/.env
+telegram-sessions
+data/music
+media
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
