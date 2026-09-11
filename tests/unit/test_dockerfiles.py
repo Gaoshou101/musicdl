@@ -14,6 +14,10 @@ def test_dockerfiles_are_pinned_non_root_and_production_only():
         assert text.index("groupadd") < text.index("useradd")
         assert ".[dev]" not in text
         assert "EXPOSE" not in text
+        assert "--root-user-action=ignore" in text
+        assert "groupadd --system" not in text
+        assert "useradd --system" not in text
+        assert "--shell /usr/sbin/nologin" in text
 
 
 def test_dockerignore_excludes_secrets_sessions_media_and_caches():
