@@ -4,6 +4,8 @@
 
 ## Phase 0 — Protocol and reuse foundation
 
+**Status:** Implemented and locally verified on 2026-09-11; Docker build/runtime verification remains pending on a Debian-like host.
+
 **Goal:** 锁定参考项目可复用边界、许可证和协议事实，建立最小仓库骨架、配置模型和测试夹具。
 
 **Dependencies:** `.planning/PROJECT.md`、研究摘要。
