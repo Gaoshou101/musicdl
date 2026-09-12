@@ -91,8 +91,9 @@ def test_refresh_failure_still_checks_health_and_redacts_exception(tmp_path):
 
     assert outcome.refresh_error == "refresh_failed"
     assert outcome.healthy is True
-    assert "SECRET" not in str(outcome)
-    assert all("SECRET" not in str(event.__dict__) for event in events)
+    for secret in ("SECRET", "private", "api_key", "session", "https://x.test/?api_key=SECRET&session=private"):
+        assert secret not in str(outcome)
+        assert all(secret not in str(event.__dict__) for event in events)
     assert [(e.stage, e.status, e.error_code) for e in events] == [
         ("download", "failed", "download_failed"),
         ("refresh", "failed", "refresh_failed"),
@@ -147,8 +148,69 @@ def test_health_failure_is_redacted(tmp_path):
     async def refresh(query, excluded):
         return result()
 
+    events = []
     outcome = asyncio.run(download_with_fallback(candidate(), {"a": source}, tmp_path,
-        request_id="r", query="Song", refresh=refresh))
+        request_id="r", query="Song", refresh=refresh, record=events.append))
     assert outcome.healthy is None
     assert outcome.refresh_error is None
-    assert "SECRET_API_KEY" not in str(outcome)
+    assert [(e.stage, e.status, e.error_code) for e in events] == [
+        ("download", "failed", "download_failed"),
+        ("refresh", "success", None),
+        ("health", "failed", "health_failed"),
+    ]
+    for secret in ("SECRET_API_KEY", "session", "api_key"):
+        assert secret not in str(outcome)
+        assert all(secret not in str(event.__dict__) for event in events)
+
+
+def test_download_cancellation_does_not_fallback(tmp_path):
+    class CancelDownload(Source):
+        async def download(self, item):
+            raise asyncio.CancelledError
+
+    events = []
+    calls = []
+
+    async def refresh(query, excluded):
+        calls.append(1)
+        return result()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(download_with_fallback(candidate(), {"a": CancelDownload()}, tmp_path,
+            request_id="r", query="Song", refresh=refresh, record=events.append))
+    assert calls == []
+    assert [(e.stage, e.status) for e in events] == [("download", "failed")]
+
+
+def test_refresh_cancellation_does_not_check_health(tmp_path):
+    source = Source(fail=True)
+    events = []
+
+    async def refresh(query, excluded):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(download_with_fallback(candidate(), {"a": source}, tmp_path,
+            request_id="r", query="Song", refresh=refresh, record=events.append))
+    assert source.health_calls == 0
+    assert [(e.stage, e.status) for e in events] == [("download", "failed")]
+
+
+def test_health_cancellation_stops_after_refresh(tmp_path):
+    class CancelHealth(Source):
+        async def health(self):
+            self.health_calls += 1
+            raise asyncio.CancelledError
+
+    source = CancelHealth(fail=True)
+    events = []
+
+    async def refresh(query, excluded):
+        return result()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(download_with_fallback(candidate(), {"a": source}, tmp_path,
+            request_id="r", query="Song", refresh=refresh, record=events.append))
+    assert [(e.stage, e.status) for e in events] == [
+        ("download", "failed"), ("refresh", "success")
+    ]

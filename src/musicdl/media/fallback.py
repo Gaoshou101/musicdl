@@ -83,4 +83,3 @@ async def download_with_fallback(
                                      "health", "failed", error_code="health_failed", healthy=None))
     return FallbackResult(refreshed=refreshed, failed_source_id=failed_source,
                           download_error=download_error, refresh_error=refresh_error, healthy=healthy)
-
