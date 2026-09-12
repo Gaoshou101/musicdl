@@ -19,8 +19,8 @@ Phase 3 code and controlled tests are complete. Live Telegram account, selected 
 
 - TDD RED evidence was recorded for the new Bot API, empty-result correction, incomplete authorization checks, and connector Bot requester bridge.
 - Focused Phase 3/source/Compose suite: 73 passed with warnings treated as errors.
-- Full suite: 142 passed, 1 skipped with warnings treated as errors.
-- The sole skip is the environment-gated WeCom Redis integration test because `MUSICDL_TEST_REDIS_URL` is not configured.
+- Live Redis atomic-state integration test: 1 passed against the configured external Redis endpoint, using an isolated random namespace that was cleaned after the test.
+- Full suite: 143 passed with warnings treated as errors; no tests were skipped.
 - Telethon import/version check: 1.45.0.
 - `pip check`: no broken requirements.
 - `git diff --check`: passed; only Git line-ending conversion notices were emitted.
