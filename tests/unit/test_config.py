@@ -63,6 +63,22 @@ def test_settings_repr_and_dump_do_not_expose_secret(monkeypatch):
     assert "top-secret" not in str(settings.model_dump())
 
 
+def test_telegram_enabled_requires_credentials_and_normalizes_profile(monkeypatch):
+    monkeypatch.setenv("MUSICDL_TELEGRAM__ENABLED", "true")
+    monkeypatch.setenv("MUSICDL_TELEGRAM__API_ID", "123")
+    monkeypatch.setenv("MUSICDL_TELEGRAM__API_HASH", "  secret-hash  ")
+    monkeypatch.setenv("MUSICDL_TELEGRAM__PROFILE", "  alice  ")
+    settings = AppSettings()
+    assert settings.telegram.profile == "alice"
+    assert "secret-hash" not in repr(settings.telegram)
+
+
+def test_telegram_enabled_rejects_missing_credentials(monkeypatch):
+    monkeypatch.setenv("MUSICDL_TELEGRAM__ENABLED", "true")
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
 def test_redis_timeouts_default_and_environment_override(monkeypatch):
     settings = AppSettings()
     assert settings.redis.connect_timeout == 2.0

@@ -15,6 +15,7 @@ dependencies = [
   "cryptography==50.0.1",
   "defusedxml==0.7.1",
   "redis==8.1.0",
+  "telethon==1.45.0",
 ]
 
 [project.optional-dependencies]
