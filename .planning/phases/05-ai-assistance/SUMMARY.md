@@ -33,6 +33,7 @@ branch, the complete semantic Phase 5 history is:
 | `5314c1c` | fix: harden Phase 5 provider boundaries |
 | `d891d2b` | fix: complete Phase 5 provider remediation |
 | `f1d54bc` | fix: close Phase 5 final fallback gaps |
+| `c7207c3` | docs: refresh Phase 5 acceptance evidence |
 
 External commit `3185d82` is not an ancestor of this branch and is explicitly
 excluded from Phase 5 acceptance.
@@ -81,8 +82,9 @@ validation. No Docker/runtime deployment validation is claimed here.
 
 ## Rollback
 
-To remove only this acceptance record, revert the summary documentation commit
-first. To roll back the whole Phase 5 implementation, then revert these commits
+To remove only this acceptance record, revert the current summary documentation
+commit first; that commit records `c7207c3` (`docs: refresh Phase 5 acceptance
+evidence`). To roll back the whole Phase 5 implementation, then revert these commits
 in order: `f1d54bc`, `d891d2b`, `5314c1c`, `49a089c`, `196978d`, `16e2add`, `06f8673`,
 `933cc12`, `c54982d`, `e7877fb`, `3dc4a59`. Do not force-push, rewrite history,
 or delete media/data. The rollback requires no data conversion.
