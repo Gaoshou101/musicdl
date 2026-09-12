@@ -124,6 +124,7 @@ def test_source_and_generator_errors_redacted(tmp_path):
     events = []
     with pytest.raises(MediaError, match="download_failed") as exc: asyncio.run(download_candidate(candidate(), BadSource(), tmp_path, request_id="r", record=events.append))
     assert len(events) == 1 and "secret" not in repr(events[0]) and "secret" not in repr(exc.value)
+    assert not list(tmp_path.rglob("*.mp3")) and not list(tmp_path.glob(".musicdl-*.part"))
 
     async def bad_chunks():
         yield b"ID3"
@@ -131,6 +132,7 @@ def test_source_and_generator_errors_redacted(tmp_path):
     events = []
     with pytest.raises(MediaError, match="download_failed") as exc: asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks=bad_chunks(), extension="mp3")), tmp_path, request_id="r", record=events.append))
     assert len(events) == 1 and "secret" not in repr(events[0]) and "secret" not in repr(exc.value)
+    assert not list(tmp_path.rglob("*.mp3")) and not list(tmp_path.glob(".musicdl-*.part"))
 
 
 def test_fsync_failure_closes_and_cleans(tmp_path, monkeypatch):
@@ -139,3 +141,40 @@ def test_fsync_failure_closes_and_cleans(tmp_path, monkeypatch):
     with pytest.raises(MediaError, match="download_failed") as exc: asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks=chunks(b"ID3"), extension="mp3")), tmp_path, request_id="r", record=events.append))
     assert len(events) == 1 and events[0].error_code == "download_failed" and "secret" not in repr(exc.value)
     assert not list(tmp_path.rglob("*.mp3")) and not list(tmp_path.glob(".musicdl-*.part"))
+
+
+@pytest.mark.parametrize("fmt,header,mime", [("mp3", b"ID3", "audio/mpeg"), ("flac", b"fLaC", "audio/flac"), ("m4a", b"\0\0\0\x18ftypM4A ", "audio/mp4"), ("ogg", b"OggS", "audio/ogg")])
+def test_parametrized_collision_matrix(tmp_path, fmt, header, mime):
+    base = tmp_path / "华语" / "Artist" / f"Song - Artist.{fmt}"
+    base.parent.mkdir(parents=True); base.write_bytes(b"original")
+    def run(): return asyncio.run(download_candidate(candidate(fmt), Source(DownloadMetadata(chunks=chunks(header), extension=fmt, media_type=mime)), tmp_path, request_id="r", language="华语"))
+    second, third = run(), run()
+    assert second.relative_path.stem.endswith(" (2)") and third.relative_path.stem.endswith(" (3)")
+    assert base.read_bytes() == b"original"
+
+
+def test_cleanup_failure_after_primary_is_observable(tmp_path, monkeypatch):
+    original = Path.unlink
+    def fail(path, *args, **kwargs):
+        if path.name.startswith(".musicdl-"): raise OSError("token=secret")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", fail)
+    events = []
+    with pytest.raises(MediaError, match="empty_download") as exc: asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks=chunks(), extension="mp3")), tmp_path, request_id="r", record=events.append))
+    assert exc.value.code == "empty_download" and events[-1].stage == "cleanup" and events[-1].error_code == "cleanup_failed"
+    assert "secret" not in repr(events) and "secret" not in repr(exc.value)
+
+
+def test_cleanup_failure_on_cancellation_is_observable(tmp_path, monkeypatch):
+    original = Path.unlink
+    monkeypatch.setattr(Path, "unlink", lambda path, *a, **k: (_ for _ in ()).throw(OSError("token=secret")) if path.name.startswith(".musicdl-") else original(path, *a, **k))
+    async def run():
+        async def slow():
+            yield b"ID3"
+            await asyncio.sleep(10)
+        events = []
+        task = asyncio.create_task(download_candidate(candidate(), Source(DownloadMetadata(chunks=slow(), extension="mp3")), tmp_path, request_id="r", record=events.append))
+        await asyncio.sleep(0); task.cancel()
+        with pytest.raises(asyncio.CancelledError): await task
+        assert events[-1].stage == "cleanup" and "secret" not in repr(events)
+    asyncio.run(run())

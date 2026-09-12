@@ -4,6 +4,7 @@ import hashlib
 import os
 import tempfile
 import asyncio
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -74,8 +75,6 @@ async def download_candidate(
             except FileExistsError:
                 counter += 1
                 target = base.with_name(f"{base.stem} ({counter}){base.suffix}")
-        temp_path.unlink()
-        temp_path = None
         relative = target.relative_to(root)
         event = DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                               "download", "success", size_bytes=size, sha256=digest.hexdigest(),
@@ -104,4 +103,8 @@ async def download_candidate(
             try:
                 temp_path.unlink(missing_ok=True)
             except OSError:
-                pass
+                if record:
+                    record(DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
+                                         "cleanup", "failed", error_code="cleanup_failed", size_bytes=size or None))
+                if sys.exc_info()[0] is None:
+                    raise MediaError("cleanup_failed")
