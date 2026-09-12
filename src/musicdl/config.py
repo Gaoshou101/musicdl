@@ -2,9 +2,12 @@ import posixpath
 from urllib.parse import urlsplit
 import base64
 import binascii
+import re
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_TELEGRAM_PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 class ConfigVersion(BaseModel):
@@ -31,7 +34,22 @@ class MediaSettings(BaseModel):
 
 class TelegramSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    api_id: int | None = Field(default=None, gt=0)
+    api_hash: SecretStr | None = None
+    profile: str = "default"
     session_root: str = "/data/telegram-sessions"
+
+    @model_validator(mode="after")
+    def validate_credentials(self):
+        self.profile = self.profile.strip()
+        if not _TELEGRAM_PROFILE.fullmatch(self.profile):
+            raise ValueError("Telegram profile must be a simple name")
+        if self.api_hash is not None:
+            self.api_hash = SecretStr(self.api_hash.get_secret_value().strip())
+        if self.enabled and (self.api_id is None or self.api_hash is None or not self.api_hash.get_secret_value()):
+            raise ValueError("enabled Telegram settings require credentials")
+        return self
 
 
 class WeComSettings(BaseModel):
