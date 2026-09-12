@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import os
 import re
@@ -17,11 +18,14 @@ class TelegramClientProtocol(Protocol):
     async def sign_in(self, **kwargs: Any) -> Any: ...
 
 
-def telethon_client_factory(api_id: int, api_hash: str) -> Callable[[Path], TelegramClientProtocol]:
+def telethon_client_factory(api_id: int, api_hash: str, proxy: Any = None) -> Callable[[Path], TelegramClientProtocol]:
     """Build a lazy Telethon factory; importing Telethon is deferred until use."""
     def factory(session_path: Path) -> TelegramClientProtocol:
         from telethon import TelegramClient
-        return TelegramClient(session_path, api_id, api_hash, flood_sleep_threshold=0)
+        kwargs = {"flood_sleep_threshold": 0}
+        if proxy is not None:
+            kwargs["proxy"] = proxy
+        return TelegramClient(session_path, api_id, api_hash, **kwargs)
     return factory
 
 
@@ -34,6 +38,7 @@ class TelegramConnector:
         self._api_hash = api_hash
         self.factory = client_factory
         self._clients: dict[str, TelegramClientProtocol] = {}
+        self._bot_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self.root.mkdir(parents=True, exist_ok=True)
         self._harden(self.root)
 
@@ -46,7 +51,7 @@ class TelegramConnector:
 
     def _harden_session(self, profile: str) -> None:
         base = self.session_path(profile)
-        for path in (base.with_suffix(".session"), base.with_name(base.name + ".session-wal"), base.with_name(base.name + ".session-shm")):
+        for path in (base.with_name(base.name + ".session"), base.with_name(base.name + ".session-wal"), base.with_name(base.name + ".session-shm")):
             if path.exists():
                 self._harden(path)
 
@@ -120,9 +125,13 @@ class TelegramConnector:
             client = await self._client(profile)
             if not await client.is_user_authorized():
                 raise RuntimeError("telegram client is not authorized")
-            async with client.conversation(bot_username, timeout=timeout) as conversation:
-                await conversation.send_message(command)
-                response = await conversation.get_response()
+            lock_key = (profile, bot_username.lower())
+            if lock_key not in self._bot_locks:
+                self._bot_locks[lock_key] = asyncio.Lock()
+            async with self._bot_locks[lock_key]:
+                async with client.conversation(bot_username, timeout=timeout) as conversation:
+                    await conversation.send_message(command)
+                    response = await conversation.get_response()
             decoded = decoder(response)
             if inspect.isawaitable(decoded):
                 decoded = await decoded
@@ -138,3 +147,13 @@ class TelegramConnector:
             return TelegramResult(TelegramStatus.INVALID_SESSION)
         except Exception as exc:
             return self._failure(exc)
+
+    async def disconnect(self) -> None:
+        """Cleanly disconnect all active clients and clear memory references."""
+        for client in list(self._clients.values()):
+            if hasattr(client, "disconnect") and callable(client.disconnect):
+                res = client.disconnect()
+                if inspect.isawaitable(res):
+                    await res
+        self._clients.clear()
+        self._bot_locks.clear()

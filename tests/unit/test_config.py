@@ -77,3 +77,8 @@ def test_telegram_enabled_rejects_missing_credentials(monkeypatch):
     monkeypatch.setenv("MUSICDL_TELEGRAM__ENABLED", "true")
     with pytest.raises(ValidationError):
         AppSettings()
+
+def test_telegram_proxy_configuration(monkeypatch):
+    monkeypatch.setenv("MUSICDL_TELEGRAM__PROXY", " socks5://127.0.0.1:1080 ")
+    settings = AppSettings()
+    assert settings.telegram.proxy == "socks5://127.0.0.1:1080"

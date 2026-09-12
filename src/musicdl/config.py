@@ -39,12 +39,15 @@ class TelegramSettings(BaseModel):
     api_hash: SecretStr | None = None
     profile: str = "default"
     session_root: str = "/data/telegram-sessions"
+    proxy: str | None = None
 
     @model_validator(mode="after")
     def validate_credentials(self):
         self.profile = self.profile.strip()
         if not _TELEGRAM_PROFILE.fullmatch(self.profile):
             raise ValueError("Telegram profile must be a simple name")
+        if self.proxy is not None:
+            self.proxy = self.proxy.strip() or None
         if self.api_hash is not None:
             self.api_hash = SecretStr(self.api_hash.get_secret_value().strip())
         if self.enabled and (self.api_id is None or self.api_hash is None or not self.api_hash.get_secret_value()):
