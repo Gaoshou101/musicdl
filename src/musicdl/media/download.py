@@ -46,16 +46,21 @@ async def download_candidate(
                     raise MediaError("file_too_large")
                 if len(header) < 64:
                     header.extend(chunk[: 64 - len(header)])
-                os.write(fd, chunk)
+                pending = memoryview(chunk)
+                while pending:
+                    written = os.write(fd, pending)
+                    if not isinstance(written, int) or written <= 0:
+                        raise MediaError("download_failed")
+                    pending = pending[written:]
                 digest.update(chunk)
         finally:
-            os.fsync(fd)
-            os.close(fd)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         if size == 0:
             raise MediaError("empty_download")
         if metadata.declared_size is not None and metadata.declared_size != size:
-            raise MediaError("size_mismatch")
-        if candidate.size is not None and candidate.size != size:
             raise MediaError("size_mismatch")
         extension, media_type = validate_media(bytes(header), metadata, candidate.format)
         base = validated_destination(root, language, candidate.artist, candidate.title, extension)

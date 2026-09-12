@@ -1,10 +1,11 @@
 import asyncio
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
 
-from musicdl.media import DownloadMetadata, MediaError, download_candidate
+from musicdl.media import DownloadEvent, DownloadMetadata, MediaError, download_candidate
 from musicdl.sources.models import Candidate
 
 
@@ -31,7 +32,7 @@ def test_download_publishes_valid_media_atomically(tmp_path):
     assert result.relative_path == Path("华语/Artist/Song - Artist.mp3")
     assert target.read_bytes() == data
     assert result.sha256 == hashlib.sha256(data).hexdigest()
-    assert events[0].stage == "download" and events[0].status == "success"
+    assert events == [DownloadEvent("r", "1", "source", "v1", "download", "success", size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), relative_path="华语/Artist/Song - Artist.mp3")]
     assert not list(tmp_path.glob(".musicdl-*.part"))
 
 
@@ -53,11 +54,26 @@ def test_download_failures_cleanup(tmp_path, metadata, code):
 def test_download_collision_and_formats(tmp_path):
     for fmt, header, mime in [("mp3", b"ID3", "audio/mpeg"), ("flac", b"fLaC", "audio/flac"), ("m4a", b"\0\0\0\x18ftypM4A ", "audio/mp4"), ("ogg", b"OggS", "audio/ogg")]:
         c = candidate(fmt, fmt)
+        base = tmp_path / "华语" / "Artist" / f"Song - Artist.{fmt}"
+        base.parent.mkdir(parents=True, exist_ok=True); base.write_bytes(b"original")
         first = asyncio.run(download_candidate(c, Source(DownloadMetadata(chunks=chunks(header), extension=fmt, media_type=mime)), tmp_path, request_id="r", language="华语"))
-        asyncio.run(download_candidate(c, Source(DownloadMetadata(chunks=chunks(header), extension=fmt, media_type=mime)), tmp_path, request_id="r", language="华语"))
+        second = asyncio.run(download_candidate(c, Source(DownloadMetadata(chunks=chunks(header), extension=fmt, media_type=mime)), tmp_path, request_id="r", language="华语"))
         assert first.relative_path.suffix == "." + fmt
+        assert first.relative_path.stem.endswith(" (2)") and second.relative_path.stem.endswith(" (3)")
+        assert base.read_bytes() == b"original"
     files = sorted((tmp_path / "华语" / "Artist").glob("Song*"))
-    assert len(files) == 8
+    assert len(files) == 12
+
+
+def test_concurrent_publication_has_unique_targets(tmp_path):
+    async def run():
+        async def one(i):
+            return await download_candidate(candidate(item=str(i)), Source(DownloadMetadata(chunks=chunks(b"ID3"), extension="mp3")), tmp_path, request_id=str(i), language="华语")
+        return await asyncio.gather(*(one(i) for i in range(4)))
+    results = asyncio.run(run())
+    paths = [result.relative_path for result in results]
+    assert len(set(paths)) == 4
+    assert all((tmp_path / path).read_bytes() == b"ID3" for path in paths)
 
 
 def test_download_cancellation_cleans_temp(tmp_path):
@@ -71,3 +87,55 @@ def test_download_cancellation_cleans_temp(tmp_path):
         with pytest.raises(asyncio.CancelledError): await task
     asyncio.run(run())
     assert not list(tmp_path.glob(".musicdl-*.part"))
+
+
+def test_candidate_size_is_not_authoritative(tmp_path):
+    c = candidate(); c = c.model_copy(update={"size": 999})
+    data = b"ID3payload"
+    result = asyncio.run(download_candidate(c, Source(DownloadMetadata(chunks=chunks(data), extension="mp3", declared_size=len(data))), tmp_path, request_id="r"))
+    assert result.size_bytes == len(data)
+
+
+def test_short_writes_are_completed(tmp_path, monkeypatch):
+    original = os.write
+    def short_write(fd, data): return original(fd, data[:1])
+    monkeypatch.setattr(os, "write", short_write)
+    data = b"ID3payload"
+    result = asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks=chunks(data), extension="mp3")), tmp_path, request_id="r"))
+    assert (tmp_path / result.relative_path).read_bytes() == data
+    assert result.size_bytes == len(data) and result.sha256 == hashlib.sha256(data).hexdigest()
+
+
+@pytest.mark.parametrize("metadata,code", [
+    (DownloadMetadata(chunks=chunks(b"ID3xx"), extension="mp3"), "file_too_large"),
+    (DownloadMetadata(chunks=chunks(b"ID3"), extension="mp3", media_type="audio/flac"), "mime_mismatch"),
+    (DownloadMetadata(chunks=chunks(b"nope"), extension="mp3"), "signature_mismatch"),
+])
+def test_failure_matrix_exact_event(tmp_path, metadata, code):
+    events = []
+    with pytest.raises(MediaError) as exc: asyncio.run(download_candidate(candidate(), Source(metadata), tmp_path, request_id="r", record=events.append, max_bytes=3 if code == "file_too_large" else 100))
+    assert exc.value.code == code and len(events) == 1 and events[0].error_code == code
+    assert not list(tmp_path.rglob("*.mp3")) and not list(tmp_path.glob(".musicdl-*.part"))
+
+
+def test_source_and_generator_errors_redacted(tmp_path):
+    class BadSource:
+        async def download(self, _): raise RuntimeError("token=secret")
+    events = []
+    with pytest.raises(MediaError, match="download_failed") as exc: asyncio.run(download_candidate(candidate(), BadSource(), tmp_path, request_id="r", record=events.append))
+    assert len(events) == 1 and "secret" not in repr(events[0]) and "secret" not in repr(exc.value)
+
+    async def bad_chunks():
+        yield b"ID3"
+        raise RuntimeError("token=secret")
+    events = []
+    with pytest.raises(MediaError, match="download_failed") as exc: asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks=bad_chunks(), extension="mp3")), tmp_path, request_id="r", record=events.append))
+    assert len(events) == 1 and "secret" not in repr(events[0]) and "secret" not in repr(exc.value)
+
+
+def test_fsync_failure_closes_and_cleans(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("token=secret")))
+    events = []
+    with pytest.raises(MediaError, match="download_failed") as exc: asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks=chunks(b"ID3"), extension="mp3")), tmp_path, request_id="r", record=events.append))
+    assert len(events) == 1 and events[0].error_code == "download_failed" and "secret" not in repr(exc.value)
+    assert not list(tmp_path.rglob("*.mp3")) and not list(tmp_path.glob(".musicdl-*.part"))
