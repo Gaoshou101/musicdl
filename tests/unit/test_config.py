@@ -96,10 +96,16 @@ def test_enabled_ai_requires_and_normalizes_credentials(monkeypatch):
     assert "phase5-secret" not in repr(settings)
 
 
-@pytest.mark.parametrize("field", ["api_key", "model"])
-def test_enabled_ai_rejects_missing_or_blank_credentials(monkeypatch, field):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("api_key", None), ("api_key", "   "), ("model", None), ("model", "   ")],
+)
+def test_enabled_ai_rejects_each_missing_or_blank_credential(monkeypatch, field, value):
     monkeypatch.setenv("MUSICDL_AI__ENABLED", "true")
-    monkeypatch.setenv(f"MUSICDL_AI__{field.upper()}", "   ")
+    other = "model" if field == "api_key" else "api_key"
+    monkeypatch.setenv(f"MUSICDL_AI__{other.upper()}", "valid-credential")
+    if value is not None:
+        monkeypatch.setenv(f"MUSICDL_AI__{field.upper()}", value)
     with pytest.raises(ValidationError):
         AppSettings()
 

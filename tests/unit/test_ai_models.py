@@ -12,7 +12,8 @@ from musicdl.ai import (
     emit_event,
 )
 from musicdl.media.models import Language
-from musicdl.sources.search import SearchResult
+from musicdl.sources.models import Candidate
+from musicdl.sources.search import SearchResult, SourceStatus
 
 
 def test_public_contracts_are_frozen():
@@ -41,7 +42,27 @@ def test_emit_event_suppresses_recorder_errors():
     emit_event(lambda event: (_ for _ in ()).throw(RuntimeError("ignored")), AIEvent("language", "fallback"))
 
 
-def test_contract_annotations_are_importable():
+def test_emit_event_propagates_cancelled_error():
+    def recorder(event):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        emit_event(recorder, AIEvent("rank", "fallback"))
+
+
+def test_ai_event_contains_no_provider_sensitive_fields():
+    event = AIEvent("rank", "fallback", "timeout")
+    assert set(event.__dict__) == {"operation", "status", "error_code"}
+    assert not hasattr(event, "api_key")
+    assert not hasattr(event, "base_url")
+    assert "provider.example" not in repr(event)
+
+
+def test_rank_result_wraps_concrete_search_result():
+    candidate = Candidate(source_id="source", source_version="1", item_id="item", title="Song", artist="Artist")
+    search = SearchResult((candidate,), (SourceStatus("source", "1", "ok", 1),), "digest")
+    result = AIRankResult(search, True)
+    assert result.search is search
+    assert result.applied is True
+    assert result.error_code is None
     assert Language is not None
-    assert SearchResult is not None
-    assert AIRankResult is not None
