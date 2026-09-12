@@ -82,9 +82,11 @@ validation. No Docker/runtime deployment validation is claimed here.
 
 ## Rollback
 
-To remove only this acceptance record, revert the current summary documentation
-commit first; that commit records `c7207c3` (`docs: refresh Phase 5 acceptance
-evidence`). To roll back the whole Phase 5 implementation, then revert these commits
+To remove only the summary acceptance records, revert all summary-only commits
+after `f1d54bc` newest-first. Use `git log` to identify this record's SHA (it is
+self-referential and therefore not listed here), then revert it, `a11bc01`, and
+known predecessor `c7207c3` (`docs: refresh Phase 5 acceptance evidence`). To roll
+back the whole Phase 5 implementation, then revert these commits
 in order: `f1d54bc`, `d891d2b`, `5314c1c`, `49a089c`, `196978d`, `16e2add`, `06f8673`,
 `933cc12`, `c54982d`, `e7877fb`, `3dc4a59`. Do not force-push, rewrite history,
 or delete media/data. The rollback requires no data conversion.
