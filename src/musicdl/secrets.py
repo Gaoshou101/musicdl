@@ -3,7 +3,7 @@ from typing import Any
 
 from pydantic import SecretBytes, SecretStr
 
-_SENSITIVE = ("password", "secret", "token", "api_key", "api_hash", "authorization", "session")
+_SENSITIVE = ("password", "secret", "token", "api_key", "api_hash", "aes_key", "private_key", "authorization", "session")
 _MASK = "[REDACTED_SECRET]"
 
 

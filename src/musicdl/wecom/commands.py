@@ -23,18 +23,19 @@ def parse_command(text: str, *, max_length: int = 512) -> ParsedCommand:
     value = text.strip()
     if not value or len(value) > max_length:
         raise ValueError("command is empty or too long")
-    if value in {"/c", "/cancel"}:
+    lower_value = value.lower()
+    if lower_value in {"/c", "/cancel"}:
         return ParsedCommand(CommandKind.CANCEL)
-    if value == "n":
+    if lower_value == "n":
         return ParsedCommand(CommandKind.NEXT)
-    if value == "p":
+    if lower_value == "p":
         return ParsedCommand(CommandKind.PREVIOUS)
     if value.isdecimal():
         index = int(value)
         return ParsedCommand(CommandKind.SELECT, index) if 1 <= index <= 100 else ParsedCommand(CommandKind.SEARCH, value)
-    if value == "/search":
+    if lower_value == "/search":
         raise ValueError("search query is empty")
-    if value.startswith("/search "):
+    if lower_value.startswith("/search "):
         query = value[8:].strip()
         if not query:
             raise ValueError("search query is empty")

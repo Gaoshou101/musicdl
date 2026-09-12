@@ -60,3 +60,11 @@ def test_format_results_keeps_multiple_medium_candidates_with_continuous_numbers
     assert len(text.encode("utf-8")) <= 2048
     assert len(text.splitlines()) >= 2
     assert [line.split(". ", 1)[0] for line in text.splitlines()] == [str(i) for i in range(1, len(text.splitlines()) + 1)]
+
+def test_format_results_avoids_single_character_fragment_for_subsequent_candidates():
+    c1 = Candidate(source_id="netease", source_version="1.0", item_id="1", title="First Song Long Title " * 2, artist="Artist Name " * 2, size=1024)
+    c2 = Candidate(source_id="netease", source_version="1.0", item_id="2", title="Second Song Long Title " * 2, artist="Artist Name " * 2, size=1024)
+    c1_bytes = len(format_results([c1], max_bytes=2048).encode("utf-8"))
+    text = format_results([c1, c2], max_bytes=c1_bytes + 20)
+    assert len(text.splitlines()) == 1
+    assert "First Song" in text

@@ -146,3 +146,11 @@ def test_source_result_boundaries_and_max_results_argument():
         assert result.statuses[0].status == "invalid"
     with pytest.raises(ValueError, match="invalid_max_results_per_source"):
         asyncio.run(search_sources(SourceRegistry(), "x", max_results_per_source=0))
+
+def test_artist_title_query_relevance_outranks_compilation():
+    c_exact = Candidate(source_id="a", source_version="1", item_id="1", title="晴天", artist="周杰伦")
+    c_compilation = Candidate(source_id="a", source_version="1", item_id="2", title="周杰伦 晴天演唱会版", artist="群星")
+    async def source(query):
+        return [c_compilation, c_exact]
+    result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "周杰伦 晴天"))
+    assert [c.item_id for c in result.candidates] == ["1", "2"]

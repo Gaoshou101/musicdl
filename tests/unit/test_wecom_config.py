@@ -67,3 +67,13 @@ def test_enabled_normalizes_and_deduplicates_allowlist(monkeypatch):
     settings = AppSettings().wecom
     assert settings.corp_id == "ww-test"
     assert settings.allowed_users == ["alice"]
+
+def test_enabled_accepts_comma_separated_allowlist_string(monkeypatch):
+    monkeypatch.setenv("MUSICDL_WECOM__ENABLED", "true")
+    monkeypatch.setenv("MUSICDL_WECOM__CORP_ID", "ww-test")
+    monkeypatch.setenv("MUSICDL_WECOM__AGENT_ID", "7")
+    monkeypatch.setenv("MUSICDL_WECOM__TOKEN", "token")
+    monkeypatch.setenv("MUSICDL_WECOM__ENCODING_AES_KEY", "a" * 43)
+    monkeypatch.setenv("MUSICDL_WECOM__ALLOWED_USERS", "alice, bob, charlie")
+    settings = AppSettings().wecom
+    assert settings.allowed_users == ["alice", "bob", "charlie"]

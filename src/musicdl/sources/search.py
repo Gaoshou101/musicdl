@@ -79,10 +79,17 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     retained = [(v[0], v[1]) for v in by_identity.values()]
     def ordering(pair):
         c, entry = pair
-        title, combined = c.title.casefold(), f"{c.title} {c.artist}".casefold()
-        relevance = 0 if title == q or combined == q else 1 if q in combined else 2
+        title, artist = c.title.casefold(), c.artist.casefold()
+        combined = f"{title} {artist}"
+        reversed_combined = f"{artist} {title}"
+        if title == q or combined == q or reversed_combined == q:
+            relevance = 0
+        elif q in combined or q in reversed_combined:
+            relevance = 1
+        else:
+            relevance = 2
         quality = quality_key(c, entry.priority)
-        return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], entry.priority, title, c.artist.casefold(), c.source_id.casefold(), c.item_id.casefold())
+        return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], entry.priority, title, artist, c.source_id.casefold(), c.item_id.casefold())
     ordered = tuple(c for c, _ in sorted(retained, key=ordering))
     public = [c.public_representation for c in ordered]
     digest = hashlib.sha256(json.dumps(public, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

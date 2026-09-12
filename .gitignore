@@ -16,3 +16,4 @@ build/
 data/
 music/
 plugins/uploads/
+.worktrees/

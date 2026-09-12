@@ -45,8 +45,10 @@ class ArtifactResult(BaseModel):
     @field_validator("relative_path")
     @classmethod
     def relative_path_must_be_safe(cls, value: str):
+        if not value or not value.strip():
+            raise ValueError("artifact path must not be empty")
         normalized = value.replace("\\", "/")
-        if not value or normalized.startswith("/") or posixpath.isabs(normalized) or ntpath.splitdrive(value)[0]:
+        if normalized.startswith("/") or posixpath.isabs(normalized) or ntpath.splitdrive(value)[0]:
             raise ValueError("artifact path must be relative")
         parts = normalized.split("/")
         if any(part in ("", ".", "..") for part in parts):

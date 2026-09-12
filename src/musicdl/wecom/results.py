@@ -39,9 +39,10 @@ def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_
             return f"{index + 1}. {title} - {artist}（{source_id}@{version}；格式 {file_format}；大小 {_size(c.size)}）"
 
         # Keep every required field non-empty, shortening the largest value safely.
+        min_len = 3 if lines else 1
         while len(("\n".join(lines + [required()])).encode("utf-8")) > max_bytes:
             values = [("title", title), ("artist", artist), ("source_id", source_id), ("version", version), ("format", file_format)]
-            candidates_to_trim = [(name, value) for name, value in values if len(value) > 1]
+            candidates_to_trim = [(name, value) for name, value in values if len(value) > min_len]
             if not candidates_to_trim:
                 break
             name, value = max(candidates_to_trim, key=lambda item: len(item[1].encode("utf-8")))
@@ -52,6 +53,8 @@ def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_
             elif name == "version": version = trimmed
             else: file_format = trimmed
         line = required()
+        if len(("\n".join(lines + [line])).encode("utf-8")) > max_bytes:
+            break
         optional = [("专辑", c.album), ("时长", _duration(c.duration)), ("码率", f"{c.bitrate} kbps" if c.bitrate is not None else None)]
         for label, value in optional:
             if value is None:
@@ -59,7 +62,5 @@ def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_
             candidate_line = f"{line[:-1]}；{label} {value}）"
             if len(("\n".join(lines + [candidate_line])).encode("utf-8")) <= max_bytes:
                 line = candidate_line
-        if len(("\n".join(lines + [line])).encode("utf-8")) > max_bytes:
-            break
         lines.append(line)
     return "\n".join(lines)

@@ -17,6 +17,8 @@ class SelectionRejected(ValueError):
 
 class RedisClient(Protocol):
     async def eval(self, script: str, numkeys: int, *args: Any) -> Any: ...
+    async def get(self, key: str) -> Any: ...
+    async def ping(self) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,19 @@ class RedisStateStore:
         except Exception as exc:
             raise StateUnavailable() from exc
 
+    async def ping(self) -> bool:
+        try:
+            return bool(await self.client.ping())
+        except Exception as exc:
+            raise StateUnavailable() from exc
+
+    async def lookup_message(self, corp_id: str, request_id: str) -> bool:
+        key = f"{self.namespace}:dedup:message:{corp_id}:{request_id}"
+        try:
+            return bool(await self.client.get(key))
+        except Exception as exc:
+            raise StateUnavailable() from exc
+
     async def enqueue_message(self, corp_id: str, from_user: str, request_id: str, payload: dict[str, Any], ttl: int = 86400) -> EnqueueResult:
         key = f"{self.namespace}:dedup:message:{corp_id}:{request_id}"
         encoded = json.dumps({"corp_id": corp_id, "from_user": from_user, "request_id": request_id, "payload": payload}, ensure_ascii=False, separators=(",", ":"))
@@ -96,3 +111,38 @@ class RedisStateStore:
         if _string(result[0]) == "2":
             raise SelectionRejected()
         return JobResult(_string(result[1]), _string(result[0]) == "1")
+
+    async def bind_user_selection(self, token: str, context: SelectionContext, ttl: int = 600) -> None:
+        key = f"{self.namespace}:user-selection:{context.corp_id}:{context.from_user}"
+        encoded = json.dumps({
+            "token": token,
+            "request_id": context.request_id,
+            "version": context.candidate_set_version,
+            "candidates": {str(k): v for k, v in context.candidates.items()},
+        }, separators=(",", ":"))
+        await self._eval("redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2]); return 1", [key], encoded, ttl)
+
+    async def get_user_selection(self, corp_id: str, from_user: str) -> tuple[str, SelectionContext] | None:
+        key = f"{self.namespace}:user-selection:{corp_id}:{from_user}"
+        try:
+            raw = await self.client.get(key)
+        except Exception as exc:
+            raise StateUnavailable() from exc
+        if not raw:
+            return None
+        try:
+            data = json.loads(_string(raw))
+            ctx = SelectionContext(
+                corp_id=corp_id,
+                from_user=from_user,
+                request_id=data["request_id"],
+                candidate_set_version=data["version"],
+                candidates={int(k): v for k, v in data["candidates"].items()},
+            )
+            return data["token"], ctx
+        except Exception as exc:
+            raise StateUnavailable() from exc
+
+    async def clear_user_selection(self, corp_id: str, from_user: str) -> None:
+        key = f"{self.namespace}:user-selection:{corp_id}:{from_user}"
+        await self._eval("redis.call('DEL', KEYS[1]); return 1", [key])

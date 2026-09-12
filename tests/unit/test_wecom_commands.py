@@ -13,6 +13,10 @@ from musicdl.wecom.commands import CommandKind, parse_command
         ("7", CommandKind.SELECT, 7),
         ("hello world", CommandKind.SEARCH, "hello world"),
         ("/search 周杰伦", CommandKind.SEARCH, "周杰伦"),
+        ("N", CommandKind.NEXT, None),
+        ("P", CommandKind.PREVIOUS, None),
+        ("/CANCEL", CommandKind.CANCEL, None),
+        ("/SEARCH 晴天", CommandKind.SEARCH, "晴天"),
     ],
 )
 def test_parse_command_normalizes_supported_commands(text, kind, value):

@@ -23,3 +23,8 @@ def test_redact_secrets_masks_secretstr_and_sensitive_key_names_case_insensitive
     result = redact_secrets({"PASSWORD": SecretStr("pw"), "value": SecretStr("visible")})
     assert result["PASSWORD"] == "[REDACTED_SECRET]"
     assert result["value"] == "[REDACTED_SECRET]"
+
+def test_redact_secrets_masks_aes_key_and_private_key_names():
+    result = redact_secrets({"encoding_aes_key": "raw_aes", "rsa_private_key": "raw_pk"})
+    assert result["encoding_aes_key"] == "[REDACTED_SECRET]"
+    assert result["rsa_private_key"] == "[REDACTED_SECRET]"

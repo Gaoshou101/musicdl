@@ -18,6 +18,8 @@ class ConfigVersion(BaseModel):
 class RedisSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: SecretStr = SecretStr("redis://localhost:6379/0")
+    connect_timeout: float = Field(default=2.0, gt=0, le=30)
+    operation_timeout: float = Field(default=2.0, gt=0, le=30)
 
     @field_validator("url")
     @classmethod
@@ -59,11 +61,26 @@ class WeComSettings(BaseModel):
     agent_id: int | None = Field(default=None, gt=0)
     token: SecretStr | None = None
     encoding_aes_key: SecretStr | None = None
-    allowed_users: list[str] = Field(default_factory=list)
+    allowed_users: list[str] | str = Field(default_factory=list)
     clock_skew: int = Field(default=300, ge=1, le=3600)
     dedup_ttl: int = Field(default=86400, ge=60, le=604800)
     selection_ttl: int = Field(default=600, ge=60, le=86400)
 
+    @field_validator("allowed_users", mode="after")
+    @classmethod
+    def parse_allowed_users(cls, value: list[str] | str) -> list[str]:
+        if isinstance(value, str):
+            v = value.strip()
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    import json
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return [str(p) for p in parsed]
+                except Exception:
+                    pass
+            return [part.strip() for part in v.split(",") if part.strip()]
+        return value
     @model_validator(mode="after")
     def enabled_requires_credentials(self):
         if self.corp_id is not None:

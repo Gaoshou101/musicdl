@@ -14,6 +14,7 @@ def test_signature_is_sorted_sha1_and_tampering_rejected():
     signature = compute_signature(TOKEN, "1700000000", "nonce", "cipher")
     assert signature == "8c6f84ef413f28c2cc9d769d230086a1a493b47c"  # self cross-vector
     verify_signature(TOKEN, "1700000000", "nonce", "cipher", signature)
+    verify_signature(TOKEN, "1700000000", "nonce", "cipher", signature.upper())
     with pytest.raises(WeComCryptoError) as exc:
         verify_signature(TOKEN, "1700000000", "nonce", "cipher", "0" * 40)
     assert exc.value.code == "invalid_signature"

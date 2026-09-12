@@ -26,6 +26,8 @@
 
 ## Phase 2 — Source abstraction and deterministic search
 
+**Status:** Completed on 2026-09-12; locally verified with controlled concurrent source adapters and UTF-8-bounded WeCom result formatting. Live provider adapters remain deferred to their owning phases.
+
 **Goal:** 建立统一候选模型、来源注册表、并发搜索、去重、确定性排序和文件大小展示。
 
 **Dependencies:** Phase 1；来源协议夹具。

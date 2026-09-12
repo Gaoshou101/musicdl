@@ -18,7 +18,7 @@ def compute_signature(token: str, timestamp: str, nonce: str, encrypted: str) ->
 
 
 def verify_signature(token: str, timestamp: str, nonce: str, encrypted: str, signature: str) -> None:
-    if not hmac.compare_digest(compute_signature(token, timestamp, nonce, encrypted), signature):
+    if not hmac.compare_digest(compute_signature(token, timestamp, nonce, encrypted), signature.lower()):
         raise WeComCryptoError("invalid_signature")
 
 

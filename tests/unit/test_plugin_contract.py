@@ -61,7 +61,7 @@ def test_plugin_contract_bounds_timeout_and_payload_size():
 
 
 def test_plugin_artifact_result_rejects_absolute_and_traversal_paths():
-    for path in ("../secret.mp3", "..\\secret.mp3", "/tmp/out.mp3", "C:\\temp\\out.mp3", "artifacts//song.mp3"):
+    for path in ("../secret.mp3", "..\\secret.mp3", "/tmp/out.mp3", "C:\\temp\\out.mp3", "artifacts//song.mp3", "", "   "):
         with pytest.raises(ValidationError):
             ArtifactResult(relative_path=path, sha256="a" * 64, size_bytes=1)
 
