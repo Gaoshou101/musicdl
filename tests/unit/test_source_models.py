@@ -18,3 +18,8 @@ def test_candidate_bounds_and_required_fields():
         Candidate(source_id="", source_version="1", item_id="1", title="x", artist="y")
     with pytest.raises(ValidationError):
         Candidate(source_id="a", source_version="1", item_id="1", title="x" * 501, artist="y")
+
+def test_optional_blank_values_are_none_and_enabled_types_are_strict():
+    c = Candidate(source_id="a", source_version="1", item_id="1", title="x", artist="y", album="  ", format="\t")
+    assert c.album is None and c.format is None
+    assert c.canonical_version_key == ("x", "y", "", None, "", None)

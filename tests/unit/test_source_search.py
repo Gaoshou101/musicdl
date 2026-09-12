@@ -38,7 +38,7 @@ def test_dedup_sort_and_version_are_completion_order_independent():
     registry = SourceRegistry([SourceEntry("a", "1", one, priority=2), SourceEntry("b", "1", two, priority=1)])
     first = asyncio.run(search_sources(registry, "q"))
     second = asyncio.run(search_sources(registry, "q"))
-    assert [(c.source_id, c.item_id) for c in first.candidates] == [("a", "1"), ("b", "1"), ("a", "2")]
+    assert [(c.source_id, c.item_id) for c in first.candidates] == [("b", "1"), ("a", "1"), ("a", "2")]
     assert first.version == second.version
 
 
@@ -121,3 +121,22 @@ def test_normalized_query_exact_match_and_material_digest_change():
     second = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", changed)]), "a song"))
     assert [c.title for c in first.candidates] == ["A song", "0 track"]
     assert first.version != second.version
+
+def test_quality_sort_is_explainable_and_not_title_lexical_order():
+    async def source(query):
+        return [Candidate(source_id="a", source_version="1", item_id="lossy", title="A", artist="Artist", format="mp3", bitrate=64), Candidate(source_id="a", source_version="1", item_id="lossless", title="Z", artist="Artist", format="flac", bitrate=1411)]
+    result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "artist"))
+    assert [c.item_id for c in result.candidates] == ["lossless", "lossy"]
+
+def test_source_result_boundaries_and_max_results_argument():
+    async def generator(query):
+        yield candidate("a", "1")
+    async def too_many(query):
+        return [candidate("a", str(i)) for i in range(101)]
+    async def non_sequence(query):
+        return "bad"
+    for fn in (generator, too_many, non_sequence):
+        result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", fn)]), "x"))
+        assert result.statuses[0].status == "invalid"
+    with pytest.raises(ValueError, match="invalid_max_results_per_source"):
+        asyncio.run(search_sources(SourceRegistry(), "x", max_results_per_source=0))

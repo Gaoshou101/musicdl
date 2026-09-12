@@ -29,7 +29,10 @@ class Candidate(BaseModel):
     @field_validator("source_id", "source_version", "item_id", "title", "artist", "album", "format", mode="before")
     @classmethod
     def clean_text(cls, value: Any) -> Any:
-        return None if value is None else normalize_text(str(value))
+        if value is None:
+            return None
+        cleaned = normalize_text(str(value))
+        return cleaned or None
 
     @property
     def canonical_version_key(self) -> tuple:

@@ -25,8 +25,11 @@ class SourceEntry:
 
 
 class SourceRegistry:
-    def __init__(self, entries: Iterable[SourceEntry] = ()):
+    def __init__(self, entries: Iterable[SourceEntry] = (), *, max_sources: int = 64):
+        if not isinstance(max_sources, int) or isinstance(max_sources, bool) or not 1 <= max_sources <= 256:
+            raise ValueError("invalid_max_sources")
         self._entries: dict[str, SourceEntry] = {}
+        self._max_sources = max_sources
         for entry in entries:
             self.register(entry)
 
@@ -43,8 +46,12 @@ class SourceRegistry:
             raise ValueError("invalid_source_version")
         if not adapter_ok:
             raise ValueError("invalid_adapter")
+        if not isinstance(entry.enabled, bool):
+            raise ValueError("invalid_enabled")
         if not isinstance(entry.priority, int) or isinstance(entry.priority, bool):
             raise ValueError("invalid_priority")
+        if len(self._entries) >= self._max_sources:
+            raise ValueError("too_many_sources")
         self._entries[source_id] = SourceEntry(source_id, version, entry.source, entry.enabled, entry.priority)
 
     def enabled(self) -> tuple[SourceEntry, ...]:

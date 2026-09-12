@@ -22,3 +22,9 @@ def test_registry_rejects_invalid_identity_and_adapter():
     with pytest.raises(ValueError): SourceRegistry([SourceEntry("a", " ", Source())])
     with pytest.raises(ValueError): SourceRegistry([SourceEntry("a", "1", object())])
     with pytest.raises(ValueError, match="invalid_source_id"): SourceRegistry([SourceEntry(1, "1", Source())])
+
+def test_registry_rejects_non_boolean_enabled_and_caps_sources():
+    with pytest.raises(ValueError, match="invalid_enabled"):
+        SourceRegistry([SourceEntry("a", "1", Source(), enabled="false")])
+    with pytest.raises(ValueError, match="too_many_sources"):
+        SourceRegistry([SourceEntry(str(i), "1", Source()) for i in range(3)], max_sources=2)
