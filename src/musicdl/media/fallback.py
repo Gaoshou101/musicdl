@@ -65,7 +65,7 @@ async def download_with_fallback(
                              "health", "unavailable", error_code="source_unavailable", healthy=None))
     else:
         try:
-            healthy = await source.health()
+            healthy = await asyncio.wait_for(source.health(), timeout=10.0)
             emit_event(record, DownloadEvent(request_id, candidate.item_id, failed_source, candidate.source_version,
                                  "health", "success", healthy=healthy))
         except asyncio.CancelledError:
