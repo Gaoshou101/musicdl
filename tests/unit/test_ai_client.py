@@ -53,6 +53,31 @@ async def test_client_sends_bounded_openai_compatible_request():
     assert "phase5-secret" not in request.content.decode()
 
 
+@run_sync
+async def test_standard_openai_response_with_metadata_is_accepted():
+    async def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-example",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "phase5-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"language":"华语"}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    client = OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler))
+    assert await client.complete_json([]) == {"language": "华语"}
+
+
 @pytest.mark.parametrize("exc", [httpx.ReadTimeout("phase5-secret"), httpx.ConnectError("phase5-secret")])
 @run_sync
 async def test_transport_errors_are_stable_and_redacted(exc):
@@ -116,6 +141,27 @@ async def test_response_content_is_bounded():
     assert caught.value.code == "invalid_response"
 
 
+@pytest.mark.parametrize(("length", "expected"), [(16_384, True), (16_385, False)])
+@run_sync
+async def test_response_content_exact_character_limit(length, expected):
+    prefix = '{"x":"'
+    suffix = '"}'
+
+    async def handler(request):
+        content = prefix + ("a" * (length - len(prefix) - len(suffix))) + suffix
+        assert len(content) == length
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    client = OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler))
+    if not expected:
+        with pytest.raises(AIError) as caught:
+            await client.complete_json([])
+        assert caught.value.code == "invalid_response"
+    else:
+        result = await client.complete_json([])
+        assert len(result["x"]) == length - len(prefix) - len(suffix)
+
+
 @run_sync
 async def test_outer_response_body_is_bounded():
     async def handler(request):
@@ -124,6 +170,30 @@ async def test_outer_response_body_is_bounded():
     with pytest.raises(AIError) as caught:
         await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])
     assert caught.value.code == "invalid_response"
+
+
+@pytest.mark.parametrize("target_size", [65_536, 65_537])
+@run_sync
+async def test_outer_response_exact_byte_limit_in_chunks(target_size):
+    base = b'{"choices":[{"message":{"content":"{}"}}]}'
+    body = base + (b" " * (target_size - len(base)))
+    assert len(body) == target_size
+
+    class ChunkedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for offset in range(0, len(body), 7):
+                yield body[offset : offset + 7]
+
+    async def handler(request):
+        return httpx.Response(200, stream=ChunkedStream())
+
+    client = OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler))
+    if target_size == 65_537:
+        with pytest.raises(AIError) as caught:
+            await client.complete_json([])
+        assert caught.value.code == "invalid_response"
+    else:
+        assert await client.complete_json([]) == {}
 
 
 @run_sync

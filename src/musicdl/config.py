@@ -114,7 +114,7 @@ class AISettings(BaseModel):
     api_key: SecretStr | None = None
     model: str | None = Field(default=None, max_length=200)
     timeout: float = Field(default=10.0, gt=0, le=60)
-    max_candidates: StrictInt = Field(default=20, ge=1, le=100)
+    max_candidates: int = Field(default=20, ge=1, le=100)
 
     @field_validator("base_url")
     @classmethod
@@ -128,6 +128,13 @@ class AISettings(BaseModel):
     def timeout_must_be_finite(cls, value: float):
         if not math.isfinite(value):
             raise ValueError("AI timeout must be finite")
+        return value
+
+    @field_validator("max_candidates", mode="before")
+    @classmethod
+    def max_candidates_must_not_be_boolean(cls, value: object):
+        if isinstance(value, bool):
+            raise ValueError("AI max candidates must be an integer")
         return value
 
     @model_validator(mode="after")

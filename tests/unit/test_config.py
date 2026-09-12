@@ -134,3 +134,14 @@ def test_ai_rejects_invalid_max_candidates(monkeypatch, max_candidates):
 def test_ai_rejects_boolean_max_candidates_directly():
     with pytest.raises(ValidationError):
         AISettings(max_candidates=True)
+
+
+def test_ai_accepts_numeric_max_candidates_environment_string(monkeypatch):
+    monkeypatch.setenv("MUSICDL_AI__ENABLED", "true")
+    monkeypatch.setenv("MUSICDL_AI__API_KEY", "phase5-secret")
+    monkeypatch.setenv("MUSICDL_AI__MODEL", "phase5-model")
+    monkeypatch.setenv("MUSICDL_AI__MAX_CANDIDATES", "12")
+
+    settings = AppSettings().ai
+
+    assert settings.max_candidates == 12

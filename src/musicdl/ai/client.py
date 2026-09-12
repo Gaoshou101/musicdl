@@ -57,9 +57,11 @@ class OpenAICompatibleClient:
             choices = outer["choices"]
             if not isinstance(choices, list) or len(choices) != 1:
                 raise ValueError
-            if not isinstance(choices[0], dict) or set(choices[0]) != {"message"}:
+            if not isinstance(choices[0], dict):
                 raise ValueError
-            if not isinstance(choices[0]["message"], dict) or set(choices[0]["message"]) != {"content"}:
+            if "message" not in choices[0] or not isinstance(choices[0]["message"], dict):
+                raise ValueError
+            if "content" not in choices[0]["message"]:
                 raise ValueError
             content = choices[0]["message"]["content"]
             if not isinstance(content, str) or len(content) > MAX_AI_CONTENT_CHARS:
