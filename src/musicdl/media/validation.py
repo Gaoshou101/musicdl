@@ -11,8 +11,8 @@ _RESERVED: Final[frozenset[str]] = frozenset({"CON", "PRN", "AUX", "NUL", *(f"CO
 _EXTENSIONS: Final[dict[str, tuple[str, frozenset[str]]]] = {
     ".mp3": ("audio/mpeg", frozenset({"mp3"})),
     ".flac": ("audio/flac", frozenset({"flac"})),
-    ".m4a": ("audio/mp4", frozenset({"m4a", "m4b", "mp4"})),
-    ".ogg": ("audio/ogg", frozenset({"ogg", "oga"})),
+    ".m4a": ("audio/mp4", frozenset({"m4a"})),
+    ".ogg": ("audio/ogg", frozenset({"ogg"})),
 }
 
 
@@ -48,7 +48,7 @@ def validated_destination(root: str | Path, language: str | None, artist: str, t
         raise MediaError("unsupported_extension")
     target = root_path / lang / artist_name / f"{title_name} - {artist_name}{ext}"
     try:
-        target.relative_to(root_path)
+        target.resolve(strict=False).relative_to(root_path)
     except ValueError as exc:
         raise MediaError("path_escape") from exc
     return target
@@ -59,7 +59,7 @@ def _detected(header: bytes) -> tuple[str, str] | None:
         return ".mp3", "audio/mpeg"
     if header.startswith(b"fLaC"):
         return ".flac", "audio/flac"
-    if len(header) >= 12 and header[4:8] == b"ftyp" and header[8:12] in {b"M4A ", b"M4B ", b"mp41", b"mp42", b"isom", b"iso2"}:
+    if len(header) >= 12 and header[4:8] == b"ftyp" and header[8:12] == b"M4A ":
         return ".m4a", "audio/mp4"
     if header.startswith(b"OggS"):
         return ".ogg", "audio/ogg"
@@ -86,6 +86,10 @@ def validate_media(header: bytes, metadata: DownloadMetadata, candidate_format: 
             accepted.add("application/ogg")
         if metadata.media_type.lower() not in accepted:
             raise MediaError("mime_mismatch")
-    if candidate_format and candidate_format.lstrip(".").lower() not in _EXTENSIONS[extension][1]:
-        raise MediaError("extension_mismatch")
+    if candidate_format:
+        candidate_ext = "." + candidate_format.lstrip(".").lower()
+        if candidate_ext not in _EXTENSIONS:
+            raise MediaError("unsupported_extension")
+        if candidate_ext != extension:
+            raise MediaError("extension_mismatch")
     return extension, media_type
