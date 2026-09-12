@@ -2,9 +2,10 @@ import posixpath
 from urllib.parse import urlsplit
 import base64
 import binascii
+import math
 import re
 
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import AnyHttpUrl, AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _TELEGRAM_PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -109,6 +110,40 @@ class PluginSettings(BaseModel):
         return value
 
 
+class AISettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    base_url: AnyHttpUrl = AnyHttpUrl("https://api.openai.com/v1")
+    api_key: SecretStr | None = None
+    model: str | None = Field(default=None, max_length=200)
+    timeout: float = Field(default=10.0, gt=0, le=60)
+    max_candidates: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("base_url")
+    @classmethod
+    def base_url_must_use_http_scheme(cls, value: AnyHttpUrl):
+        if value.scheme not in {"http", "https"}:
+            raise ValueError("AI base URL must use http:// or https://")
+        return value
+
+    @field_validator("timeout")
+    @classmethod
+    def timeout_must_be_finite(cls, value: float):
+        if not math.isfinite(value):
+            raise ValueError("AI timeout must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def enabled_requires_credentials(self):
+        if self.api_key is not None:
+            self.api_key = SecretStr(self.api_key.get_secret_value().strip())
+        if self.model is not None:
+            self.model = self.model.strip() or None
+        if self.enabled and (self.api_key is None or not self.api_key.get_secret_value() or not self.model):
+            raise ValueError("enabled AI settings require credentials")
+        return self
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MUSICDL_", env_nested_delimiter="__", extra="ignore"
@@ -119,6 +154,7 @@ class AppSettings(BaseSettings):
     telegram: TelegramSettings = TelegramSettings()
     wecom: WeComSettings = WeComSettings()
     plugin: PluginSettings = PluginSettings()
+    ai: AISettings = AISettings()
 
     @model_validator(mode="after")
     def roots_must_differ(self):
