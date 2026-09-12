@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from musicdl.config import AppSettings
+from musicdl.config import AISettings, AppSettings
 
 
 def test_settings_map_prefixed_nested_environment(monkeypatch):
@@ -129,3 +129,8 @@ def test_ai_rejects_invalid_max_candidates(monkeypatch, max_candidates):
     monkeypatch.setenv("MUSICDL_AI__MAX_CANDIDATES", max_candidates)
     with pytest.raises(ValidationError):
         AppSettings()
+
+
+def test_ai_rejects_boolean_max_candidates_directly():
+    with pytest.raises(ValidationError):
+        AISettings(max_candidates=True)

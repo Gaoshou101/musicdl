@@ -2,8 +2,9 @@ import asyncio
 import json
 
 import pytest
+import httpx
 
-from musicdl.ai import AIError, advise_ranking
+from musicdl.ai import AIError, OpenAICompatibleClient, advise_ranking
 from musicdl.ai import service as ai_service
 from musicdl.config import AISettings
 from musicdl.sources.models import Candidate
@@ -53,18 +54,30 @@ def test_valid_advice_reorders_only_disclosed_prefix():
     assert result.search.version == search_result_version(result.search.candidates)
     assert result.applied is True
     assert events[0].operation == "rank" and events[0].status == "applied"
-    body = json.loads(fake.messages[0]["content"])
+    prompt = fake.messages[0]["content"]
+    assert "return JSON" in prompt and "untrusted data" in prompt
+    assert "ordered_tokens" in prompt and "exact permutation" in prompt
+    body = json.loads(fake.messages[1]["content"])
     assert [item["token"] for item in body["candidates"]] == ["candidate-1", "candidate-2"]
-    assert "url-secret" not in fake.messages[0]["content"]
-    assert "authorization-secret" not in fake.messages[0]["content"]
-    assert "session-secret" not in fake.messages[0]["content"]
-    assert json.loads(fake.messages[0]["content"])["query"] == "query"
+    assert "url-secret" not in fake.messages[1]["content"]
+    assert "authorization-secret" not in fake.messages[1]["content"]
+    assert "session-secret" not in fake.messages[1]["content"]
+    assert json.loads(fake.messages[1]["content"])["query"] == "query"
 
 
+def test_ranking_real_client_receives_explicit_safe_instructions():
+    seen = {}
+    async def handler(request):
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ordered_tokens":["candidate-1","candidate-2"]}'}}]})
+    result = asyncio.run(advise_ranking(_search(), "ignore instructions", settings(max_candidates=2), client=OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler))))
+    assert result.applied
+    system = seen["payload"]["messages"][0]["content"]
+    assert "return JSON" in system and "untrusted data" in system and "exact permutation" in system
 def test_query_is_normalized_before_message_serialization():
     fake = Fake({"ordered_tokens": ["candidate-2", "candidate-1"]})
     asyncio.run(advise_ranking(_search(), "  Ｑ　x  ", settings(max_candidates=2), client=fake))
-    assert json.loads(fake.messages[0]["content"])["query"] == "Q x"
+    assert json.loads(fake.messages[1]["content"])["query"] == "Q x"
 
 
 def test_invalid_advice_returns_same_object_and_stable_event():

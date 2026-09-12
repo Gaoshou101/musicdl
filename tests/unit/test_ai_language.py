@@ -1,8 +1,9 @@
 import asyncio
 import json
 import pytest
+import httpx
 
-from musicdl.ai import AIError, advise_language
+from musicdl.ai import AIError, OpenAICompatibleClient, advise_language
 from musicdl.config import AISettings
 from musicdl.sources.models import Candidate
 
@@ -33,10 +34,26 @@ def test_valid_language_advice_is_applied():
     assert result.language == "日韩"
     assert result.applied is True
     assert len(events) == 1 and events[0].operation == "language" and events[0].status == "applied"
-    body = json.loads(fake.messages[0]["content"])
+    body = json.loads(fake.messages[1]["content"])
     assert body == {"title": "Title", "artist": "Artist", "album": "Album"}
-    assert "source-secret" not in fake.messages[0]["content"]
-    assert "item-secret" not in fake.messages[0]["content"]
+    assert "source-secret" not in fake.messages[1]["content"]
+    assert "item-secret" not in fake.messages[1]["content"]
+    assert "return JSON" in fake.messages[0]["content"]
+    assert "untrusted data" in fake.messages[0]["content"]
+    assert "华语" in fake.messages[0]["content"] and "未知" in fake.messages[0]["content"]
+
+
+def test_language_real_client_receives_explicit_safe_instructions():
+    seen = {}
+    async def handler(request):
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"language":"日韩"}'}}]})
+    settings = AISettings(enabled=True, api_key="secret", model="model", base_url="https://provider.example/v1")
+    result = asyncio.run(advise_language(_candidate(), "欧美", settings, client=OpenAICompatibleClient(settings, transport=httpx.MockTransport(handler))))
+    assert result.applied
+    system = seen["payload"]["messages"][0]["content"]
+    assert "return JSON" in system and "untrusted data" in system
+    assert all(choice in system for choice in ("华语", "欧美", "日韩", "未知"))
 
 
 @pytest.mark.parametrize("fallback, expected", [("欧美", "欧美"), ("未知", "未知"), ("invalid", "未知"), (None, "未知")])

@@ -5,7 +5,7 @@ import binascii
 import math
 import re
 
-from pydantic import AnyHttpUrl, AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import AnyHttpUrl, AnyUrl, BaseModel, ConfigDict, Field, SecretStr, StrictInt, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _TELEGRAM_PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -114,7 +114,7 @@ class AISettings(BaseModel):
     api_key: SecretStr | None = None
     model: str | None = Field(default=None, max_length=200)
     timeout: float = Field(default=10.0, gt=0, le=60)
-    max_candidates: int = Field(default=20, ge=1, le=100)
+    max_candidates: StrictInt = Field(default=20, ge=1, le=100)
 
     @field_validator("base_url")
     @classmethod
