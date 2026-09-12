@@ -1,0 +1,1 @@
+"""Versioned internal service contracts."""

@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+*.session
+*.session-journal
+*.part
+dist/
+build/
+*.egg-info/
+
+# Runtime data and user-managed media must never enter Git.
+data/
+music/
+plugins/uploads/
