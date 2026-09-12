@@ -39,10 +39,10 @@ Command run from the phase worktree:
 & '..\\..\\.venv\\Scripts\\python.exe' -m pytest -q -W error
 ```
 
-Completed result: exit status `0`; `184 passed, 1 skipped in 1.68s`.
+Completed result: exit status `0`; `184 passed, 1 skipped in 1.71s`.
 
 The one skipped test is `tests/integration/test_wecom_redis.py::test_real_redis_atomic_state_contract`, skipped because `MUSICDL_TEST_REDIS_URL` is not configured. Real provider/network media transfers were not exercised; download tests use injected in-memory sources and temporary filesystems.
 
 ## Rollback
 
-The Phase 4 runtime/test commits are the exact range `98be64c^..b193c55`; if runtime rollback is required, revert those commits in reverse order. Revert the documentation commit `docs: record phase 4 verification` independently once created. Do not delete published media or user files during either rollback.
+The Phase 4 runtime/test commits are the exact range `98be64c^..b193c55`; if runtime rollback is required, revert those commits in reverse order. Revert documentation commit `c3cd96b` (`docs: record phase 4 verification`) independently. Do not delete published media or user files during either rollback.
