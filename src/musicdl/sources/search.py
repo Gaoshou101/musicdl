@@ -31,6 +31,11 @@ class SearchResult:
     version: str
 
 
+def search_result_version(candidates: Sequence[Candidate]) -> str:
+    public = [candidate.public_representation for candidate in candidates]
+    return hashlib.sha256(json.dumps(public, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 async def _invoke(entry: SourceEntry, query: str, timeout: float, max_results: int) -> tuple[SourceStatus, list[Candidate]]:
     try:
         fn = entry.source.search if hasattr(entry.source, "search") else entry.source
@@ -84,9 +89,7 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
         quality = quality_key(c, entry.priority)
         return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], entry.priority, title, c.artist.casefold(), c.source_id.casefold(), c.item_id.casefold())
     ordered = tuple(c for c, _ in sorted(retained, key=ordering))
-    public = [c.public_representation for c in ordered]
-    digest = hashlib.sha256(json.dumps(public, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return SearchResult(ordered, tuple(s for s, _ in outcomes), digest)
+    return SearchResult(ordered, tuple(s for s, _ in outcomes), search_result_version(ordered))
 
 
 def quality_key(candidate: Candidate, priority: int) -> tuple:
