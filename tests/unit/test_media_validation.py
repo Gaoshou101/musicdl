@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+import os
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,41 @@ def test_language_and_path_helpers(tmp_path):
     assert sanitize_component(" ../AUX/song\x00 ") == "_AUX_song"
     path = validated_destination(tmp_path, "华语", "A/B", "../Song", ".mp3")
     assert path.relative_to(tmp_path).parts == ("华语", "A_B", "Song - A_B.mp3")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended-length path behavior")
+def test_extended_length_target_prefix_does_not_trigger_path_escape(tmp_path, monkeypatch):
+    original_resolve = Path.resolve
+    calls = 0
+
+    def resolve_with_extended_target(self, strict=False):
+        nonlocal calls
+        resolved = original_resolve(self, strict=strict)
+        calls += 1
+        if calls == 2:
+            return Path("\\\\?\\" + str(resolved))
+        return resolved
+
+    monkeypatch.setattr(Path, "resolve", resolve_with_extended_target)
+    expected = tmp_path / "华语" / "artist" / "song - artist.mp3"
+    assert validated_destination(tmp_path, "华语", "artist", "song", ".mp3") == expected
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended-length path behavior")
+def test_extended_length_unc_target_prefix_does_not_trigger_path_escape(tmp_path, monkeypatch):
+    original_resolve = Path.resolve
+    calls = 0
+
+    def resolve_with_extended_unc_target(self, strict=False):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return Path(r"\\server\share\root")
+        return Path(r"\\?\UNC\server\share\root\华语\artist\song - artist.mp3")
+
+    monkeypatch.setattr(Path, "resolve", resolve_with_extended_unc_target)
+    expected = Path(r"\\server\share\root") / "华语" / "artist" / "song - artist.mp3"
+    assert validated_destination(tmp_path, "华语", "artist", "song", ".mp3") == expected
 
 
 @pytest.mark.parametrize("header,fmt", [(ID3, "mp3"), (MPEG, "mp3"), (b"fLaC", "flac"), (M4A, "m4a"), (b"OggS\x00", "ogg")])

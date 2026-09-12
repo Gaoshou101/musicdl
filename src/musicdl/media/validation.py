@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Final
@@ -14,6 +15,17 @@ _EXTENSIONS: Final[dict[str, tuple[str, frozenset[str]]]] = {
     ".m4a": ("audio/mp4", frozenset({"m4a"})),
     ".ogg": ("audio/ogg", frozenset({"ogg"})),
 }
+
+
+def _normalize_for_containment(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    value = str(path)
+    if value.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + value[8:])
+    if value.startswith("\\\\?\\"):
+        return Path(value[4:])
+    return path
 
 
 def normalize_language(value: str | None) -> Language:
@@ -48,7 +60,7 @@ def validated_destination(root: str | Path, language: str | None, artist: str, t
         raise MediaError("unsupported_extension")
     target = root_path / lang / artist_name / f"{title_name} - {artist_name}{ext}"
     try:
-        target.resolve(strict=False).relative_to(root_path)
+        _normalize_for_containment(target.resolve(strict=False)).relative_to(_normalize_for_containment(root_path))
     except ValueError as exc:
         raise MediaError("path_escape") from exc
     return target
