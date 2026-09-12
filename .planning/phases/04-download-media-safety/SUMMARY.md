@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation and automated verification complete on 2026-09-12; final Sol branch acceptance and push are pending until the controller finishes.
+Implementation, Sol review, and automated verification accepted on 2026-09-12.
 
 ## Requirements and evidence
 
@@ -15,7 +15,7 @@ Implementation and automated verification complete on 2026-09-12; final Sol bran
 
 ## Changed files
 
-Phase 4 runtime and test commits changed:
+Accepted Phase 4 implementation and test commits changed:
 
 - `src/musicdl/media/__init__.py`
 - `src/musicdl/media/models.py`
@@ -26,7 +26,7 @@ Phase 4 runtime and test commits changed:
 - `tests/unit/test_media_download.py`
 - `tests/unit/test_media_fallback.py`
 
-This final-fix task changes the authorized runtime, tests, design wording, and this summary only.
+The accepted ID3 validation fix is included in the files listed above.
 
 ## Verification
 
@@ -36,10 +36,10 @@ Command run from the phase worktree:
 & '..\\..\\.venv\\Scripts\\python.exe' -m pytest -q -W error
 ```
 
-Completed result: exit status `0`; `214 passed, 1 skipped`.
+Completed result: exit status `0`; `219 passed, 1 skipped`.
 
 The one skipped test is `tests/integration/test_wecom_redis.py::test_real_redis_atomic_state_contract`, skipped because `MUSICDL_TEST_REDIS_URL` is not configured. Real provider/network media transfers were not exercised; download tests use injected in-memory sources and temporary filesystems.
 
 ## Rollback
 
-The Phase 4 runtime/test commits are the exact range `98be64c^..8c50d08`; if runtime rollback is required, revert those commits in reverse order. Revert documentation-only commits `c3cd96b` and `a9521ae` independently. The final summary evidence commit, once created with subject `docs: finalize phase 4 safety verification`, may also be reverted independently. Do not delete published media or user files during rollback.
+The exact overall Phase 4 implementation/history range is `98be64c^..2f99a69`; if implementation rollback is required, revert that range in reverse order. Documentation-only commits may be reverted independently. Revert this summary commit independently if needed; rollback does not delete published media or user files.
