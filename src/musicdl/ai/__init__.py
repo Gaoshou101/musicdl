@@ -6,6 +6,7 @@ from .models import (
     AIRankResult,
     emit_event,
 )
+from .client import MAX_AI_CONTENT_CHARS, OpenAICompatibleClient
 
 __all__ = [
     "AICompletionClient",
@@ -14,4 +15,6 @@ __all__ = [
     "AILanguageResult",
     "AIRankResult",
     "emit_event",
+    "MAX_AI_CONTENT_CHARS",
+    "OpenAICompatibleClient",
 ]
