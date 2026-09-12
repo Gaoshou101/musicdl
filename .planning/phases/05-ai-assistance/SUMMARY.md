@@ -32,6 +32,7 @@ branch, the complete semantic Phase 5 history is:
 | `49a089c` | fix: enforce strict AI language advice |
 | `5314c1c` | fix: harden Phase 5 provider boundaries |
 | `d891d2b` | fix: complete Phase 5 provider remediation |
+| `f1d54bc` | fix: close Phase 5 final fallback gaps |
 
 External commit `3185d82` is not an ancestor of this branch and is explicitly
 excluded from Phase 5 acceptance.
@@ -65,13 +66,11 @@ matrix but was not modified by Phase 5.
 
 ## Verification evidence
 
-Fresh controller evidence on clean branch `codex/phase-5-ai-clean` (`d891d2b`):
+Fresh controller evidence on clean branch `codex/phase-5-ai-clean` (`f1d54bc`):
 
-- Focused matrix (`test_config.py`, `test_ai_models.py`, `test_ai_client.py`,
-  `test_ai_ranking.py`, `test_ai_language.py`, `test_source_search.py`, and
-  `test_media_validation.py`): exit status 0, `143 passed in 1.19s`.
+- Focused config/AI/source/media matrix: exit status 0, `195 passed`.
 - Full suite `python -m pytest -q -W error`: exit status 0,
-  `305 passed, 1 skipped in 2.42s`.
+  `307 passed, 1 skipped`.
 - The one skipped test is the exact Redis integration check; it requires
   `MUSICDL_TEST_REDIS_URL`, which was unset.
 - `python -m pip check`: exit status 0; no broken requirements.
@@ -84,6 +83,6 @@ validation. No Docker/runtime deployment validation is claimed here.
 
 To remove only this acceptance record, revert the summary documentation commit
 first. To roll back the whole Phase 5 implementation, then revert these commits
-in order: `d891d2b`, `5314c1c`, `49a089c`, `196978d`, `16e2add`, `06f8673`,
+in order: `f1d54bc`, `d891d2b`, `5314c1c`, `49a089c`, `196978d`, `16e2add`, `06f8673`,
 `933cc12`, `c54982d`, `e7877fb`, `3dc4a59`. Do not force-push, rewrite history,
 or delete media/data. The rollback requires no data conversion.
