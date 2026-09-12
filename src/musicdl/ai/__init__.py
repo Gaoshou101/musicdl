@@ -7,7 +7,7 @@ from .models import (
     emit_event,
 )
 from .client import MAX_AI_CONTENT_CHARS, OpenAICompatibleClient
-from .service import advise_ranking
+from .service import advise_language, advise_ranking
 
 __all__ = [
     "AICompletionClient",
@@ -19,4 +19,5 @@ __all__ = [
     "MAX_AI_CONTENT_CHARS",
     "OpenAICompatibleClient",
     "advise_ranking",
+    "advise_language",
 ]
