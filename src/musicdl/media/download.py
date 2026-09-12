@@ -4,7 +4,6 @@ import hashlib
 import os
 import tempfile
 import asyncio
-import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -28,6 +27,8 @@ async def download_candidate(
         raise MediaError("invalid_max_bytes")
     root = Path(media_root).resolve(strict=False)
     temp_path: Path | None = None
+    published_target: Path | None = None
+    cleanup_event_emitted = False
     size = 0
     digest = hashlib.sha256()
     try:
@@ -71,10 +72,25 @@ async def download_candidate(
         while True:
             try:
                 os.link(temp_path, target)
+                published_target = target
                 break
             except FileExistsError:
                 counter += 1
                 target = base.with_name(f"{base.stem} ({counter}){base.suffix}")
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError as exc:
+            try:
+                if published_target is not None:
+                    published_target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            cleanup_event_emitted = True
+            if record:
+                record(DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
+                                     "cleanup", "failed", error_code="cleanup_failed", size_bytes=size or None))
+            raise MediaError("cleanup_failed") from exc
+        temp_path = None
         relative = target.relative_to(root)
         event = DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                               "download", "success", size_bytes=size, sha256=digest.hexdigest(),
@@ -103,8 +119,6 @@ async def download_candidate(
             try:
                 temp_path.unlink(missing_ok=True)
             except OSError:
-                if record:
+                if not cleanup_event_emitted and record:
                     record(DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                                          "cleanup", "failed", error_code="cleanup_failed", size_bytes=size or None))
-                if sys.exc_info()[0] is None:
-                    raise MediaError("cleanup_failed")

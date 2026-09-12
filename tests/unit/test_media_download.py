@@ -178,3 +178,29 @@ def test_cleanup_failure_on_cancellation_is_observable(tmp_path, monkeypatch):
         with pytest.raises(asyncio.CancelledError): await task
         assert events[-1].stage == "cleanup" and "secret" not in repr(events)
     asyncio.run(run())
+
+
+def test_post_publication_unlink_retry_rolls_back(tmp_path, monkeypatch):
+    original = Path.unlink; calls = {"part": 0}
+    def fail_once(path, *args, **kwargs):
+        if path.name.startswith(".musicdl-"):
+            calls["part"] += 1
+            if calls["part"] == 1: raise OSError("token=secret")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", fail_once)
+    events = []
+    with pytest.raises(MediaError, match="cleanup_failed") as exc: asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks=chunks(b"ID3"), extension="mp3")), tmp_path, request_id="r", record=events.append))
+    assert not any(e.status == "success" for e in events)
+    assert sum(e.stage == "cleanup" and e.error_code == "cleanup_failed" for e in events) == 1
+    assert not list(tmp_path.rglob("*.mp3")) and not list(tmp_path.glob(".musicdl-*.part"))
+    assert "secret" not in repr(exc.value)
+
+
+def test_post_publication_unlink_persistent_rolls_back(tmp_path, monkeypatch):
+    original = Path.unlink
+    monkeypatch.setattr(Path, "unlink", lambda path, *a, **k: (_ for _ in ()).throw(OSError("token=secret")) if path.name.startswith(".musicdl-") else original(path, *a, **k))
+    events = []
+    with pytest.raises(MediaError, match="cleanup_failed"): asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks=chunks(b"ID3"), extension="mp3")), tmp_path, request_id="r", record=events.append))
+    assert not any(e.status == "success" for e in events)
+    assert sum(e.stage == "cleanup" and e.error_code == "cleanup_failed" for e in events) == 1
+    assert not list(tmp_path.rglob("*.mp3"))
