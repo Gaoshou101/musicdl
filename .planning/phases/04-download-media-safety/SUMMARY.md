@@ -26,7 +26,7 @@ Accepted Phase 4 implementation and test commits changed:
 - `tests/unit/test_media_download.py`
 - `tests/unit/test_media_fallback.py`
 
-The accepted ID3 validation fix is included in the files listed above.
+The accepted ID3 validation fix and Windows extended-length path containment fix are included in the files listed above.
 
 ## Verification
 
@@ -36,10 +36,12 @@ Command run from the phase worktree:
 & '..\\..\\.venv\\Scripts\\python.exe' -m pytest -q -W error
 ```
 
-Completed result: exit status `0`; `219 passed, 1 skipped`.
+Completed result: exit status `0`; `221 passed, 1 skipped`.
+
+The formerly intermittent Windows concurrency regression was also run in ten separate completed invocations; all ten passed.
 
 The one skipped test is `tests/integration/test_wecom_redis.py::test_real_redis_atomic_state_contract`, skipped because `MUSICDL_TEST_REDIS_URL` is not configured. Real provider/network media transfers were not exercised; download tests use injected in-memory sources and temporary filesystems.
 
 ## Rollback
 
-The exact overall Phase 4 implementation/history range is `98be64c^..2f99a69`; if implementation rollback is required, revert that range in reverse order. Documentation-only commits may be reverted independently. Revert this summary commit independently if needed; rollback does not delete published media or user files.
+The exact overall Phase 4 implementation/history range is `98be64c^..bbfe25a`; if implementation rollback is required, revert that range in reverse order. Documentation-only commits may be reverted independently. Revert this summary commit independently if needed; rollback does not delete published media or user files.
