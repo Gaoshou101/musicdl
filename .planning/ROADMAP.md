@@ -16,6 +16,8 @@
 
 ## Phase 1 — WeCom callback vertical slice
 
+**Status:** Implementation completed on 2026-09-12; locally verified and runtime-verified against Redis 7.2.16 in a hardened Debian Docker container. Real WeCom application and public TLS interoperability gate remains pending.
+
 **Goal:** 完成白名单、企微签名验证、去重、搜索命令解析、候选选择关联和异步响应骨架。
 
 **Dependencies:** Phase 0；企业微信官方协议探针和真实应用配置验证。

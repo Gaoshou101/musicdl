@@ -1,5 +1,7 @@
 import posixpath
 from urllib.parse import urlsplit
+import base64
+import binascii
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -13,6 +15,8 @@ class ConfigVersion(BaseModel):
 class RedisSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: SecretStr = SecretStr("redis://localhost:6379/0")
+    connect_timeout: float = Field(default=2.0, gt=0, le=30)
+    operation_timeout: float = Field(default=2.0, gt=0, le=30)
 
     @field_validator("url")
     @classmethod
@@ -30,6 +34,48 @@ class MediaSettings(BaseModel):
 class TelegramSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     session_root: str = "/data/telegram-sessions"
+
+
+class WeComSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    corp_id: str | None = None
+    agent_id: int | None = Field(default=None, gt=0)
+    token: SecretStr | None = None
+    encoding_aes_key: SecretStr | None = None
+    allowed_users: list[str] = Field(default_factory=list)
+    clock_skew: int = Field(default=300, ge=1, le=3600)
+    dedup_ttl: int = Field(default=86400, ge=60, le=604800)
+    selection_ttl: int = Field(default=600, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def enabled_requires_credentials(self):
+        if self.corp_id is not None:
+            self.corp_id = self.corp_id.strip()
+        if self.token is not None:
+            self.token = SecretStr(self.token.get_secret_value().strip())
+        if self.encoding_aes_key is not None:
+            key = self.encoding_aes_key.get_secret_value()
+            if len(key) != 43:
+                raise ValueError("EncodingAESKey must be 43 characters")
+            try:
+                decoded = base64.b64decode(key + "=", validate=True)
+            except (ValueError, binascii.Error):
+                raise ValueError("EncodingAESKey must be valid base64") from None
+            if len(decoded) != 32:
+                raise ValueError("EncodingAESKey must decode to 32 bytes")
+        normalized = []
+        for user in self.allowed_users:
+            item = user.strip()
+            if item and item not in normalized:
+                normalized.append(item)
+        self.allowed_users = normalized
+        if self.enabled:
+            if not self.corp_id or self.agent_id is None or not self.token or not self.token.get_secret_value() or not self.encoding_aes_key:
+                raise ValueError("enabled WeCom settings require credentials")
+            if not 1 <= len(self.allowed_users) <= 100 or any(len(item) > 128 for item in self.allowed_users):
+                raise ValueError("enabled WeCom settings require a non-empty allowlist")
+        return self
 
 
 class PluginSettings(BaseModel):
@@ -52,6 +98,7 @@ class AppSettings(BaseSettings):
     redis: RedisSettings = RedisSettings()
     media: MediaSettings = MediaSettings()
     telegram: TelegramSettings = TelegramSettings()
+    wecom: WeComSettings = WeComSettings()
     plugin: PluginSettings = PluginSettings()
 
     @model_validator(mode="after")
