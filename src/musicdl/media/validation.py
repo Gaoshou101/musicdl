@@ -72,7 +72,8 @@ def _valid_id3(h: bytes) -> bool:
     if any(byte & 0x80 for byte in h[6:10]):
         return False
     flags = h[5]
-    return not (flags & (0x1F if h[3] == 2 else 0x0F))
+    reserved_mask = {2: 0x3F, 3: 0x1F, 4: 0x0F}[h[3]]
+    return not (flags & reserved_mask)
 
 
 def _valid_mpeg(h: bytes) -> bool:

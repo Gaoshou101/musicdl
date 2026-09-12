@@ -74,6 +74,19 @@ def test_malformed_id3_rejected(header):
         validate_media(header, DownloadMetadata(chunks=(), extension="mp3"), "mp3")
 
 
+@pytest.mark.parametrize("version,reserved", [(2, 0x20), (3, 0x10)])
+def test_version_specific_id3_reserved_flags_rejected(version, reserved):
+    header = b"ID3" + bytes((version, 0, reserved)) + b"\x00\x00\x00\x00"
+    with pytest.raises(MediaError, match="signature_mismatch"):
+        validate_media(header, DownloadMetadata(chunks=(), extension="mp3"), "mp3")
+
+
+@pytest.mark.parametrize("version,allowed", [(2, 0xC0), (3, 0xE0), (4, 0xF0)])
+def test_version_specific_id3_allowed_flags_accepted(version, allowed):
+    header = b"ID3" + bytes((version, 0, allowed)) + b"\x00\x00\x00\x00"
+    assert validate_media(header, DownloadMetadata(chunks=(), extension="mp3"), "mp3") == (".mp3", "audio/mpeg")
+
+
 @pytest.mark.parametrize("header", [b"\xff\xeb\x90\x64", b"\xff\xfb\x00\x64", b"\xff\xfb\xf0\x64", b"\xff\xf1\x50\x80", b"\xff\xfb\x90\x66"])
 def test_reserved_mpeg_and_aac_rejected(header):
     with pytest.raises(MediaError, match="signature_mismatch"):
