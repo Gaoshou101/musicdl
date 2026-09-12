@@ -219,3 +219,27 @@ async def test_cancellation_propagates_unchanged():
 
     with pytest.raises(asyncio.CancelledError):
         await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])
+
+
+@run_sync
+async def test_deeply_nested_outer_json_is_invalid_response():
+    nested = b'{"nested":' + b"[" * 8_000 + b"]" * 8_000 + b',"choices":[{"message":{"content":"{}"}}]}'
+
+    async def handler(request):
+        return httpx.Response(200, content=nested)
+
+    with pytest.raises(AIError) as caught:
+        await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])
+    assert caught.value.code == "invalid_response"
+
+
+@run_sync
+async def test_deeply_nested_inner_json_is_invalid_response():
+    content = "[" * 8_000 + "]" * 8_000
+
+    async def handler(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    with pytest.raises(AIError) as caught:
+        await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])
+    assert caught.value.code == "invalid_response"

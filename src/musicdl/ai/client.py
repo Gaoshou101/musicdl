@@ -70,7 +70,7 @@ class OpenAICompatibleClient:
             if not isinstance(result, dict):
                 raise ValueError
             return result
-        except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError):
+        except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError, RecursionError):
             raise AIError("invalid_response") from None
 
     def __repr__(self) -> str:

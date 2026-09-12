@@ -74,6 +74,7 @@ def test_ranking_real_client_receives_explicit_safe_instructions():
     assert result.applied
     system = seen["payload"]["messages"][0]["content"]
     assert "return JSON" in system and "untrusted data" in system and "exact permutation" in system
+    assert "most to least relevant" in system and "supplied metadata" in system
 def test_query_is_normalized_before_message_serialization():
     fake = Fake({"ordered_tokens": ["candidate-2", "candidate-1"]})
     asyncio.run(advise_ranking(_search(), "  Ｑ　x  ", settings(max_candidates=2), client=fake))

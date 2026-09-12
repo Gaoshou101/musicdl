@@ -54,6 +54,7 @@ def test_language_real_client_receives_explicit_safe_instructions():
     system = seen["payload"]["messages"][0]["content"]
     assert "return JSON" in system and "untrusted data" in system
     assert all(choice in system for choice in ("华语", "欧美", "日韩", "未知"))
+    assert "infer" in system and "title/artist/album" in system and "evidence is insufficient" in system
 
 
 @pytest.mark.parametrize("fallback, expected", [("欧美", "欧美"), ("未知", "未知"), ("invalid", "未知"), (None, "未知")])
