@@ -61,3 +61,21 @@ def test_settings_repr_and_dump_do_not_expose_secret(monkeypatch):
     settings = AppSettings()
     assert "top-secret" not in repr(settings)
     assert "top-secret" not in str(settings.model_dump())
+
+
+def test_redis_timeouts_default_and_environment_override(monkeypatch):
+    settings = AppSettings()
+    assert settings.redis.connect_timeout == 2.0
+    assert settings.redis.operation_timeout == 2.0
+    monkeypatch.setenv("MUSICDL_REDIS__CONNECT_TIMEOUT", "4.5")
+    monkeypatch.setenv("MUSICDL_REDIS__OPERATION_TIMEOUT", "3")
+    settings = AppSettings()
+    assert settings.redis.connect_timeout == 4.5
+    assert settings.redis.operation_timeout == 3.0
+
+
+@pytest.mark.parametrize("name", ["CONNECT_TIMEOUT", "OPERATION_TIMEOUT"])
+def test_redis_timeouts_reject_invalid_values(monkeypatch, name):
+    monkeypatch.setenv(f"MUSICDL_REDIS__{name}", "31")
+    with pytest.raises(ValidationError):
+        AppSettings()

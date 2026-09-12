@@ -15,6 +15,8 @@ class ConfigVersion(BaseModel):
 class RedisSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: SecretStr = SecretStr("redis://localhost:6379/0")
+    connect_timeout: float = Field(default=2.0, gt=0, le=30)
+    operation_timeout: float = Field(default=2.0, gt=0, le=30)
 
     @field_validator("url")
     @classmethod
