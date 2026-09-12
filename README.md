@@ -2,7 +2,7 @@
 
 ## Current implementation
 
-The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, and the Phase 3 Telegram user-account connector and music-Bot adapter contracts. Download/media validation, AI ranking, plugin execution, and the management UI remain later phases.
+The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and music-Bot adapter contracts, and the Phase 4 injected download/media-safety engine. Concrete provider adapters, AI ranking, plugin execution, and the management UI remain integration work or later phases.
 
 `compose.yaml` defines only `musicdl` and `plugin-runner`; Redis remains an external service. Copy `.env.example` to `.env` and set `MUSICDL_REDIS__URL` before starting Compose. Never put credentials in the example file or source tree.
 
