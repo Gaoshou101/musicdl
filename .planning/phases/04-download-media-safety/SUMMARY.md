@@ -26,10 +26,7 @@ Phase 4 runtime and test commits changed:
 - `tests/unit/test_media_download.py`
 - `tests/unit/test_media_fallback.py`
 
-This acceptance task changes only:
-
-- `README.md`
-- `.planning/phases/04-download-media-safety/SUMMARY.md`
+This final-fix task changes the authorized runtime, tests, design wording, and this summary only.
 
 ## Verification
 
@@ -39,10 +36,10 @@ Command run from the phase worktree:
 & '..\\..\\.venv\\Scripts\\python.exe' -m pytest -q -W error
 ```
 
-Completed result: exit status `0`; `184 passed, 1 skipped in 1.71s`.
+Completed result: exit status `0`; `214 passed, 1 skipped`.
 
 The one skipped test is `tests/integration/test_wecom_redis.py::test_real_redis_atomic_state_contract`, skipped because `MUSICDL_TEST_REDIS_URL` is not configured. Real provider/network media transfers were not exercised; download tests use injected in-memory sources and temporary filesystems.
 
 ## Rollback
 
-The Phase 4 runtime/test commits are the exact range `98be64c^..b193c55`; if runtime rollback is required, revert those commits in reverse order. Revert documentation commit `c3cd96b` (`docs: record phase 4 verification`) independently. Do not delete published media or user files during either rollback.
+The Phase 4 runtime/test commits are the exact range `98be64c^..8c50d08`; if runtime rollback is required, revert those commits in reverse order. Revert documentation-only commits `c3cd96b` and `a9521ae` independently. The final summary evidence commit, once created with subject `docs: finalize phase 4 safety verification`, may also be reverted independently. Do not delete published media or user files during rollback.
