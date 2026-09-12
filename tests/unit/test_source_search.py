@@ -128,6 +128,12 @@ def test_quality_sort_is_explainable_and_not_title_lexical_order():
     result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "artist"))
     assert [c.item_id for c in result.candidates] == ["lossless", "lossy"]
 
+def test_quality_sort_prefers_higher_mp3_bitrate_over_lexical_title():
+    async def source(query):
+        return [Candidate(source_id="a", source_version="1", item_id="low", title="A", artist="Artist", format="mp3", bitrate=64), Candidate(source_id="a", source_version="1", item_id="high", title="Z", artist="Artist", format="mp3", bitrate=320)]
+    result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "artist"))
+    assert [c.item_id for c in result.candidates] == ["high", "low"]
+
 def test_source_result_boundaries_and_max_results_argument():
     async def generator(query):
         yield candidate("a", "1")

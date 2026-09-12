@@ -1,6 +1,9 @@
+import re
+
+import pytest
+
 from musicdl.sources.models import Candidate
 from musicdl.wecom.results import format_results
-import pytest
 
 
 def test_format_results_contains_distinguishing_fields_and_iec_size():
@@ -42,3 +45,18 @@ def test_format_results_small_budget_still_emits_complete_normal_line():
     text = format_results([c], max_bytes=128)
     assert len(text.encode("utf-8")) <= 128
     assert "1. 歌 - 艺" in text and "q@1" in text and "格式 未知" in text and "大小 1 B" in text
+
+def test_format_results_small_budget_truncates_long_source_and_version():
+    c = Candidate(source_id="源" * 64, source_version="版" * 64, item_id="x", title="歌" * 20, artist="艺" * 20, format="flac", size=1)
+    text = format_results([c], max_bytes=128)
+    assert text and len(text.encode("utf-8")) <= 128
+    match = re.fullmatch(r"1\. (?P<title>.+) - (?P<artist>.+)（(?P<source>[^@]+)@(?P<version>[^；]+)；格式 (?P<format>[^；]+)；大小 .+）", text)
+    assert match and all(match.group(name).strip() for name in ("title", "artist", "source", "version", "format"))
+
+
+def test_format_results_keeps_multiple_medium_candidates_with_continuous_numbers():
+    candidates = [Candidate(source_id="source", source_version="1", item_id=str(i), title="歌名" * 12, artist="艺术家" * 8, album="专辑" * 8, format="mp3", bitrate=320, size=1536) for i in range(3)]
+    text = format_results(candidates)
+    assert len(text.encode("utf-8")) <= 2048
+    assert len(text.splitlines()) >= 2
+    assert [line.split(". ", 1)[0] for line in text.splitlines()] == [str(i) for i in range(1, len(text.splitlines()) + 1)]

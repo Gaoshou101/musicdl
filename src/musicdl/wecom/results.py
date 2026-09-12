@@ -23,12 +23,6 @@ def _duration(value: int | None) -> str | None:
     return f"{value // 60}m {value % 60}s"
 
 
-def _fit(value: str, budget: int) -> str:
-    while value and len(value.encode("utf-8")) > budget:
-        value = value[:-1]
-    return value
-
-
 def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_bytes: int = 2048) -> str:
     if not isinstance(max_items, int) or isinstance(max_items, bool) or not 1 <= max_items <= 100:
         raise ValueError("invalid_max_items")
@@ -38,20 +32,33 @@ def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_
     for index, c in enumerate(candidates):
         if index >= max_items:
             break
-        source = f"{c.source_id}@{c.source_version}"
-        details = [source, f"格式 {c.format or '未知'}", f"大小 {_size(c.size)}"]
-        for label, value in (("专辑", c.album), ("时长", _duration(c.duration)), ("码率", f"{c.bitrate} kbps" if c.bitrate is not None else None)):
-            if value is not None:
-                details.append(f"{label} {value}")
-        suffix = f"（{'；'.join(details)}）"
         title, artist = c.title, c.artist
-        line = f"{index + 1}. {title} - {artist}{suffix}"
-        while len(("\n".join(lines + [line])).encode("utf-8")) > max_bytes and (len(title) > 1 or len(artist) > 1):
-            if len(title.encode("utf-8")) >= len(artist.encode("utf-8")) and len(title) > 1:
-                title = _fit(title, max(1, len(title.encode("utf-8")) - 4))
-            elif len(artist) > 1:
-                artist = _fit(artist, max(1, len(artist.encode("utf-8")) - 4))
-            line = f"{index + 1}. {title} - {artist}{suffix}"
+        source_id, version, file_format = c.source_id, c.source_version, c.format or "未知"
+
+        def required() -> str:
+            return f"{index + 1}. {title} - {artist}（{source_id}@{version}；格式 {file_format}；大小 {_size(c.size)}）"
+
+        # Keep every required field non-empty, shortening the largest value safely.
+        while len(("\n".join(lines + [required()])).encode("utf-8")) > max_bytes:
+            values = [("title", title), ("artist", artist), ("source_id", source_id), ("version", version), ("format", file_format)]
+            candidates_to_trim = [(name, value) for name, value in values if len(value) > 1]
+            if not candidates_to_trim:
+                break
+            name, value = max(candidates_to_trim, key=lambda item: len(item[1].encode("utf-8")))
+            trimmed = value[:-1]
+            if name == "title": title = trimmed
+            elif name == "artist": artist = trimmed
+            elif name == "source_id": source_id = trimmed
+            elif name == "version": version = trimmed
+            else: file_format = trimmed
+        line = required()
+        optional = [("专辑", c.album), ("时长", _duration(c.duration)), ("码率", f"{c.bitrate} kbps" if c.bitrate is not None else None)]
+        for label, value in optional:
+            if value is None:
+                continue
+            candidate_line = f"{line[:-1]}；{label} {value}）"
+            if len(("\n".join(lines + [candidate_line])).encode("utf-8")) <= max_bytes:
+                line = candidate_line
         if len(("\n".join(lines + [line])).encode("utf-8")) > max_bytes:
             break
         lines.append(line)
