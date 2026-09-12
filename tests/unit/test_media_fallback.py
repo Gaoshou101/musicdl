@@ -17,6 +17,8 @@ async def chunks(*values):
     for value in values:
         yield value
 
+ID3 = b"ID3\x04\x00\x00\x00\x00\x00\x00"
+
 
 class Source:
     def __init__(self, *, fail=False):
@@ -26,11 +28,23 @@ class Source:
     async def download(self, item):
         if self.fail:
             raise MediaError("download_failed")
-        return DownloadMetadata(chunks(b"ID3\x04"), extension="mp3", media_type="audio/mpeg")
+        return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg")
 
     async def health(self):
         self.health_calls += 1
         return True
+
+
+def test_secret_media_error_is_redacted_in_fallback(tmp_path):
+    class Bad(Source):
+        async def download(self, item):
+            raise MediaError("https://host/?api_key=SECRET")
+    events = []
+    async def refresh(query, excluded):
+        return SearchResult(candidates=(), statuses=(), version="v")
+    result = asyncio.run(download_with_fallback(candidate(), {"a": Bad()}, tmp_path, request_id="r", query="q", refresh=refresh, record=events.append))
+    assert result.download is None and result.download_error == "download_failed"
+    assert all("SECRET" not in repr(x) and "https://" not in repr(x) for x in events)
 
 
 def result(candidates=()):
@@ -214,3 +228,39 @@ def test_health_cancellation_stops_after_refresh(tmp_path):
     assert [(e.stage, e.status) for e in events] == [
         ("download", "failed"), ("refresh", "success")
     ]
+
+
+def test_recorder_failure_does_not_block_fallback_stages(tmp_path):
+    source = Source(fail=True)
+    calls = []
+    async def refresh(query, excluded):
+        calls.append(excluded)
+        return result()
+    def record(_): raise RuntimeError("observer")
+    outcome = asyncio.run(download_with_fallback(candidate(), {"a": source}, tmp_path, request_id="r", query="q", refresh=refresh, record=record))
+    assert outcome.download_error == "download_failed" and outcome.refresh_error is None and outcome.healthy is True
+    assert calls == [frozenset({"a"})] and source.health_calls == 1
+
+
+def test_media_root_resolve_failure_direct_and_fallback(tmp_path, monkeypatch):
+    from musicdl.media import download_candidate
+    root = Path(tmp_path)
+    original = Path.resolve
+    def resolve(self, *args, **kwargs):
+        if self == root:
+            raise OSError("api_key=SECRET")
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "resolve", resolve)
+    events = []
+    with pytest.raises(MediaError) as caught:
+        asyncio.run(download_candidate(candidate(), Source(), root, request_id="d", record=events.append))
+    assert caught.value.code == "download_failed" and caught.value.__suppress_context__
+    assert events[0].error_code == "download_failed"
+    calls = []
+    async def refresh(query, excluded):
+        calls.append(excluded)
+        return result()
+    source = Source()
+    outcome = asyncio.run(download_with_fallback(candidate(), {"a": source}, root, request_id="f", query="q", refresh=refresh))
+    assert outcome.download_error == "download_failed" and calls == [frozenset({"a"})] and source.health_calls == 1
+    assert "SECRET" not in repr((caught.value, events, outcome))

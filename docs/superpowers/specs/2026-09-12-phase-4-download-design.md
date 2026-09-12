@@ -72,7 +72,7 @@ Existing files are never overwritten. Collisions are resolved deterministically 
 
 ## Failure and Fallback Flow
 
-Any transfer, size, media, path, filesystem, cancellation, or validation failure performs these actions:
+Any transfer, size, media, path, filesystem, or validation failure performs these actions. Cancellation removes staging state best-effort and propagates immediately; it does not refresh, health-check, or return `FallbackResult`.
 
 1. Remove the temporary file in a `finally`-protected cleanup path.
 2. Mark the selected source as failed for this fallback result.

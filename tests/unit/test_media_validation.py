@@ -5,6 +5,10 @@ import pytest
 
 from musicdl.media import MAX_MEDIA_BYTES, DownloadEvent, DownloadMetadata, MediaError, normalize_language, sanitize_component, validate_media, validated_destination
 
+ID3 = b"ID3\x04\x00\x00\x00\x00\x00\x00"
+MPEG = b"\xff\xfb\x90\x64"
+M4A = b"\x00\x00\x00\x14ftypM4A \x00\x00\x00\x00M4A "
+
 
 def test_language_and_path_helpers(tmp_path):
     assert normalize_language("华语") == "华语"
@@ -14,7 +18,7 @@ def test_language_and_path_helpers(tmp_path):
     assert path.relative_to(tmp_path).parts == ("华语", "A_B", "Song - A_B.mp3")
 
 
-@pytest.mark.parametrize("header,fmt", [(b"ID3\x04", "mp3"), (b"\xff\xfb\x90", "mp3"), (b"fLaC", "flac"), (b"\x00\x00\x00\x18ftypM4A ", "m4a"), (b"OggS\x00", "ogg")])
+@pytest.mark.parametrize("header,fmt", [(ID3, "mp3"), (MPEG, "mp3"), (b"fLaC", "flac"), (M4A, "m4a"), (b"OggS\x00", "ogg")])
 def test_valid_signatures(header, fmt):
     ext, mime = validate_media(header, DownloadMetadata(chunks=(), extension=fmt), fmt)
     assert ext == "." + fmt and mime
@@ -46,23 +50,50 @@ def test_resolved_symlink_escape_is_rejected(tmp_path):
 
 def test_candidate_format_mismatch_alone():
     with pytest.raises(MediaError, match="extension_mismatch"):
-        validate_media(b"ID3", DownloadMetadata(chunks=(), extension="mp3"), "flac")
+        validate_media(ID3, DownloadMetadata(chunks=(), extension="mp3"), "flac")
 
 
 def test_exact_allowlist():
     with pytest.raises(MediaError, match="unsupported_extension"):
-        validate_media(b"ID3", DownloadMetadata(chunks=(), extension="m4b"), "m4b")
+        validate_media(ID3, DownloadMetadata(chunks=(), extension="m4b"), "m4b")
     with pytest.raises(MediaError, match="signature_mismatch"):
         validate_media(b"\x00\x00\x00\x18ftypisom", DownloadMetadata(chunks=(), extension="m4a"), "m4a")
     cases = [("wav", "unsupported_extension"), ("flac", "extension_mismatch")]
     for ext, code in cases:
         try:
-            validate_media(b"ID3", DownloadMetadata(chunks=(), extension=ext), "mp3")
+            validate_media(ID3, DownloadMetadata(chunks=(), extension=ext), "mp3")
         except MediaError as error:
             assert error.code == code
         else:
             raise AssertionError("expected MediaError")
-    for header, code in [(b"", "signature_mismatch"), (b"ID3", "mime_mismatch")]:
+
+
+@pytest.mark.parametrize("header", [b"ID3", b"ID3\x04\x00\x00\x80\x00\x00\x00", b"ID3\x04\x00\x01\x00\x00\x00\x00"])
+def test_malformed_id3_rejected(header):
+    with pytest.raises(MediaError, match="signature_mismatch"):
+        validate_media(header, DownloadMetadata(chunks=(), extension="mp3"), "mp3")
+
+
+@pytest.mark.parametrize("header", [b"\xff\xeb\x90\x64", b"\xff\xfb\x00\x64", b"\xff\xfb\xf0\x64", b"\xff\xf1\x50\x80", b"\xff\xfb\x90\x66"])
+def test_reserved_mpeg_and_aac_rejected(header):
+    with pytest.raises(MediaError, match="signature_mismatch"):
+        validate_media(header, DownloadMetadata(chunks=(), extension="mp3"), "mp3")
+
+
+@pytest.mark.parametrize("header", [b"\x00\x00\x00\x18ftypM4A ", b"\x00\x00\x00\x15ftypM4A \x00\x00\x00\x00", b"\x00\x00\x00\x14ftypisom \x00\x00\x00\x00isom"])
+def test_malformed_m4a_rejected(header):
+    with pytest.raises(MediaError, match="signature_mismatch"):
+        validate_media(header, DownloadMetadata(chunks=(), extension="m4a"), "m4a")
+
+
+@pytest.mark.parametrize("value,expected", [("华语", "华语"), ("欧美", "欧美"), ("日韩", "日韩"), ("未知", "未知"), ("bad", "未知"), (None, "未知")])
+def test_all_language_values(value, expected):
+    assert normalize_language(value) == expected
+
+
+def test_del_and_c1_removed():
+    assert sanitize_component("A\x7f\x85B") == "AB"
+    for header, code in [(b"", "signature_mismatch"), (ID3, "mime_mismatch")]:
         try:
             validate_media(header, DownloadMetadata(chunks=(), extension="mp3", media_type="audio/flac" if code == "mime_mismatch" else None), "mp3")
         except MediaError as error:

@@ -9,8 +9,9 @@ from pathlib import Path
 
 from musicdl.sources.models import Candidate
 
-from .models import MAX_MEDIA_BYTES, DownloadEvent, DownloadResult, DownloadSource, MediaError
+from .models import MAX_MEDIA_BYTES, DownloadEvent, DownloadResult, DownloadSource, MediaError, emit_event, _DOWNLOAD_CODES
 from .validation import normalize_language, validate_media, validated_destination
+
 
 
 async def download_candidate(
@@ -25,13 +26,12 @@ async def download_candidate(
 ) -> DownloadResult:
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
         raise MediaError("invalid_max_bytes")
-    root = Path(media_root).resolve(strict=False)
     temp_path: Path | None = None
-    published_target: Path | None = None
     cleanup_event_emitted = False
     size = 0
     digest = hashlib.sha256()
     try:
+        root = Path(media_root).resolve(strict=False)
         root.mkdir(parents=True, exist_ok=True)
         metadata = await source.download(candidate)
         fd, temp_name = tempfile.mkstemp(prefix=".musicdl-", suffix=".part", dir=root)
@@ -55,11 +55,25 @@ async def download_candidate(
                         raise MediaError("download_failed")
                     pending = pending[written:]
                 digest.update(chunk)
-        finally:
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        else:
             try:
                 os.fsync(fd)
-            finally:
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+            try:
                 os.close(fd)
+            except OSError as exc:
+                raise MediaError("download_failed") from exc
         if size == 0:
             raise MediaError("empty_download")
         if metadata.declared_size is not None and metadata.declared_size != size:
@@ -72,53 +86,48 @@ async def download_candidate(
         while True:
             try:
                 os.link(temp_path, target)
-                published_target = target
                 break
             except FileExistsError:
                 counter += 1
                 target = base.with_name(f"{base.stem} ({counter}){base.suffix}")
         try:
             temp_path.unlink(missing_ok=True)
-        except OSError as exc:
+        except OSError:
+            cleanup_event_emitted = True
+            emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
+                                 "cleanup", "failed", error_code="cleanup_failed", size_bytes=size or None))
             try:
-                if published_target is not None:
-                    published_target.unlink(missing_ok=True)
+                temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            cleanup_event_emitted = True
-            if record:
-                record(DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
-                                     "cleanup", "failed", error_code="cleanup_failed", size_bytes=size or None))
-            raise MediaError("cleanup_failed") from exc
         temp_path = None
         relative = target.relative_to(root)
         event = DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                               "download", "success", size_bytes=size, sha256=digest.hexdigest(),
                               relative_path=relative.as_posix())
-        if record:
-            record(event)
+        emit_event(record, event)
         return DownloadResult(relative, digest.hexdigest(), size, media_type, extension,
                               normalize_language(language))
     except asyncio.CancelledError:
-        if record:
-            record(DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
-                                 "download", "failed", error_code="download_cancelled", size_bytes=size or None))
+        emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
+                             "download", "failed", error_code="download_cancelled", size_bytes=size or None))
         raise
     except MediaError as exc:
-        if record:
-            record(DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
-                                 "download", "failed", error_code=exc.code, size_bytes=size or None))
-        raise
+        code = exc.code if exc.code in _DOWNLOAD_CODES else "download_failed"
+        emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
+                             "download", "failed", error_code=code, size_bytes=size or None))
+        if code == exc.code:
+            raise
+        raise MediaError(code) from None
     except Exception as exc:
-        if record:
-            record(DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
-                                 "download", "failed", error_code="download_failed", size_bytes=size or None))
-        raise MediaError("download_failed") from exc
+        emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
+                             "download", "failed", error_code="download_failed", size_bytes=size or None))
+        raise MediaError("download_failed") from None
     finally:
         if temp_path is not None:
             try:
                 temp_path.unlink(missing_ok=True)
             except OSError:
-                if not cleanup_event_emitted and record:
-                    record(DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
+                if not cleanup_event_emitted:
+                    emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                                          "cleanup", "failed", error_code="cleanup_failed", size_bytes=size or None))

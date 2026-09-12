@@ -4,11 +4,13 @@ from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
+from collections.abc import Callable
 
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
 
 MAX_MEDIA_BYTES = 500 * 1024 * 1024
+_DOWNLOAD_CODES = frozenset({"invalid_max_bytes", "invalid_chunk", "file_too_large", "download_failed", "empty_download", "size_mismatch", "unsupported_extension", "signature_mismatch", "extension_mismatch", "mime_mismatch", "path_escape"})
 Language = Literal["华语", "欧美", "日韩", "未知"]
 
 
@@ -64,3 +66,12 @@ class MediaError(ValueError):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+def emit_event(record: Callable[[DownloadEvent], None] | None, event: DownloadEvent) -> None:
+    if record is None:
+        return
+    try:
+        record(event)
+    except Exception:
+        pass
