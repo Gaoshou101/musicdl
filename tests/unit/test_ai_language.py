@@ -45,7 +45,8 @@ def test_invalid_advice_uses_safe_fallback(fallback, expected, value):
     events = []
     result = asyncio.run(advise_language(_candidate(), fallback, AISettings(enabled=True, api_key="secret", model="model"), client=Fake(value), record=events.append))
     assert (result.language, result.applied, result.error_code) == (expected, False, "invalid_advice")
-    assert events == [events[0]] and events[0].error_code == "invalid_advice"
+    assert len(events) == 1
+    assert events[0].operation == "language" and events[0].status == "fallback" and events[0].error_code == "invalid_advice"
 
 
 @pytest.mark.parametrize("settings, error, code", [

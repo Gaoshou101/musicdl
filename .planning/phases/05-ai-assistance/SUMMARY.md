@@ -16,7 +16,7 @@ FR-011 and FR-006 evidence: `advise_language()` validates strict output, emits s
 - Whitespace check: `git diff --check` — exit 0.
 - Final suite and diff checks after this summary were rerun as required and remained exit 0 (297 passed, 1 skipped; diff clean).
 
-Live provider behavior was not exercised and is intentionally not claimed. Rollback is by reverting the Task 4 commit only; no media, data, or worktrees are involved.
+Live provider behavior was not exercised and is intentionally not claimed. Rollback is by reverting the later documentation/fix commit first if needed, then reverting implementation commit `1cc4885`; the final accepted Phase 5 range is recorded after acceptance. No media, data, or worktrees are involved.
 
 ## Changed files
 

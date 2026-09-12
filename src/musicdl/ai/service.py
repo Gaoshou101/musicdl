@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -23,7 +23,7 @@ class _RankingAdvice(BaseModel):
 
 class _LanguageAdvice(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    language: str
+    language: Literal["华语", "欧美", "日韩", "未知"]
 
 
 def _message(candidates: tuple[Candidate, ...], query: str) -> dict[str, str]:
@@ -123,8 +123,6 @@ async def advise_language(
     try:
         advice = _LanguageAdvice.model_validate(raw)
         language = normalize_language(advice.language)
-        if language == "未知" and advice.language != "未知":
-            raise ValueError("invalid_advice")
     except (ValidationError, TypeError, ValueError):
         return _language_fallback(fallback, "invalid_advice", record)
     emit_event(record, AIEvent("language", "applied"))
