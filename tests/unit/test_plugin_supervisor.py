@@ -187,3 +187,15 @@ def test_cleanup_failure_is_sanitized(monkeypatch):
     step=run_supervisor("print('unused')")
     assert step.response.error.code == "cleanup_failed"
     assert tempfile.gettempdir() not in step.response.error.message
+
+def test_cleanup_state_is_request_local(monkeypatch):
+    seen=[]
+    def remove(path):
+        seen.append(path)
+        return len(seen) != 1
+    monkeypatch.setattr("musicdl_plugin_runner.supervisor._remove_job_dir", remove)
+    async def run():
+        sup=Supervisor(command_builder=lambda inv: child("import time; time.sleep(.05); print('bad')"), max_concurrency=2)
+        return await asyncio.gather(sup.execute(invocation()), sup.execute(invocation()))
+    steps=asyncio.run(run())
+    assert [s.response.error.code for s in steps] == ["cleanup_failed", "invalid_output"]

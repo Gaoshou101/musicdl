@@ -23,13 +23,6 @@ def test_deno_payload_is_safely_embedded():
  encoded=payload.split("JSON.parse(",1)[1].split(");",1)[0]
  assert json.loads(json.loads(encoded))['source'] == source
 
-@pytest.mark.parametrize("name", ["process", "require", "fetch", "Deno.env", "Deno.readTextFile", "Deno.Command", "Deno.dlopen", "Worker"])
-def test_deno_host_structurally_denies_escape_hatches(name):
- if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
- text=(Path(__file__).parents[2]/"src/musicdl_plugin_runner/deno_host.js").read_text(encoding="utf-8")
- assert "--allow" not in text
- assert name in build_host_command(_invocation(f"function handle(r){{ return {json.dumps(name)} }}")).stdin_payload.decode()
-
 def test_deno_valid_runtime_when_available():
  if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
  async def run(): return await __import__('musicdl_plugin_runner.supervisor',fromlist=['Supervisor']).Supervisor(build_host_command).execute(_invocation("function handle(r){return {hits: []}}"))
@@ -41,6 +34,27 @@ def test_deno_action_runtime_when_available():
  from musicdl_plugin_runner.supervisor import Supervisor
  step=asyncio.run(Supervisor(build_host_command).execute(_invocation("function handle(r){return {action:{action_id:'a1',method:'GET',url:'https://example.com/x'}}}")))
  assert step.action and step.action.action_id == "a1"
+
+@pytest.mark.parametrize("value", [
+ "{action:{action_id:'a1',method:'POST',url:'https://example.com'}}",
+ "{action:{action_id:'a1',method:'GET',url:'http://example.com'}}",
+ "{action:{action_id:'a1',method:'GET',url:'https://example.com:444'}}",
+ "{action:{action_id:'a1',method:'GET',url:'https://u:p@example.com'}}",
+ "{action:{action_id:'a1',method:'GET',url:'https://example.com',extra:1}}",
+])
+def test_deno_malformed_action_is_plugin_error(value):
+ if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
+ from musicdl_plugin_runner.supervisor import Supervisor
+ step=asyncio.run(Supervisor(build_host_command).execute(_invocation(f"function handle(r){{return {value}}}")))
+ assert step.response.error.code == "plugin_error"
+
+def test_deno_infinite_loop_times_out():
+ if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
+ inv=_invocation("function handle(r){ while(true){} }")
+ inv=inv.model_copy(update={"request":inv.request.model_copy(update={"timeout_ms":100})})
+ from musicdl_plugin_runner.supervisor import Supervisor
+ step=asyncio.run(Supervisor(build_host_command).execute(inv))
+ assert step.response.error.code == "timeout"
 
 @pytest.mark.parametrize("source", [
  "function handle(r){ process.exit() }", "function handle(r){ require('os') }",

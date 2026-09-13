@@ -119,7 +119,7 @@ class Supervisor:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _execute(self, invocation: PluginInvocation) -> PluginStep:
+    async def _execute(self, invocation: PluginInvocation, state: dict[str, bool]) -> PluginStep:
         if not await self._claim():
             return self._with_request(self._error("busy", "plugin runner is busy"), invocation)
         proc: asyncio.subprocess.Process | None = None
@@ -202,12 +202,12 @@ class Supervisor:
             if proc is not None and proc.returncode is None:
                 await self._terminate(proc)
             if job_dir is not None:
-                self._cleanup_failed = not _remove_job_dir(job_dir)
+                state["cleanup_failed"] = not _remove_job_dir(job_dir)
             await self._release()
 
     async def execute(self, invocation: PluginInvocation) -> PluginStep:
-        self._cleanup_failed = False
-        step = await self._execute(invocation)
-        if self._cleanup_failed:
+        state = {"cleanup_failed": False}
+        step = await self._execute(invocation, state)
+        if state["cleanup_failed"]:
             return self._with_request(self._error("cleanup_failed", "plugin cleanup failed"), invocation)
         return step
