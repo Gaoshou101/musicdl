@@ -43,6 +43,9 @@ def test_candidate_identity_and_count_and_disabled(tmp_path):
     bad = Candidate(source_id="other", source_version="1", item_id="1", title="S", artist="A")
     with pytest.raises(RuntimeError, match="candidate"):
         asyncio.run(PluginSource(p, FakeClient(result([bad.model_dump(mode="json")]))).search("song"))
+    bad_version = Candidate(source_id="demo", source_version="2", item_id="1", title="S", artist="A")
+    with pytest.raises(RuntimeError, match="candidate_identity"):
+        asyncio.run(PluginSource(p, FakeClient(result([bad_version.model_dump(mode="json")]))).search("song"))
     with pytest.raises(RuntimeError, match="candidate_limit"):
         asyncio.run(PluginSource(p, FakeClient(result([{}] * 101))).search("song"))
 

@@ -40,4 +40,3 @@ class PluginSource:
         except Exception as exc:
             raise RuntimeError("candidate_invalid") from exc
         return tuple(result)
-
