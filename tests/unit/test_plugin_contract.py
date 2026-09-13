@@ -118,6 +118,8 @@ def test_restricted_plugin_manifest_rejects_unsafe_ids_hosts_and_duplicates():
         _manifest(plugin_id="../unsafe")
     with pytest.raises(ValidationError):
         _manifest(allowed_hosts=("api.example.com", "api.example.com"))
+    with pytest.raises(ValidationError):
+        _manifest(operations=("search", "search"))
     for host in ("127.0.0.1", "*.example.com", "https://example.com", "example.com:443", "example.com/path", "API.example.com"):
         with pytest.raises(ValidationError):
             _manifest(allowed_hosts=(host,))
@@ -126,6 +128,8 @@ def test_restricted_plugin_manifest_rejects_unsafe_ids_hosts_and_duplicates():
 def test_restricted_plugin_invocation_rejects_source_digest_operation_and_actions():
     with pytest.raises(ValidationError):
         _invocation(source="bad\x00source")
+    with pytest.raises(ValidationError):
+        _invocation(source="x" * (128 * 1024 + 1))
     with pytest.raises(ValidationError):
         _invocation(manifest=_manifest(sha256="b" * 64))
     with pytest.raises(ValidationError):
@@ -137,6 +141,11 @@ def test_restricted_plugin_invocation_rejects_source_digest_operation_and_action
         HttpAction(action_id="a1", method="POST", url="https://api.example.com/search")
     with pytest.raises(ValidationError):
         HttpObservation(action_id="a1", status_code=200, body=base64.b64encode(b"x" * (1024 * 1024 + 1)).decode())
+    actions = tuple(HttpAction(action_id=f"a{i}", method="GET", url="https://api.example.com/search") for i in range(5))
+    with pytest.raises(ValidationError):
+        _invocation(actions=actions)
+    with pytest.raises(ValidationError):
+        _invocation(actions=(action,), observations=(HttpObservation(action_id="missing", status_code=200),))
 
 
 def test_plugin_step_requires_exactly_one_response_or_action():
