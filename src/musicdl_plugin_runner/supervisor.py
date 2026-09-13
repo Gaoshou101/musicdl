@@ -104,6 +104,8 @@ class Supervisor:
         try:
             try:
                 encoded = invocation.model_dump_json().encode()
+            except asyncio.TimeoutError:
+                return self._with_request(self._error("timeout", "plugin execution timed out"), invocation)
             except Exception:
                 return self._with_request(self._error("invalid_invocation", "invalid invocation"), invocation)
             if len(encoded) > MAX_INVOCATION_BYTES:
@@ -125,7 +127,10 @@ class Supervisor:
                 proc.stdin.write(encoded)
                 await asyncio.wait_for(proc.stdin.drain(), max(0, deadline - asyncio.get_running_loop().time()))
                 proc.stdin.close()
-            except (BrokenPipeError, ConnectionError, OSError, asyncio.TimeoutError):
+            except asyncio.TimeoutError:
+                await self._terminate(proc)
+                return self._with_request(self._error("timeout", "plugin execution timed out"), invocation)
+            except (BrokenPipeError, ConnectionError, OSError):
                 await self._terminate(proc)
                 return self._with_request(self._error("io_failed", "plugin I/O failed"), invocation)
             readers = [asyncio.create_task(self._read_bounded(proc.stdout, MAX_STDOUT_BYTES)), asyncio.create_task(self._read_bounded(proc.stderr, MAX_STDERR_BYTES))]
@@ -139,9 +144,10 @@ class Supervisor:
                 await asyncio.wait_for(asyncio.gather(*readers), max(0, deadline - asyncio.get_running_loop().time()))
                 if any(task.result()[1] for task in readers):
                     await self._terminate(proc)
+                    await self._cancel_readers(readers + [wait_task])
                     return self._with_request(self._error("output_too_large", "plugin output exceeds limit"), invocation)
                 await asyncio.wait_for(asyncio.shield(wait_task), max(0, deadline - asyncio.get_running_loop().time()))
-                stdout, stderr = readers[0].result()[0], readers[1].result()[0]
+                stdout = readers[0].result()[0]
             except asyncio.TimeoutError:
                 await self._terminate(proc)
                 await self._cancel_readers(readers + [wait_task])

@@ -2,6 +2,8 @@ import asyncio
 import json
 import sys
 import time
+import os
+import tempfile
 from uuid import uuid4
 
 import pytest
@@ -34,6 +36,33 @@ def test_valid_json_and_nonzero_are_stable():
     asyncio.run(run())
 
 
+def test_valid_plugin_step_and_invalid_output():
+    from musicdl.contracts.plugin import PluginResponse
+    response = PluginResponse(protocol="musicdl.plugin/v1", request_id=uuid4(), operation="search", ok=True, result={"hits": []})
+    raw = json.dumps({"response": json.loads(response.model_dump_json()), "action": None})
+    step = run_supervisor(f"import sys; sys.stdout.write({raw!r})")
+    assert step.response and step.response.ok
+    assert run_supervisor("print('not-json')").response.error.code == "invalid_output"
+
+
+def test_nonzero_hides_stderr():
+    step = run_supervisor("import sys; sys.stderr.write('stderr-canary'); sys.exit(3)")
+    assert step.response.error.code == "plugin_failed"
+    assert "stderr-canary" not in step.response.error.message
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
+def test_external_cancellation_reaps_child():
+    async def run():
+        sup = Supervisor(command_builder=lambda inv: child("import time; time.sleep(10)"))
+        task = asyncio.create_task(sup.execute(invocation(timeout_ms=5000)))
+        await asyncio.sleep(.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(run())
+
+
 def test_rejects_third_job_immediately():
     async def run():
         sup = Supervisor(command_builder=lambda inv: child("import time; time.sleep(1)"), max_concurrency=2)
@@ -54,6 +83,40 @@ def test_timeout_returns_sanitized_error():
         assert step.response and step.response.error.code == "timeout"
         assert "time.sleep" not in step.response.error.message
     asyncio.run(run())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
+def test_term_trap_reaches_kill_after_grace():
+    started = time.monotonic()
+    step = run_supervisor("import signal,time; signal.signal(signal.SIGTERM, lambda *_: None); time.sleep(2)", timeout_ms=80)
+    elapsed = time.monotonic() - started
+    assert step.response.error.code == "timeout"
+    assert elapsed >= .25
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
+def test_descendant_group_is_killed():
+    with tempfile.NamedTemporaryFile(delete=False) as handle:
+        pid_file = handle.name
+    code = ("import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c',"
+            f"'import os,time; open({pid_file!r},\\\"w\\\").write(str(os.getpid())); time.sleep(10)']); time.sleep(10)")
+    step = run_supervisor(code, timeout_ms=100)
+    assert step.response.error.code == "timeout"
+    pid = None
+    for _ in range(20):
+        try:
+            text = open(pid_file, encoding="ascii").read()
+            if text: pid = int(text); break
+        except (FileNotFoundError, ValueError):
+            time.sleep(.02)
+    if pid is not None:
+        gone = False
+        for _ in range(20):
+            try: os.kill(pid, 0)
+            except ProcessLookupError: gone = True; break
+            time.sleep(.02)
+        assert gone
+    os.unlink(pid_file)
 
 
 def test_stdout_and_stderr_overflow_are_bounded():
