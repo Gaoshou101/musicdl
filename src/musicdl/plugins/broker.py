@@ -42,6 +42,8 @@ class HttpsActionBroker:
         return socket.create_connection(address, timeout=timeout)
 
     def fetch(self, action: HttpAction, allowed_hosts: Iterable[str]) -> HttpObservation:
+        if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in action.url):
+            raise ActionDenied("url_denied", "URL contains whitespace or controls")
         try:
             parsed = urlsplit(action.url)
             host = parsed.hostname
@@ -61,7 +63,16 @@ class HttpsActionBroker:
             candidates: dict[tuple[int, str, int], tuple[int, tuple]] = {}
             for item in resolved:
                 family, sockaddr = (item[0], item[4]) if len(item) >= 5 else (item[0], item[1])
-                ip = ipaddress.ip_address(sockaddr[0])
+                if not isinstance(sockaddr, tuple) or len(sockaddr) < 2:
+                    raise ActionDenied("address_denied", "malformed resolved address")
+                try:
+                    ip = ipaddress.ip_address(sockaddr[0])
+                except (ValueError, TypeError, IndexError) as exc:
+                    raise ActionDenied("address_denied", "malformed resolved address") from exc
+                if ((family == socket.AF_INET and ip.version != 4) or
+                        (family == socket.AF_INET6 and ip.version != 6) or
+                        family not in (socket.AF_INET, socket.AF_INET6)):
+                    raise ActionDenied("address_denied", "address family mismatch")
                 if not ip.is_global:
                     raise ActionDenied("address_denied", "resolved address is not global")
                 numeric = (str(ip), 443) if family == socket.AF_INET else (str(ip), 443, 0, 0)
@@ -70,7 +81,7 @@ class HttpsActionBroker:
                 raise ActionDenied("dns_error", "host did not resolve")
         except ActionDenied:
             raise
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, IndexError):
             raise ActionDenied("dns_error", "DNS resolution failed")
 
         raw = wrapped = response = None
@@ -90,13 +101,25 @@ class HttpsActionBroker:
             target = parsed.path or "/"
             if parsed.query:
                 target += "?" + parsed.query
+            if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in target):
+                raise ActionDenied("url_denied", "request target contains whitespace or controls")
             wrapped.sendall((f"GET {target} HTTP/1.1\r\nHost: {approved}\r\n"
                              "Accept: application/json\r\nConnection: close\r\n\r\n").encode("ascii"))
             response = http.client.HTTPResponse(wrapped)
             response.begin()
             if 300 <= response.status < 400:
                 raise ActionDenied("redirect_denied", "redirects are not followed")
-            length = response.getheader("Content-Length")
+            selected: dict[str, str] = {}
+            for key, value in response.getheaders():
+                name = key.lower()
+                if name not in {"content-type", "content-length", "etag", "last-modified"}:
+                    continue
+                if name in selected:
+                    raise ActionDenied("http_error", "duplicate selected response header")
+                if any(ord(char) < 32 or ord(char) == 127 for char in value) or len(value.encode("utf-8")) > 1024:
+                    raise ActionDenied("http_error", "unsafe response header")
+                selected[name] = value
+            length = selected.get("content-length")
             if length is not None:
                 try:
                     if int(length) > MAX_ACTION_BODY_BYTES:
@@ -107,9 +130,8 @@ class HttpsActionBroker:
             if len(body) > MAX_ACTION_BODY_BYTES:
                 raise ActionDenied("body_too_large", "response body exceeds 1 MiB")
             import base64
-            headers = {key: value for key, value in response.getheaders()}
             return HttpObservation(action_id=action.action_id, status_code=response.status,
-                                   headers=headers, body=base64.b64encode(body).decode("ascii"))
+                                   headers=selected, body=base64.b64encode(body).decode("ascii"))
         except ActionDenied:
             raise
         except (http.client.HTTPException, OSError, ValueError) as exc:

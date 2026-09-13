@@ -139,3 +139,39 @@ def test_mixed_global_and_private_candidates_are_rejected():
 def test_malformed_http_is_normalized():
     b, *_ = broker(b"not HTTP")
     denied(b, "https://api.example.com/x", code="http_error")
+
+
+def test_headers_are_fixed_subset_and_bounded():
+    raw = (b"HTTP/1.1 200 OK\r\nX-Large: " + b"x" * 10000 +
+           b"\r\nContent-Type: application/json\r\nETag: abc\r\n\r\nhello")
+    b, *_ = broker(raw)
+    obs = b.fetch(action("https://api.example.com/x"), ("api.example.com",))
+    assert obs.headers == {"content-type": "application/json", "etag": "abc"}
+
+
+def test_unsafe_or_duplicate_selected_header_is_rejected():
+    for headers in (
+        b"Content-Type: " + b"x" * 1025 + b"\r\n",
+        b"ETag: one\r\nETag: two\r\n",
+    ):
+        b, *_ = broker(b"HTTP/1.1 200 OK\r\n" + headers + b"\r\nhello")
+        denied(b, "https://api.example.com/x", code="http_error")
+
+
+@pytest.mark.parametrize("entry", [
+    (socket.AF_INET, ("2001:db8::1", 443)),
+    (socket.AF_INET6, ("93.184.216.34", 443)),
+    (999, ("93.184.216.34", 443)),
+    (socket.AF_INET, ("not-an-ip", 443)),
+    (socket.AF_INET, ("93.184.216.34",)),
+])
+def test_resolver_family_and_shape_are_validated(entry):
+    b = HttpsActionBroker(resolver=lambda *_: [entry], connector=lambda *_: pytest.fail("must not connect"))
+    denied(b, "https://api.example.com/x", code="address_denied")
+
+
+@pytest.mark.parametrize("target", ["/bad path", "/bad\tpath", "/bad\npath"])
+def test_request_target_whitespace_and_controls_are_rejected(target):
+    b, sock, *_ = broker()
+    denied(b, "https://api.example.com" + target, code="url_denied")
+    assert sock.sent == b""
