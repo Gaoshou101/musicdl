@@ -107,8 +107,8 @@ def test_descendant_group_is_killed():
     with tempfile.NamedTemporaryFile(delete=False) as handle:
         pid_file = handle.name
     try:
-        code = ("import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c',"
-                f"'import os,time; open({pid_file!r},\\\"w\\\").write(str(os.getpid())); time.sleep(10)']); time.sleep(10)")
+        child_code = f'import os,time; open({pid_file!r}, "w").write(str(os.getpid())); time.sleep(10)'
+        code = f"import subprocess,sys,time; p=subprocess.Popen([sys.executable, '-c', {child_code!r}]); time.sleep(10)"
         step = run_supervisor(code, timeout_ms=100)
         assert step.response.error.code == "timeout"
         pid = None

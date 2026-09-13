@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from musicdl.ai import AIError, OpenAICompatibleClient
+from musicdl.ai import client as ai_client
 from musicdl.config import AISettings
 
 
@@ -229,6 +230,44 @@ async def test_deeply_nested_outer_json_is_invalid_response():
     with pytest.raises(AIError) as caught:
         await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])
     assert caught.value.code == "invalid_response"
+
+
+@run_sync
+async def test_outer_json_structure_over_configured_depth_is_invalid_response():
+    max_depth = getattr(ai_client, "MAX_AI_JSON_DEPTH", 128)
+    assert max_depth == 128
+    nested = (
+        b'{"nested":'
+        + b"[" * (max_depth + 1)
+        + b"]" * (max_depth + 1)
+        + b',"choices":[{"message":{"content":"{}"}}]}'
+    )
+    assert len(nested) < 65_536
+
+    async def handler(request):
+        return httpx.Response(200, content=nested)
+
+    with pytest.raises(AIError) as caught:
+        await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])
+    assert caught.value.code == "invalid_response"
+
+
+@run_sync
+async def test_json_delimiters_inside_strings_do_not_count_toward_structure_depth():
+    content = json.dumps(
+        {
+            "text": "[]{} brackets, escaped quote: \\\" and backslashes: \\\\",
+            "empty": {},
+        },
+        ensure_ascii=False,
+    )
+
+    async def handler(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    result = await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])
+    assert result["empty"] == {}
+    assert "[]{}" in result["text"]
 
 
 @run_sync

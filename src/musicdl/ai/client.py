@@ -11,6 +11,34 @@ from .models import AIError
 
 MAX_AI_CONTENT_CHARS = 16_384
 MAX_AI_BODY_BYTES = 65_536
+MAX_AI_JSON_DEPTH = 128
+
+
+def _exceeds_json_depth(value: str | bytes, maximum: int = MAX_AI_JSON_DEPTH) -> bool:
+    """Check JSON nesting without recursively parsing attacker-controlled input."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in value:
+        if isinstance(character, int):
+            character = chr(character)
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > maximum:
+                return True
+        elif character in "]}":
+            depth -= 1
+    return False
 
 
 class OpenAICompatibleClient:
@@ -54,6 +82,8 @@ class OpenAICompatibleClient:
             raise AIError("invalid_response") from None
 
         try:
+            if _exceeds_json_depth(body):
+                raise ValueError
             outer = json.loads(body)
             choices = outer["choices"]
             if not isinstance(choices, list) or len(choices) != 1:
@@ -66,6 +96,8 @@ class OpenAICompatibleClient:
                 raise ValueError
             content = choices[0]["message"]["content"]
             if not isinstance(content, str) or len(content) > MAX_AI_CONTENT_CHARS:
+                raise ValueError
+            if _exceeds_json_depth(content):
                 raise ValueError
             result = json.loads(content)
             if not isinstance(result, dict):
