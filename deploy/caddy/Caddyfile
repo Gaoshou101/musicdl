@@ -1,0 +1,18 @@
+{
+    email ops@example.invalid
+    auto_https disable_redirects
+}
+:80 { redir https://{host}{uri} permanent }
+music.example.invalid {
+    tls /etc/caddy/tls/fullchain.pem /etc/caddy/tls/privkey.pem
+    encode gzip
+    @callback path /wecom/callback
+    log_skip @callback
+    # Preserve callback query parameters: WeCom signature validation needs them.
+    handle @callback { reverse_proxy musicdl:8000 }
+    @static path /static/*
+    handle @static { header Cache-Control "public, max-age=604800, immutable"; file_server }
+    handle_path /api/* { reverse_proxy musicdl:8000 }
+    handle { reverse_proxy musicdl:8000 }
+    log { output file /var/log/caddy/access.json; format json }
+}
