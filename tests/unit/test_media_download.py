@@ -286,3 +286,28 @@ def test_max_bytes_exact_boundary_and_one_over(tmp_path):
     with pytest.raises(MediaError, match="file_too_large"):
         asyncio.run(download_candidate(candidate(item="over"), Source(DownloadMetadata(chunks(data), extension="mp3")), tmp_path, request_id="o", max_bytes=len(data)-1))
     assert len(list(tmp_path.rglob("*.mp3"))) == 1 and not list(tmp_path.glob(".musicdl-*.part"))
+
+def test_m4a_with_large_ftyp_box_succeeds(tmp_path):
+    ftyp = (68).to_bytes(4, "big") + b"ftypM4A " + (0).to_bytes(4, "big") + (b"M4A " * 13)
+    data = ftyp + b"audio_data"
+    result = asyncio.run(download_candidate(candidate(fmt="m4a"), Source(DownloadMetadata(chunks(data), extension="m4a")), tmp_path, request_id="m4a"))
+    assert result.extension == ".m4a"
+
+
+def test_download_candidate_falls_back_when_link_unsupported(tmp_path, monkeypatch):
+    data = ID3 + b"payload"
+    def fake_link(src, dst):
+        err = OSError("Invalid cross-device link")
+        err.errno = 18
+        raise err
+    monkeypatch.setattr(os, "link", fake_link)
+    result = asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks(data), extension="mp3")), tmp_path, request_id="fallback"))
+    assert result.size_bytes == len(data)
+    assert list(tmp_path.rglob("*.mp3"))
+
+
+def test_download_candidate_early_stops_when_exceeding_declared_size(tmp_path):
+    data = ID3 + b"payload"
+    with pytest.raises(MediaError, match="size_mismatch"):
+        asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks(data), extension="mp3", declared_size=5)), tmp_path, request_id="early"))
+    assert not list(tmp_path.rglob("*.mp3"))

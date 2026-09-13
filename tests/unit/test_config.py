@@ -77,6 +77,8 @@ def test_telegram_enabled_rejects_missing_credentials(monkeypatch):
     monkeypatch.setenv("MUSICDL_TELEGRAM__ENABLED", "true")
     with pytest.raises(ValidationError):
         AppSettings()
+
+
 def test_ai_is_disabled_by_default():
     settings = AppSettings().ai
     assert settings.enabled is False
@@ -145,3 +147,21 @@ def test_ai_accepts_numeric_max_candidates_environment_string(monkeypatch):
     settings = AppSettings().ai
 
     assert settings.max_candidates == 12
+
+
+def test_redis_timeouts_default_and_environment_override(monkeypatch):
+    settings = AppSettings()
+    assert settings.redis.connect_timeout == 2.0
+    assert settings.redis.operation_timeout == 2.0
+    monkeypatch.setenv("MUSICDL_REDIS__CONNECT_TIMEOUT", "4.5")
+    monkeypatch.setenv("MUSICDL_REDIS__OPERATION_TIMEOUT", "3")
+    settings = AppSettings()
+    assert settings.redis.connect_timeout == 4.5
+    assert settings.redis.operation_timeout == 3.0
+
+
+@pytest.mark.parametrize("name", ["CONNECT_TIMEOUT", "OPERATION_TIMEOUT"])
+def test_redis_timeouts_reject_invalid_values(monkeypatch, name):
+    monkeypatch.setenv(f"MUSICDL_REDIS__{name}", "31")
+    with pytest.raises(ValidationError):
+        AppSettings()
