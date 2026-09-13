@@ -7,6 +7,11 @@ from uuid import uuid4
 def test_deno_source_has_no_permission_escape():
  text=(Path(__file__).parents[2]/"src/musicdl_plugin_runner/deno_host.js").read_text(encoding="utf-8")
  assert "Object.defineProperty(globalThis,\"Worker\"" in text and "--allow" not in text
+
+def test_deno_source_disables_process_escape():
+ text=(Path(__file__).parents[2]/"src/musicdl_plugin_runner/deno_host.js").read_text(encoding="utf-8")
+ assert 'Object.defineProperty(globalThis,"process",{value:undefined,writable:false,configurable:false})' in text
+ assert 'const process=undefined;' in text
 def test_deno_command_exact():
  source="function handle(r){return {hits:[]}}"
  inv=PluginInvocation(manifest=PluginManifest(plugin_id="p",version="1",language="javascript",operations=("search",),sha256=hashlib.sha256(source.encode()).hexdigest()),source=source,request=PluginRequest(protocol="musicdl.plugin/v1",request_id=uuid4(),operation="search"))
@@ -57,7 +62,7 @@ def test_deno_infinite_loop_times_out():
  assert step.response.error.code == "timeout"
 
 @pytest.mark.parametrize("source", [
- "function handle(r){ process.exit() }", "function handle(r){ require('os') }",
+ "function handle(r){ process.exit() }", "function handle(r){ globalThis.process.exit() }", "function handle(r){ require('os') }",
  "async function handle(r){ await fetch('https://example.invalid') }",
  "function handle(r){ Deno.env.get('HOME') }", "async function handle(r){ await Deno.readTextFile('/etc/passwd') }",
  "async function handle(r){ await new Deno.Command('id').output() }", "function handle(r){ Deno.dlopen('x', {}) }",

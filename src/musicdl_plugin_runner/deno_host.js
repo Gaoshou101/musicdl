@@ -11,8 +11,9 @@ function stepFrom(value) {
   return {response:{protocol:"musicdl.plugin/v1",request_id:request.request_id,operation:request.operation,ok:true,result:value},action:null};
 }
 Object.defineProperty(globalThis,"Worker",{value:undefined,writable:false,configurable:false});
+Object.defineProperty(globalThis,"process",{value:undefined,writable:false,configurable:false});
 try {
-  const fn=new Function("request", `"use strict"; const Worker=undefined; ${source}\n; return typeof handle === "function" ? handle(request) : undefined;`);
+  const fn=new Function("request", `"use strict"; const Worker=undefined; const process=undefined; ${source}\n; return typeof handle === "function" ? handle(request) : undefined;`);
   const result=await fn(request);
   if(result===undefined) throw new Error("missing handle");
   await Deno.stdout.write(new TextEncoder().encode(JSON.stringify(stepFrom(result))));

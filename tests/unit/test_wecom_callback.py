@@ -2,8 +2,6 @@ import time
 import base64
 import asyncio
 import logging
-import sys
-import types
 from unittest.mock import AsyncMock
 import httpx
 
@@ -11,6 +9,7 @@ import pytest
 from pydantic import SecretStr
 
 from musicdl.app import create_app
+import musicdl.app as app_module
 from musicdl.config import AppSettings, WeComSettings
 from musicdl.wecom.crypto import WeComCrypto, compute_signature
 from musicdl.wecom.state import StateUnavailable
@@ -31,7 +30,7 @@ class Chunks(httpx.AsyncByteStream):
 
 
 def settings(**kw):
-    w = dict(enabled=True, corp_id="corp", agent_id=7, token=SecretStr("tok"), encoding_aes_key=SecretStr(KEY), allowed_users=["u1"])
+    w = dict(enabled=True, corp_id="corp", agent_id=7, token=SecretStr("tok"), secret=SecretStr("outbound-secret"), encoding_aes_key=SecretStr(KEY), allowed_users=["u1"])
     w.update(kw)
     return AppSettings(wecom=WeComSettings(**w))
 
@@ -299,28 +298,28 @@ def test_lifespan_initializes_injected_state_and_get_works(fake_state):
     fake_state.ping.assert_not_awaited()
 
 
-def test_lifespan_passes_conservative_redis_timeouts(monkeypatch):
+def test_lifespan_passes_conservative_redis_timeouts(monkeypatch, tmp_path):
     fake_client = AsyncMock()
     fake_client.ping.return_value = True
-    redis_cls = types.SimpleNamespace(from_url=lambda *args, **kwargs: fake_client)
-    redis_asyncio = types.ModuleType("redis.asyncio")
-    redis_asyncio.Redis = redis_cls
-    redis_pkg = types.ModuleType("redis")
-    redis_pkg.asyncio = redis_asyncio
-    monkeypatch.setitem(sys.modules, "redis", redis_pkg)
-    monkeypatch.setitem(sys.modules, "redis.asyncio", redis_asyncio)
     captured = {}
-    original = redis_cls.from_url
-    def capture(*args, **kwargs):
-        captured.update(kwargs)
-        return original(*args, **kwargs)
-    redis_cls.from_url = capture
-    app = create_app(settings(), clock=lambda: 1_700_000_000)
-    async def run():
-      async with app.router.lifespan_context(app):
-        assert app.state.wecom_state is not None
-    asyncio.run(run())
+    class FakeRedis:
+        @classmethod
+        def from_url(cls, *args, **kwargs):
+            captured.update(kwargs)
+            return fake_client
+
+    monkeypatch.setattr(app_module, "Redis", FakeRedis)
+    configured = settings()
+    configured.plugin.app_data_root = str(tmp_path)
+
+    runtime = app_module._build_runtime(configured, clock=lambda: 1_700_000_000)
+    assert runtime.state.client is fake_client
     assert captured["decode_responses"] is False
     assert captured["socket_connect_timeout"] == 2.0
     assert captured["socket_timeout"] == 2.0
+
+    async def close():
+        await runtime.aclose()
+
+    asyncio.run(close())
     fake_client.aclose.assert_awaited_once()

@@ -64,6 +64,7 @@ class WeComSettings(BaseModel):
     corp_id: str | None = None
     agent_id: int | None = Field(default=None, gt=0)
     token: SecretStr | None = None
+    secret: SecretStr | None = None
     encoding_aes_key: SecretStr | None = None
     allowed_users: list[str] = Field(default_factory=list)
     clock_skew: int = Field(default=300, ge=1, le=3600)
@@ -76,6 +77,8 @@ class WeComSettings(BaseModel):
             self.corp_id = self.corp_id.strip()
         if self.token is not None:
             self.token = SecretStr(self.token.get_secret_value().strip())
+        if self.secret is not None:
+            self.secret = SecretStr(self.secret.get_secret_value().strip())
         if self.encoding_aes_key is not None:
             key = self.encoding_aes_key.get_secret_value()
             if len(key) != 43:
@@ -93,7 +96,15 @@ class WeComSettings(BaseModel):
                 normalized.append(item)
         self.allowed_users = normalized
         if self.enabled:
-            if not self.corp_id or self.agent_id is None or not self.token or not self.token.get_secret_value() or not self.encoding_aes_key:
+            if (
+                not self.corp_id
+                or self.agent_id is None
+                or not self.token
+                or not self.token.get_secret_value()
+                or not self.secret
+                or not self.secret.get_secret_value()
+                or not self.encoding_aes_key
+            ):
                 raise ValueError("enabled WeCom settings require credentials")
             if not 1 <= len(self.allowed_users) <= 100 or any(len(item) > 128 for item in self.allowed_users):
                 raise ValueError("enabled WeCom settings require a non-empty allowlist")
@@ -103,6 +114,7 @@ class WeComSettings(BaseModel):
 class PluginSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     service_url: AnyUrl = AnyUrl("http://plugin:8080")
+    app_data_root: str = "/data/app"
 
     @field_validator("service_url")
     @classmethod
@@ -167,10 +179,20 @@ class AppSettings(BaseSettings):
 
     @model_validator(mode="after")
     def roots_must_differ(self):
-        media = posixpath.normpath(self.media.root)
-        session = posixpath.normpath(self.telegram.session_root)
-        if not media.startswith("/") or not session.startswith("/"):
-            raise ValueError("media and Telegram session roots must be absolute POSIX paths")
-        if media == session or media.startswith(session + "/") or session.startswith(media + "/"):
-            raise ValueError("media root and Telegram session root must be separate")
+        roots = {
+            "media": posixpath.normpath(self.media.root.strip()),
+            "Telegram session": posixpath.normpath(self.telegram.session_root.strip()),
+            "plugin app-data": posixpath.normpath(self.plugin.app_data_root.strip()),
+        }
+        if any(not root.startswith("/") for root in roots.values()):
+            raise ValueError("media, Telegram session, and plugin app-data roots must be absolute POSIX paths")
+        for name, root in roots.items():
+            for other_name, other in roots.items():
+                if name != other_name and (
+                    root == other or other == "/" or root.startswith(other + "/")
+                ):
+                    raise ValueError(f"{name} root and {other_name} root must be separate")
+        self.media.root = roots["media"]
+        self.telegram.session_root = roots["Telegram session"]
+        self.plugin.app_data_root = roots["plugin app-data"]
         return self

@@ -18,6 +18,43 @@ def test_settings_map_prefixed_nested_environment(monkeypatch):
     assert settings.media.root == "/data/music"
     assert settings.telegram.session_root == "/data/sessions"
     assert str(settings.plugin.service_url) == "http://plugin:8080/"
+    assert settings.plugin.app_data_root == "/data/app"
+
+
+def test_plugin_app_data_root_maps_environment_and_is_not_relative(monkeypatch):
+    monkeypatch.setenv("MUSICDL_PLUGIN__APP_DATA_ROOT", "/srv/musicdl/plugin-data")
+    settings = AppSettings()
+    assert settings.plugin.app_data_root == "/srv/musicdl/plugin-data"
+
+
+def test_plugin_app_data_root_rejects_relative_path(monkeypatch):
+    monkeypatch.setenv("MUSICDL_PLUGIN__APP_DATA_ROOT", "plugin-data")
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
+@pytest.mark.parametrize(
+    ("media", "session", "plugin"),
+    [
+        ("/data/app", "/data/sessions", "/data/app"),
+        ("/data/music", "/data/app", "/data/app/cache"),
+        ("/data/music", "/data/sessions", "/data/music/plugin"),
+    ],
+)
+def test_all_data_roots_must_be_pairwise_disjoint(monkeypatch, media, session, plugin):
+    monkeypatch.setenv("MUSICDL_MEDIA__ROOT", media)
+    monkeypatch.setenv("MUSICDL_TELEGRAM__SESSION_ROOT", session)
+    monkeypatch.setenv("MUSICDL_PLUGIN__APP_DATA_ROOT", plugin)
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
+def test_root_data_directory_overlaps_every_other_root(monkeypatch):
+    monkeypatch.setenv("MUSICDL_MEDIA__ROOT", "/data/music")
+    monkeypatch.setenv("MUSICDL_TELEGRAM__SESSION_ROOT", "/data/sessions")
+    monkeypatch.setenv("MUSICDL_PLUGIN__APP_DATA_ROOT", "/")
+    with pytest.raises(ValidationError):
+        AppSettings()
 
 
 def test_settings_rejects_unsupported_config_version(monkeypatch):
