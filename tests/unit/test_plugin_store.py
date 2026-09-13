@@ -92,6 +92,30 @@ def test_registry_replace_failure_cleans_temporary_file(tmp_path, monkeypatch):
     assert not list(registry_dir.glob(".registry.json.*.tmp"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX fsync cleanup assertion")
+def test_source_write_failure_cleans_new_file(tmp_path, monkeypatch):
+    store = PluginStore(tmp_path)
+    original_fsync = os.fsync
+
+    def fail_source_fsync(fd):
+        raise OSError("injected source fsync failure")
+
+    monkeypatch.setattr(os, "fsync", fail_source_fsync)
+    with pytest.raises(OSError, match="source fsync"):
+        install(store)
+    digest = hashlib.sha256(SOURCE.encode()).hexdigest()
+    assert not (tmp_path / "plugins" / "demo" / f"{digest}.py").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission assertion")
+def test_load_rejects_source_with_insecure_mode(tmp_path):
+    store = PluginStore(tmp_path)
+    stored = install(store)
+    stored.path.chmod(0o644)
+    with pytest.raises(OSError, match="0600"):
+        store.load("demo", stored.manifest.sha256)
+
+
 def test_enabled_state_is_independent_per_version(tmp_path):
     store = PluginStore(tmp_path)
     one = install(store, version="1")

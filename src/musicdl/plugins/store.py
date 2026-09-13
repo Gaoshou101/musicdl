@@ -48,10 +48,28 @@ class PluginStore:
             info = path.lstat()
         if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
             raise OSError(f"plugin storage directory is not a real directory: {path}")
-        try:
+        if os.name != "nt":
             path.chmod(0o700)
-        except OSError:
-            pass
+
+    def _open_plugin_dir_posix(self, plugin_id: str) -> tuple[int, int]:
+        """Open plugins/id anchored to directory fds (POSIX race resistance)."""
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        parent_fd = os.open(self._plugins, directory_flags)
+        try:
+            try:
+                os.mkdir(plugin_id, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            child_fd = os.open(plugin_id, directory_flags, dir_fd=parent_fd)
+            mode = stat.S_IMODE(os.fstat(child_fd).st_mode)
+            if mode != 0o700:
+                os.fchmod(child_fd, 0o700)
+                if stat.S_IMODE(os.fstat(child_fd).st_mode) != 0o700:
+                    raise OSError("plugin directory mode must be 0700")
+            return parent_fd, child_fd
+        except BaseException:
+            os.close(parent_fd)
+            raise
 
     @staticmethod
     def _manifest_data(manifest: PluginManifest) -> dict:
@@ -127,36 +145,90 @@ class PluginStore:
             allowed_hosts=tuple(allowed_hosts),
             sha256=digest,
         )
-        plugin_dir = self._plugins / plugin_id
-        self._ensure_directory(plugin_dir)
         suffix = ".py" if language == "python" else ".js"
-        target = plugin_dir / f"{digest}{suffix}"
+        plugin_dir = self._plugins / plugin_id
+        created = False
+        source_ready = False
+        parent_fd = child_fd = None
         try:
-            existing = target.lstat()
-        except FileNotFoundError:
-            existing = None
-        if existing is None:
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            try:
-                fd = os.open(target, flags, 0o600)
-                with os.fdopen(fd, "wb") as stream:
-                    stream.write(source_bytes)
-                    stream.flush()
-                    os.fsync(stream.fileno())
+            if os.name != "nt":
+                parent_fd, child_fd = self._open_plugin_dir_posix(plugin_id)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                 try:
-                    target.chmod(0o600)
-                except OSError:
-                    pass
-            except FileExistsError:
-                existing = target.lstat()
+                    fd = os.open(f"{digest}{suffix}", flags, 0o600, dir_fd=child_fd)
+                    created = True
+                except FileExistsError:
+                    fd = None
+                if created:
+                    try:
+                        with os.fdopen(fd, "wb") as stream:
+                            stream.write(source_bytes)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        info = os.stat(f"{digest}{suffix}", dir_fd=child_fd, follow_symlinks=False)
+                        if stat.S_IMODE(info.st_mode) != 0o600:
+                            raise OSError("plugin source mode must be 0600")
+                    except BaseException:
+                        try:
+                            os.unlink(f"{digest}{suffix}", dir_fd=child_fd)
+                        except FileNotFoundError:
+                            pass
+                        raise
+                check_fd = os.open(f"{digest}{suffix}", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=child_fd)
+                try:
+                    info = os.fstat(check_fd)
+                    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                        raise OSError("plugin source must be a regular 0600 file")
+                    chunks = []
+                    while sum(map(len, chunks)) <= len(source_bytes):
+                        chunk = os.read(check_fd, len(source_bytes) + 1 - sum(map(len, chunks)))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    if b"".join(chunks) != source_bytes:
+                        raise ValueError("plugin version is immutable")
+                finally:
+                    os.close(check_fd)
+                source_ready = True
             else:
-                existing = target.lstat()
-        if stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode):
-            raise OSError("plugin source must not be a symlink or non-file")
-        if target.read_bytes() != source_bytes or (os.name != "nt" and stat.S_IMODE(existing.st_mode) != 0o600):
-            raise ValueError("plugin version is immutable")
+                self._ensure_directory(plugin_dir)
+                target = plugin_dir / f"{digest}{suffix}"
+                try:
+                    existing = target.lstat()
+                except FileNotFoundError:
+                    existing = None
+                if existing is None:
+                    try:
+                        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        created = True
+                        with os.fdopen(fd, "wb") as stream:
+                            stream.write(source_bytes)
+                            stream.flush()
+                    except FileExistsError:
+                        existing = target.lstat()
+                    except BaseException:
+                        if created:
+                            target.unlink(missing_ok=True)
+                        raise
+                if target.is_symlink() or not target.is_file() or target.read_bytes() != source_bytes:
+                    raise ValueError("plugin version is immutable")
+                source_ready = True
+        except BaseException:
+            if created and not source_ready:
+                try:
+                    if child_fd is not None:
+                        os.unlink(f"{digest}{suffix}", dir_fd=child_fd)
+                    else:
+                        target.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass
+            raise
+        finally:
+            if child_fd is not None:
+                os.close(child_fd)
+            if parent_fd is not None:
+                os.close(parent_fd)
+        target = plugin_dir / f"{digest}{suffix}"
 
         registry = self._read_registry()
         versions = registry.setdefault(plugin_id, {})
@@ -183,6 +255,8 @@ class PluginStore:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             raise OSError("plugin source must not be a symlink or non-file")
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+            raise OSError("plugin source mode must be 0600")
         if hashlib.sha256(path.read_bytes()).hexdigest() != sha256:
             raise ValueError("stored source digest mismatch")
         return StoredPlugin(manifest, path, bool(entry.get("enabled", True)))
