@@ -175,3 +175,25 @@ def test_request_target_whitespace_and_controls_are_rejected(target):
     b, sock, *_ = broker()
     denied(b, "https://api.example.com" + target, code="url_denied")
     assert sock.sent == b""
+
+
+@pytest.mark.parametrize("value", ["-1", "+1", "1_0", "0x10", "", " ", "１２"])
+def test_content_length_requires_ascii_decimal(value):
+    raw = b"HTTP/1.1 200 OK\r\nContent-Length: " + value.encode("utf-8") + b"\r\n\r\n"
+    b, *_ = broker(raw)
+    denied(b, "https://api.example.com/x", code="http_error")
+
+
+def test_content_length_accepts_zero_and_one_megabyte():
+    for value, body in (("0", b""), ("1048576", b"x" * 1048576)):
+        raw = b"HTTP/1.1 200 OK\r\nContent-Length: " + value.encode("ascii") + b"\r\n\r\n" + body
+        b, *_ = broker(raw)
+        obs = b.fetch(action("https://api.example.com/x"), ("api.example.com",))
+        assert len(base64.b64decode(obs.body)) == len(body)
+
+
+@pytest.mark.parametrize("url", ["https://api.example.com/café", "https://api.example.com/x?q=café"])
+def test_non_ascii_request_target_is_rejected_before_resolution(url):
+    b = HttpsActionBroker(resolver=lambda *_: pytest.fail("must not resolve"),
+                          connector=lambda *_: pytest.fail("must not connect"))
+    denied(b, url, code="url_denied")

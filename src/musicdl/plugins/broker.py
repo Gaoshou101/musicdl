@@ -57,6 +57,11 @@ class HttpsActionBroker:
         allowed = {_hostname(item) for item in allowed_hosts}
         if approved not in allowed:
             raise ActionDenied("host_denied", "host is not allowlisted")
+        target = parsed.path or "/"
+        if parsed.query:
+            target += "?" + parsed.query
+        if not target.isascii() or any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in target):
+            raise ActionDenied("url_denied", "request target contains non-ASCII, whitespace, or controls")
 
         try:
             resolved = list(self.resolver(approved, 443))
@@ -98,11 +103,6 @@ class HttpsActionBroker:
                 wrapped = self.ssl_context.wrap_socket(raw, server_hostname=approved)
             except Exception as exc:
                 raise ActionDenied("tls_error", "TLS negotiation failed") from exc
-            target = parsed.path or "/"
-            if parsed.query:
-                target += "?" + parsed.query
-            if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in target):
-                raise ActionDenied("url_denied", "request target contains whitespace or controls")
             wrapped.sendall((f"GET {target} HTTP/1.1\r\nHost: {approved}\r\n"
                              "Accept: application/json\r\nConnection: close\r\n\r\n").encode("ascii"))
             response = http.client.HTTPResponse(wrapped)
@@ -121,11 +121,11 @@ class HttpsActionBroker:
                 selected[name] = value
             length = selected.get("content-length")
             if length is not None:
-                try:
-                    if int(length) > MAX_ACTION_BODY_BYTES:
-                        raise ActionDenied("body_too_large", "response body exceeds 1 MiB")
-                except ValueError as exc:
-                    raise ActionDenied("http_error", "invalid Content-Length") from exc
+                if not length or not length.isascii() or not length.isdecimal():
+                    raise ActionDenied("http_error", "invalid Content-Length")
+                value = int(length)
+                if value > MAX_ACTION_BODY_BYTES:
+                    raise ActionDenied("body_too_large", "response body exceeds 1 MiB")
             body = response.read(MAX_ACTION_BODY_BYTES + 1)
             if len(body) > MAX_ACTION_BODY_BYTES:
                 raise ActionDenied("body_too_large", "response body exceeds 1 MiB")
