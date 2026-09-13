@@ -16,6 +16,10 @@ from musicdl.contracts.plugin import MAX_INVOCATION_BYTES, PluginInvocation, Plu
 MAX_STDOUT_BYTES = 64 * 1024
 MAX_STDERR_BYTES = 16 * 1024
 GRACE_SECONDS = 0.25
+def _remove_job_dir(path: str) -> bool:
+    try: shutil.rmtree(path)
+    except (OSError, RuntimeError): return False
+    return not os.path.exists(path)
 
 @dataclass(frozen=True)
 class HostCommand:
@@ -31,7 +35,8 @@ def build_host_command(invocation: PluginInvocation) -> HostCommand:
     from pathlib import Path
     template = (Path(__file__).with_name("deno_host.js")).read_text(encoding="utf-8")
     payload = "const invocation=JSON.parse(" + json.dumps(invocation.model_dump_json()) + ");\n" + template
-    return HostCommand(["deno", "run", "--quiet", "--no-config", "--no-lock", "--no-npm", "--cached-only", "--v8-flags=--max-old-space-size=128", "-"], {"DENO_NO_PROMPT": "1"}, payload.encode())
+    deno = "/usr/bin/deno" if os.name == "posix" else (shutil.which("deno") or "deno")
+    return HostCommand([deno, "run", "--quiet", "--no-config", "--no-lock", "--no-npm", "--cached-only", "--v8-flags=--max-old-space-size=128", "-"], {"DENO_NO_PROMPT": "1"}, payload.encode())
 
 
 class Supervisor:
@@ -114,7 +119,7 @@ class Supervisor:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def execute(self, invocation: PluginInvocation) -> PluginStep:
+    async def _execute(self, invocation: PluginInvocation) -> PluginStep:
         if not await self._claim():
             return self._with_request(self._error("busy", "plugin runner is busy"), invocation)
         proc: asyncio.subprocess.Process | None = None
@@ -197,5 +202,12 @@ class Supervisor:
             if proc is not None and proc.returncode is None:
                 await self._terminate(proc)
             if job_dir is not None:
-                shutil.rmtree(job_dir, ignore_errors=True)
+                self._cleanup_failed = not _remove_job_dir(job_dir)
             await self._release()
+
+    async def execute(self, invocation: PluginInvocation) -> PluginStep:
+        self._cleanup_failed = False
+        step = await self._execute(invocation)
+        if self._cleanup_failed:
+            return self._with_request(self._error("cleanup_failed", "plugin cleanup failed"), invocation)
+        return step

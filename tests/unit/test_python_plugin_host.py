@@ -48,7 +48,17 @@ def test_valid_result_is_deterministic():
     source="def handle(request): return {'hits': [{'id': 'fixed'}]}"
     first, second = run(source), run(source)
     assert first.returncode == second.returncode == 0
-    assert json.loads(first.stdout) == json.loads(second.stdout)
+    assert json.loads(first.stdout)["response"]["result"] == json.loads(second.stdout)["response"]["result"]
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX restricted runtime unavailable")
+def test_valid_action_step():
+    p=run("def handle(request): return {'action': {'action_id':'a1','method':'GET','url':'https://example.com/x'}}")
+    assert json.loads(p.stdout)["action"]["action_id"] == "a1"
+
+def test_action_step_shape_is_validated_without_runtime():
+    step=host._step_from_value(invoke("pass"), {"action":{"action_id":"a1","method":"GET","url":"https://example.com/x"}})
+    assert step.action.action_id == "a1"
+    assert host._step_from_value(invoke("pass"), {"action":{"method":"POST"}}).response.error.code == "plugin_error"
 
 def test_mocked_host_applies_exact_limits_and_seccomp_before_source(monkeypatch):
     calls=[]
@@ -75,8 +85,16 @@ def test_mocked_host_fails_closed_before_source_sentinel(monkeypatch):
     step=host._run(inv)
     assert step.response.error.code == "sandbox_unavailable"
 
+def test_mocked_rlimit_failure_is_closed_before_source(monkeypatch):
+    class R:
+        RLIMIT_CPU=1; RLIMIT_AS=2; RLIMIT_FSIZE=3; RLIMIT_NOFILE=4; RLIMIT_CORE=5
+        def setrlimit(self, *_): raise OSError("limit canary")
+    monkeypatch.setattr(host, "resource", R())
+    monkeypatch.setattr(host.seccomp, "install", lambda: (_ for _ in ()).throw(AssertionError("seccomp after failed limits")))
+    step=host._run(invoke("raise RuntimeError('source sentinel')"))
+    assert step.response.error.code == "sandbox_unavailable"
+
 def test_seccomp_fake_library_installs_complete_deny_policy(monkeypatch):
-    if os.name != "posix": pytest.skip("libseccomp is POSIX-only")
     calls=[]
     class Fn:
         def __init__(self, fn): self.fn=fn
@@ -84,20 +102,20 @@ def test_seccomp_fake_library_installs_complete_deny_policy(monkeypatch):
     class Lib:
         def __init__(self):
             self.seccomp_init=Fn(lambda action: calls.append(("init",action)) or 7)
-            self.seccomp_syscall_resolve_name=Fn(lambda name: 42)
+            self.seccomp_syscall_resolve_name=Fn(lambda name: -1 if name == b"openat2" else 42)
             self.seccomp_rule_add=Fn(lambda ctx, action, num, count: calls.append(("rule",action,num,count)) or 0)
             self.seccomp_load=Fn(lambda ctx: calls.append(("load",ctx)) or 0)
             self.seccomp_release=Fn(lambda ctx: calls.append(("release",ctx)))
-    lib=Lib(); monkeypatch.setattr(seccomp.ctypes, "CDLL", lambda name: lib)
+    lib=Lib(); monkeypatch.setattr(seccomp, "os", type("O",(),{"name":"posix"})()); monkeypatch.setattr(seccomp.ctypes, "CDLL", lambda name: lib)
     assert seccomp.install() is True
     assert calls[0] == ("init",0x7FFF0000)
-    assert len([c for c in calls if c[0] == "rule"]) == len(seccomp._DENIED)
+    assert len([c for c in calls if c[0] == "rule"]) == len(seccomp._DENIED)-1
+    assert set(seccomp._DENIED) >= {"mkdir","mkdirat","rmdir","rename","renameat","renameat2","link","linkat","symlink","symlinkat","unlink","unlinkat","mknod","mknodat","truncate","ftruncate","chmod","fchmod","fchmodat","chown","fchown","lchown","fchownat","utime","utimes","futimesat","utimensat","io_uring_setup","io_uring_enter","io_uring_register"}
     assert all(c[1] == (0x00050000 | 1) for c in calls if c[0] == "rule")
     assert calls[-1] == ("release",7)
 
 @pytest.mark.parametrize("failure", ["init", "rule", "load"])
 def test_seccomp_fake_library_errors_release_context(monkeypatch, failure):
-    if os.name != "posix": pytest.skip("libseccomp is POSIX-only")
     class Fn:
         def __init__(self, fn): self.fn=fn
         def __call__(self,*args): return self.fn(*args)
@@ -109,6 +127,6 @@ def test_seccomp_fake_library_errors_release_context(monkeypatch, failure):
             self.seccomp_load=Fn(lambda ctx: -1 if failure == "load" else 0)
             self.released=False
             self.seccomp_release=Fn(lambda ctx: setattr(self,"released",True))
-    lib=Lib(); monkeypatch.setattr(seccomp.ctypes, "CDLL", lambda name: lib)
+    lib=Lib(); monkeypatch.setattr(seccomp, "os", type("O",(),{"name":"posix"})()); monkeypatch.setattr(seccomp.ctypes, "CDLL", lambda name: lib)
     with pytest.raises(RuntimeError): seccomp.install()
     if failure != "init": assert lib.released

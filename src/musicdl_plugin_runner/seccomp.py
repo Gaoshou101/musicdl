@@ -1,7 +1,7 @@
 """Small libseccomp wrapper used by the Python plugin child."""
 from __future__ import annotations
 import ctypes, errno, os
-_DENIED = ("open openat openat2 creat socket socketpair connect bind listen accept accept4 clone clone3 fork vfork execve execveat ptrace process_vm_readv process_vm_writev kill tkill tgkill pidfd_open pidfd_getfd pidfd_send_signal setsid setpgid mount umount2 pivot_root chroot unshare setns keyctl add_key request_key bpf perf_event_open userfaultfd").split()
+_DENIED = ("open openat openat2 creat socket socketpair connect bind listen accept accept4 clone clone3 fork vfork execve execveat ptrace process_vm_readv process_vm_writev kill tkill tgkill pidfd_open pidfd_getfd pidfd_send_signal setsid setpgid mount umount2 pivot_root chroot unshare setns keyctl add_key request_key bpf perf_event_open userfaultfd mkdir mkdirat rmdir rename renameat renameat2 link linkat symlink symlinkat unlink unlinkat mknod mknodat truncate ftruncate chmod fchmod fchmodat chown fchown lchown fchownat utime utimes futimesat utimensat io_uring_setup io_uring_enter io_uring_register").split()
 def install() -> bool:
     if os.name != "posix": return False
     try: lib = ctypes.CDLL("libseccomp.so.2")

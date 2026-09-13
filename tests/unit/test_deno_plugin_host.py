@@ -1,4 +1,4 @@
-import hashlib,json,os,shutil,pytest
+import asyncio,hashlib,json,os,shutil,pytest
 from pathlib import Path
 from musicdl_plugin_runner.supervisor import build_host_command
 from musicdl.contracts.plugin import PluginInvocation,PluginManifest,PluginRequest
@@ -11,20 +11,17 @@ def test_deno_command_exact():
  source="function handle(r){return {hits:[]}}"
  inv=PluginInvocation(manifest=PluginManifest(plugin_id="p",version="1",language="javascript",operations=("search",),sha256=hashlib.sha256(source.encode()).hexdigest()),source=source,request=PluginRequest(protocol="musicdl.plugin/v1",request_id=uuid4(),operation="search"))
  c=build_host_command(inv)
- assert c.argv==["deno","run","--quiet","--no-config","--no-lock","--no-npm","--cached-only","--v8-flags=--max-old-space-size=128","-"] and c.env=={"DENO_NO_PROMPT":"1"}
-def test_deno_command_contract():
- if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
- pytest.skip("runtime exercised in integration acceptance suite")
-
+ assert c.argv[1:]==["run","--quiet","--no-config","--no-lock","--no-npm","--cached-only","--v8-flags=--max-old-space-size=128","-"] and c.env=={"DENO_NO_PROMPT":"1"}
 def _invocation(source):
  return PluginInvocation(manifest=PluginManifest(plugin_id="p",version="1",language="javascript",operations=("search",),sha256=hashlib.sha256(source.encode()).hexdigest()),source=source,request=PluginRequest(protocol="musicdl.plugin/v1",request_id=uuid4(),operation="search"))
 
 def test_deno_payload_is_safely_embedded():
- source="function handle(r){return {text: `quote' \" ${r.payload.x}`}}"
+ source="function handle(r){return {text: `quote' \" ${r.payload.x}\\nline`}}"
  c=build_host_command(_invocation(source))
  payload=c.stdin_payload.decode()
  assert "JSON.parse(" in payload and "--allow" not in payload
- assert "quote'" in payload and "${r.payload.x}" in payload
+ encoded=payload.split("JSON.parse(",1)[1].split(");",1)[0]
+ assert json.loads(json.loads(encoded))['source'] == source
 
 @pytest.mark.parametrize("name", ["process", "require", "fetch", "Deno.env", "Deno.readTextFile", "Deno.Command", "Deno.dlopen", "Worker"])
 def test_deno_host_structurally_denies_escape_hatches(name):
@@ -35,4 +32,26 @@ def test_deno_host_structurally_denies_escape_hatches(name):
 
 def test_deno_valid_runtime_when_available():
  if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
- pytest.skip("Deno runtime acceptance requires hostile container")
+ async def run(): return await __import__('musicdl_plugin_runner.supervisor',fromlist=['Supervisor']).Supervisor(build_host_command).execute(_invocation("function handle(r){return {hits: []}}"))
+ step=asyncio.run(run())
+ assert step.response.ok and step.response.result == {"hits": []}
+
+def test_deno_action_runtime_when_available():
+ if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
+ from musicdl_plugin_runner.supervisor import Supervisor
+ step=asyncio.run(Supervisor(build_host_command).execute(_invocation("function handle(r){return {action:{action_id:'a1',method:'GET',url:'https://example.com/x'}}}")))
+ assert step.action and step.action.action_id == "a1"
+
+@pytest.mark.parametrize("source", [
+ "function handle(r){ process.exit() }", "function handle(r){ require('os') }",
+ "async function handle(r){ await fetch('https://example.invalid') }",
+ "function handle(r){ Deno.env.get('HOME') }", "async function handle(r){ await Deno.readTextFile('/etc/passwd') }",
+ "async function handle(r){ await new Deno.Command('id').output() }", "function handle(r){ Deno.dlopen('x', {}) }",
+ "function handle(r){ new Worker('data:text/javascript,') }",
+])
+def test_deno_hostile_runtime_is_sanitized(source):
+ if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
+ from musicdl_plugin_runner.supervisor import Supervisor
+ step=asyncio.run(Supervisor(build_host_command).execute(_invocation(source)))
+ assert step.response.error.code == "plugin_error"
+ assert "example.invalid" not in step.response.error.message and "passwd" not in step.response.error.message

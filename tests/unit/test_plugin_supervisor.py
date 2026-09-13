@@ -171,3 +171,19 @@ def test_spawn_failure_releases_slot_and_sanitizes_error():
         return step
     step=asyncio.run(run())
     assert step.response.error.code == "spawn_failed"
+
+def test_job_directory_is_removed_after_success_and_spawn_failure(monkeypatch):
+    removed=[]
+    monkeypatch.setattr("musicdl_plugin_runner.supervisor.shutil.rmtree", lambda path: removed.append(path))
+    async def run():
+        good=Supervisor(command_builder=lambda inv: child("print('bad')"))
+        bad=Supervisor(command_builder=lambda inv: ["missing-plugin-host"])
+        await good.execute(invocation()); await bad.execute(invocation())
+    asyncio.run(run())
+    assert len(removed) == 2 and all(path.startswith(tempfile.gettempdir()) for path in removed)
+
+def test_cleanup_failure_is_sanitized(monkeypatch):
+    monkeypatch.setattr("musicdl_plugin_runner.supervisor._remove_job_dir", lambda path: False)
+    step=run_supervisor("print('unused')")
+    assert step.response.error.code == "cleanup_failed"
+    assert tempfile.gettempdir() not in step.response.error.message
