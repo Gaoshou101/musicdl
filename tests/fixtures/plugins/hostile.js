@@ -1,7 +1,7 @@
 function handle(request) {
   const mode = request.payload.mode;
   const attacks = {
-    environment: () => Deno.env.get("MUSICDL_CANARY"),
+    environment: () => Deno.env.get("MUSICDL_TEST_CANARY"),
     proc: () => Deno.readTextFile("/proc/1/environ"),
     shadow: () => Deno.readTextFile("/etc/shadow"),
     docker_socket: () => Deno.readFile("/run/docker.sock"),

@@ -43,9 +43,15 @@ def test_plugin_image_final_stage_has_only_runtime_packages():
     assert "libseccomp2=2.5.4-1+deb12u1" in final
     assert "unzip" not in final
     assert "curl" not in final
+    assert "pip install --no-cache-dir --timeout 120 --root-user-action=ignore ." in final
 
 
 def test_dockerignore_excludes_secrets_sessions_media_and_caches():
     text = (ROOT / ".dockerignore").read_text(encoding="utf-8")
     for pattern in (".git", ".venv", ".env", "telegram-sessions", "data/music", "__pycache__", ".pytest_cache"):
         assert pattern in text
+
+
+def test_plugin_runner_packages_deno_host_asset():
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'musicdl_plugin_runner = ["*.js"]' in text

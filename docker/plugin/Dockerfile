@@ -35,7 +35,7 @@ RUN deno --version
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir --root-user-action=ignore .
+RUN pip install --no-cache-dir --timeout 120 --root-user-action=ignore .
 RUN groupadd --gid 10001 musicdl \
     && useradd --uid 10001 --gid musicdl --create-home --shell /usr/sbin/nologin musicdl
 USER 10001:10001
