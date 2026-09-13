@@ -17,6 +17,8 @@ class SelectionRejected(ValueError):
 
 class RedisClient(Protocol):
     async def eval(self, script: str, numkeys: int, *args: Any) -> Any: ...
+    async def get(self, key: str) -> Any: ...
+    async def ping(self) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,19 @@ class RedisStateStore:
     async def _eval(self, script: str, keys: list[str], *args: Any) -> Any:
         try:
             return await self.client.eval(script, len(keys), *keys, *args)
+        except Exception as exc:
+            raise StateUnavailable() from exc
+
+    async def ping(self) -> bool:
+        try:
+            return bool(await self.client.ping())
+        except Exception as exc:
+            raise StateUnavailable() from exc
+
+    async def lookup_message(self, corp_id: str, request_id: str) -> bool:
+        key = f"{self.namespace}:dedup:message:{corp_id}:{request_id}"
+        try:
+            return bool(await self.client.get(key))
         except Exception as exc:
             raise StateUnavailable() from exc
 

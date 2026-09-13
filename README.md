@@ -2,13 +2,13 @@
 
 ## Current implementation
 
-The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and music-Bot adapter contracts, the Phase 4 injected download/media-safety engine, and the Phase 6 restricted plugin runtime. Concrete provider adapters, AI ranking, and the management UI remain integration work or later phases.
+The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and music-Bot adapter contracts, the Phase 4 injected download/media-safety engine, Phase 5 optional advisory ranking and language suggestions, and the Phase 6 restricted plugin runtime. AI is disabled by default and uses deterministic, redacted fallback behavior. Compatibility with a live provider remains deployment validation; no live provider call is claimed here. Concrete provider adapters and the management UI remain integration work or later phases.
 
 `compose.yaml` defines only `musicdl` and `plugin-runner`; Redis remains an external service. Copy `.env.example` to `.env` and set `MUSICDL_REDIS__URL` before starting Compose. Never put credentials in the example file or source tree.
 
 The main service owns the media, application-data, and Telegram-session volumes. The plugin runner receives no Redis URL, session, environment file, API key, main configuration, Docker socket, or host path.
 
-Health handlers do not contact Redis, the plugin runner, or other external dependencies. The container images nevertheless install the Python runtime dependencies required by FastAPI and the application.
+The `/healthz` liveness handler does not contact Redis, the plugin runner, or other external dependencies. When WeCom is enabled, `/readyz` pings Redis-backed state to verify readiness. The container images nevertheless install the Python runtime dependencies required by FastAPI and the application.
 
 ## Prerequisites
 

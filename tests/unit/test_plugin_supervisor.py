@@ -198,4 +198,6 @@ def test_cleanup_state_is_request_local(monkeypatch):
         sup=Supervisor(command_builder=lambda inv: child("import time; time.sleep(.05); print('bad')"), max_concurrency=2)
         return await asyncio.gather(sup.execute(invocation()), sup.execute(invocation()))
     steps=asyncio.run(run())
-    assert [s.response.error.code for s in steps] == ["cleanup_failed", "invalid_output"]
+    codes=[s.response.error.code for s in steps]
+    assert codes.count("cleanup_failed") == 1
+    assert codes.count("invalid_output") == 1

@@ -4,7 +4,7 @@ import pytest
 
 from musicdl.sources.models import Candidate
 from musicdl.sources.registry import SourceEntry, SourceRegistry
-from musicdl.sources.search import search_sources
+from musicdl.sources.search import search_result_version, search_sources
 
 
 def candidate(source, item, title="Song"):
@@ -146,3 +146,14 @@ def test_source_result_boundaries_and_max_results_argument():
         assert result.statuses[0].status == "invalid"
     with pytest.raises(ValueError, match="invalid_max_results_per_source"):
         asyncio.run(search_sources(SourceRegistry(), "x", max_results_per_source=0))
+
+
+def test_public_search_result_version_matches_search_output():
+    async def source(query):
+        return [candidate("a", "1", "First"), candidate("a", "2", "Second")]
+
+    result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "x"))
+    original = tuple(result.candidates)
+    assert search_result_version(result.candidates) == result.version
+    assert search_result_version(tuple(reversed(result.candidates))) != result.version
+    assert result.candidates == original

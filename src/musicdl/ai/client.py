@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -9,6 +10,7 @@ from musicdl.config import AISettings
 from .models import AIError
 
 MAX_AI_CONTENT_CHARS = 16_384
+MAX_AI_BODY_BYTES = 65_536
 
 
 class OpenAICompatibleClient:
@@ -32,16 +34,35 @@ class OpenAICompatibleClient:
                 timeout=self._settings.timeout,
                 follow_redirects=False,
             ) as client:
-                response = await client.post(endpoint, headers=headers, json=payload)
-                response.raise_for_status()
-        except httpx.ReadTimeout:
+                async with asyncio.timeout(self._settings.timeout):
+                    async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
+                        response.raise_for_status()
+                        chunks = []
+                        size = 0
+                        async for chunk in response.aiter_bytes():
+                            size += len(chunk)
+                            if size > MAX_AI_BODY_BYTES:
+                                raise ValueError("response body too large")
+                            chunks.append(chunk)
+                        body = b"".join(chunks)
+        except (httpx.ReadTimeout, asyncio.TimeoutError):
             raise AIError("timeout") from None
         except httpx.HTTPError:
             raise AIError("provider_error") from None
+        except ValueError:
+            raise AIError("invalid_response") from None
 
         try:
-            outer = response.json()
+            outer = json.loads(body)
             choices = outer["choices"]
+            if not isinstance(choices, list) or len(choices) != 1:
+                raise ValueError
+            if not isinstance(choices[0], dict):
+                raise ValueError
+            if "message" not in choices[0] or not isinstance(choices[0]["message"], dict):
+                raise ValueError
+            if "content" not in choices[0]["message"]:
+                raise ValueError
             content = choices[0]["message"]["content"]
             if not isinstance(content, str) or len(content) > MAX_AI_CONTENT_CHARS:
                 raise ValueError
@@ -49,7 +70,7 @@ class OpenAICompatibleClient:
             if not isinstance(result, dict):
                 raise ValueError
             return result
-        except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError):
+        except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError, RecursionError):
             raise AIError("invalid_response") from None
 
     def __repr__(self) -> str:

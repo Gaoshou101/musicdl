@@ -77,3 +77,8 @@ def test_compose_uses_pinned_images_and_stdlib_healthchecks():
         assert service["healthcheck"]["test"][1] == "python"
     assert data["services"]["musicdl"]["build"]["dockerfile"] == "docker/main/Dockerfile"
     assert data["services"]["plugin-runner"]["build"]["dockerfile"] == "docker/plugin/Dockerfile"
+
+
+def test_compose_disables_uvicorn_query_string_access_logs():
+    command = compose()["services"]["musicdl"]["command"]
+    assert "--no-access-log" in command

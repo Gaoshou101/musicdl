@@ -23,7 +23,7 @@ services:
     networks:
       - default
       - plugin-control
-    command: ["uvicorn", "musicdl.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "musicdl.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 30s
