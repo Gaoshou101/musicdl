@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from musicdl.config import AppSettings
+from musicdl.config import AISettings, AppSettings
 
 
 def test_settings_map_prefixed_nested_environment(monkeypatch):
@@ -77,6 +77,76 @@ def test_telegram_enabled_rejects_missing_credentials(monkeypatch):
     monkeypatch.setenv("MUSICDL_TELEGRAM__ENABLED", "true")
     with pytest.raises(ValidationError):
         AppSettings()
+
+
+def test_ai_is_disabled_by_default():
+    settings = AppSettings().ai
+    assert settings.enabled is False
+    assert str(settings.base_url) == "https://api.openai.com/v1"
+    assert settings.timeout == 10.0
+    assert settings.max_candidates == 20
+
+
+def test_enabled_ai_requires_and_normalizes_credentials(monkeypatch):
+    monkeypatch.setenv("MUSICDL_AI__ENABLED", "true")
+    monkeypatch.setenv("MUSICDL_AI__BASE_URL", "https://provider.example/v1")
+    monkeypatch.setenv("MUSICDL_AI__API_KEY", "  phase5-secret  ")
+    monkeypatch.setenv("MUSICDL_AI__MODEL", "  compatible-model  ")
+    settings = AppSettings().ai
+    assert settings.api_key.get_secret_value() == "phase5-secret"
+    assert settings.model == "compatible-model"
+    assert "phase5-secret" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("api_key", None), ("api_key", "   "), ("model", None), ("model", "   ")],
+)
+def test_enabled_ai_rejects_each_missing_or_blank_credential(monkeypatch, field, value):
+    monkeypatch.setenv("MUSICDL_AI__ENABLED", "true")
+    other = "model" if field == "api_key" else "api_key"
+    monkeypatch.setenv(f"MUSICDL_AI__{other.upper()}", "valid-credential")
+    if value is not None:
+        monkeypatch.setenv(f"MUSICDL_AI__{field.upper()}", value)
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
+@pytest.mark.parametrize("base_url", ["ftp://provider.example/v1"])
+def test_ai_rejects_unsupported_base_url(monkeypatch, base_url):
+    monkeypatch.setenv("MUSICDL_AI__BASE_URL", base_url)
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
+@pytest.mark.parametrize("timeout", ["0", "nan", "61"])
+def test_ai_rejects_invalid_timeout(monkeypatch, timeout):
+    monkeypatch.setenv("MUSICDL_AI__TIMEOUT", timeout)
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
+@pytest.mark.parametrize("max_candidates", ["true", "0", "101"])
+def test_ai_rejects_invalid_max_candidates(monkeypatch, max_candidates):
+    monkeypatch.setenv("MUSICDL_AI__MAX_CANDIDATES", max_candidates)
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
+def test_ai_rejects_boolean_max_candidates_directly():
+    with pytest.raises(ValidationError):
+        AISettings(max_candidates=True)
+
+
+def test_ai_accepts_numeric_max_candidates_environment_string(monkeypatch):
+    monkeypatch.setenv("MUSICDL_AI__ENABLED", "true")
+    monkeypatch.setenv("MUSICDL_AI__API_KEY", "phase5-secret")
+    monkeypatch.setenv("MUSICDL_AI__MODEL", "phase5-model")
+    monkeypatch.setenv("MUSICDL_AI__MAX_CANDIDATES", "12")
+
+    settings = AppSettings().ai
+
+    assert settings.max_candidates == 12
 
 
 def test_redis_timeouts_default_and_environment_override(monkeypatch):

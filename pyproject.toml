@@ -16,11 +16,11 @@ dependencies = [
   "defusedxml==0.7.1",
   "redis==8.1.0",
   "telethon==1.45.0",
+  "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "httpx==0.28.1",
   "PyYAML==6.0.3",
   "pytest==9.1.1",
 ]
