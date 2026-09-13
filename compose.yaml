@@ -38,7 +38,11 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    tmpfs: [/tmp]
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 64
+    init: true
+    tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
     networks:
       - plugin-control
     command: ["uvicorn", "musicdl_plugin_runner.app:app", "--host", "0.0.0.0", "--port", "8080"]
