@@ -20,6 +20,12 @@ def child(code):
     return [sys.executable, "-c", code]
 
 
+def run_supervisor(code, timeout_ms=1000):
+    async def run():
+        return await Supervisor(command_builder=lambda inv: child(code)).execute(invocation(timeout_ms=timeout_ms))
+    return asyncio.run(run())
+
+
 def test_valid_json_and_nonzero_are_stable():
     async def run():
         sup = Supervisor(command_builder=lambda inv: child("print('{}')"))
@@ -48,3 +54,10 @@ def test_timeout_returns_sanitized_error():
         assert step.response and step.response.error.code == "timeout"
         assert "time.sleep" not in step.response.error.message
     asyncio.run(run())
+
+
+def test_stdout_and_stderr_overflow_are_bounded():
+    stdout_step = run_supervisor("import sys; sys.stdout.write('x'*65537)")
+    stderr_step = run_supervisor("import sys; sys.stderr.write('x'*16385)")
+    assert stdout_step.response.error.code == "output_too_large"
+    assert stderr_step.response.error.code == "output_too_large"

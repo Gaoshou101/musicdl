@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import signal
 import subprocess
@@ -72,11 +71,15 @@ class Supervisor:
             pass
         try:
             await asyncio.wait_for(proc.wait(), timeout=GRACE_SECONDS)
-            return
         except asyncio.TimeoutError:
             pass
         try:
             if os.name == "posix":
+                # The leader may have exited while descendants retain the pgid.
+                try:
+                    os.killpg(proc.pid, 0)
+                except ProcessLookupError:
+                    return
                 os.killpg(proc.pid, signal.SIGKILL)
             else:
                 proc.kill()
@@ -84,10 +87,20 @@ class Supervisor:
             pass
         await proc.wait()
 
+    @staticmethod
+    async def _cancel_readers(tasks: list[asyncio.Task]) -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def execute(self, invocation: PluginInvocation) -> PluginStep:
         if not await self._claim():
             return self._with_request(self._error("busy", "plugin runner is busy"), invocation)
         proc: asyncio.subprocess.Process | None = None
+        readers: list[asyncio.Task] = []
+        deadline = asyncio.get_running_loop().time() + invocation.request.timeout_ms / 1000
         try:
             try:
                 encoded = invocation.model_dump_json().encode()
@@ -104,25 +117,39 @@ class Supervisor:
                     kwargs["start_new_session"] = True
                 else:
                     kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-                proc = await asyncio.create_subprocess_exec(*command, **kwargs)
+                proc = await asyncio.wait_for(asyncio.create_subprocess_exec(*command, **kwargs), max(0, deadline - asyncio.get_running_loop().time()))
             except Exception:
                 return self._with_request(self._error("spawn_failed", "plugin host unavailable"), invocation)
             assert proc.stdin and proc.stdout and proc.stderr
-            proc.stdin.write(encoded)
-            await proc.stdin.drain()
-            proc.stdin.close()
-            stdout_task = asyncio.create_task(self._read_bounded(proc.stdout, MAX_STDOUT_BYTES))
-            stderr_task = asyncio.create_task(self._read_bounded(proc.stderr, MAX_STDERR_BYTES))
             try:
-                (stdout, stdout_over), (_, stderr_over) = await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task), invocation.request.timeout_ms / 1000)
-                await asyncio.wait_for(proc.wait(), invocation.request.timeout_ms / 1000)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+                proc.stdin.write(encoded)
+                await asyncio.wait_for(proc.stdin.drain(), max(0, deadline - asyncio.get_running_loop().time()))
+                proc.stdin.close()
+            except (BrokenPipeError, ConnectionError, OSError, asyncio.TimeoutError):
                 await self._terminate(proc)
-                stdout_task.cancel(); stderr_task.cancel()
+                return self._with_request(self._error("io_failed", "plugin I/O failed"), invocation)
+            readers = [asyncio.create_task(self._read_bounded(proc.stdout, MAX_STDOUT_BYTES)), asyncio.create_task(self._read_bounded(proc.stderr, MAX_STDERR_BYTES))]
+            wait_task = asyncio.create_task(proc.wait())
+            try:
+                done, _ = await asyncio.wait_for(asyncio.wait(readers + [wait_task], return_when=asyncio.FIRST_COMPLETED), max(0, deadline - asyncio.get_running_loop().time()))
+                if any(task in done and not task.cancelled() and task.result()[1] for task in readers):
+                    await self._terminate(proc)
+                    await self._cancel_readers(readers)
+                    return self._with_request(self._error("output_too_large", "plugin output exceeds limit"), invocation)
+                await asyncio.wait_for(asyncio.gather(*readers), max(0, deadline - asyncio.get_running_loop().time()))
+                if any(task.result()[1] for task in readers):
+                    await self._terminate(proc)
+                    return self._with_request(self._error("output_too_large", "plugin output exceeds limit"), invocation)
+                await asyncio.wait_for(asyncio.shield(wait_task), max(0, deadline - asyncio.get_running_loop().time()))
+                stdout, stderr = readers[0].result()[0], readers[1].result()[0]
+            except asyncio.TimeoutError:
+                await self._terminate(proc)
+                await self._cancel_readers(readers + [wait_task])
                 return self._with_request(self._error("timeout", "plugin execution timed out"), invocation)
-            if stdout_over or stderr_over:
-                await self._terminate(proc)
-                return self._with_request(self._error("output_too_large", "plugin output exceeds limit"), invocation)
+            except asyncio.CancelledError:
+                await asyncio.shield(self._terminate(proc))
+                await asyncio.shield(self._cancel_readers(readers + [wait_task]))
+                raise
             if proc.returncode != 0:
                 return self._with_request(self._error("plugin_failed", "plugin execution failed"), invocation)
             try:
