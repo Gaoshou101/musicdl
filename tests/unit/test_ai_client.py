@@ -132,9 +132,7 @@ async def test_invalid_provider_responses_are_stable(payload):
 @run_sync
 async def test_response_content_is_bounded():
     async def handler(request):
-        oversized = json.dumps({"padding": "a" * 16380})
-        assert len(oversized) > 16384
-        return httpx.Response(200, json={"choices": [{"message": {"content": oversized}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps("a" * 16385)}}]})
 
     with pytest.raises(AIError) as caught:
         await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])

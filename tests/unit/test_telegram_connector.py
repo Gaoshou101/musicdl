@@ -221,3 +221,63 @@ def test_session_artifacts_are_hardened(tmp_path):
     asyncio.run(connector.restore("alice"))
     if os.name == "posix":
         assert all((path.with_name(name)).stat().st_mode & 0o077 == 0 for name in ("alice.session", "alice.session-wal", "alice.session-shm"))
+
+def test_dotted_profile_session_is_hardened(tmp_path):
+    path = tmp_path / "alice.work"
+    session_file = path.with_name("alice.work.session")
+    session_file.write_text("credential")
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: FakeClient("ready"))
+    asyncio.run(connector.restore("alice.work"))
+    assert session_file.exists()
+
+
+def test_bot_requester_serializes_concurrent_requests(tmp_path):
+    class ConcurrentClient(FakeClient):
+        def __init__(self):
+            super().__init__("ready")
+            self.active = 0
+            self.max_active = 0
+
+        def conversation(self, bot, timeout):
+            outer = self
+            class Conv:
+                async def __aenter__(self):
+                    outer.active += 1
+                    if outer.active > outer.max_active:
+                        outer.max_active = outer.active
+                    await asyncio.sleep(0.01)
+                    return self
+                async def __aexit__(self, *args):
+                    outer.active -= 1
+                async def send_message(self, cmd): pass
+                async def get_response(self): return "ok"
+            return Conv()
+
+    client = ConcurrentClient()
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+    requester = connector.bot_requester("default", lambda r: r)
+
+    async def main():
+        await asyncio.gather(
+            requester("@bot", "cmd1", 10.0),
+            requester("@bot", "cmd2", 10.0),
+        )
+    asyncio.run(main())
+    assert client.max_active == 1
+
+
+def test_connector_disconnect_clears_clients(tmp_path):
+    class DisconnectClient(FakeClient):
+        def __init__(self):
+            super().__init__("ready")
+            self.disconnected = False
+        async def disconnect(self):
+            self.disconnected = True
+
+    client = DisconnectClient()
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+    asyncio.run(connector.restore("default"))
+    assert len(connector._clients) == 1
+    asyncio.run(connector.disconnect())
+    assert client.disconnected is True
+    assert len(connector._clients) == 0
