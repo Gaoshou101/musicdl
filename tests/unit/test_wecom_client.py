@@ -30,6 +30,56 @@ def test_second_expired_response_stops_after_two_sends():
     def h(req): calls.append(req); return httpx.Response(200,json={"errcode":40014} if req.url.path.endswith("send") else {"errcode":0,"access_token":"new","expires_in":100})
     with pytest.raises(WeComError): run(WeComClient("c","s",1,r,base_url="https://x",transport=httpx.MockTransport(h)).send_text("u","x"))
     assert len([x for x in calls if x.url.path.endswith("send")])==2
+@pytest.mark.parametrize("expired_code", [40014,42001])
+def test_expired_token_codes_refresh_once(expired_code):
+    r=Redis(); r.values["{musicdl}:wecom:access_token"]="old"; calls=[]
+    def h(req):
+        calls.append(req)
+        if req.url.path.endswith("gettoken"): return httpx.Response(200,json={"errcode":0,"access_token":"new","expires_in":100})
+        return httpx.Response(200,json={"errcode":expired_code if req.url.params["access_token"]=="old" else 0})
+    assert run(WeComClient("c","s",1,r,base_url="https://x",transport=httpx.MockTransport(h)).send_text("u","x"))["errcode"]==0
+    assert [x.url.path for x in calls]==["/cgi-bin/message/send","/cgi-bin/gettoken","/cgi-bin/message/send"]
+
+def test_concurrent_cache_miss_fetches_token_once():
+    r=Redis(); calls=[]
+    async def h(req):
+        calls.append(req); await asyncio.sleep(0.01)
+        return httpx.Response(200,json={"errcode":0,"access_token":"new","expires_in":100})
+    client=WeComClient("c","s",1,r,base_url="https://x",transport=httpx.MockTransport(h))
+    async def scenario(): return await asyncio.gather(client.access_token(),client.access_token(),client.access_token())
+    assert run(scenario())==["new","new","new"] and len(calls)==1
+
+@pytest.mark.parametrize("operation", ["get","set"])
+def test_redis_failures_are_stable_and_redacted(operation):
+    class Broken(Redis):
+        async def get(self,k):
+            if operation=="get": raise RuntimeError("redis-secret")
+            return None
+        async def set(self,k,v,**kw):
+            if operation=="set": raise RuntimeError("redis-secret")
+            return await super().set(k,v,**kw)
+    def h(req): return httpx.Response(200,json={"errcode":0,"access_token":"new","expires_in":100})
+    with pytest.raises(WeComError,match="token request failed") as error:
+        run(WeComClient("c","s",1,Broken(),base_url="https://x",transport=httpx.MockTransport(h)).access_token())
+    assert "redis-secret" not in str(error.value)
+
+@pytest.mark.parametrize("endpoint", ["token","send"])
+@pytest.mark.parametrize("body", [b"not-json", b"[]"])
+def test_malformed_or_non_object_json_is_stable(endpoint,body):
+    r=Redis()
+    if endpoint=="send": r.values["{musicdl}:wecom:access_token"]="tok"
+    def h(req): return httpx.Response(200,content=body,headers={"content-type":"application/json"})
+    call=WeComClient("c","s",1,r,base_url="https://x",transport=httpx.MockTransport(h))
+    expected="token request failed" if endpoint=="token" else "message send failed"
+    with pytest.raises(WeComError,match=expected): run(call.access_token() if endpoint=="token" else call.send_text("u","x"))
+
+def test_message_limit_is_utf8_bytes():
+    c=WeComClient("c","s",1,Redis())
+    with pytest.raises(ValueError): run(c.send_text("u","歌"*683))
+    # 682 CJK code points are 2046 UTF-8 bytes and remain valid.
+    c.redis.values[c.cache_key]="tok"
+    c.transport=httpx.MockTransport(lambda req:httpx.Response(200,json={"errcode":0}))
+    assert run(c.send_text("u","歌"*682))["errcode"]==0
 def test_invalid_message_inputs_are_rejected():
     c=WeComClient("c","s",1,Redis())
     for user,content in [("","x"),("u","") ,("u","x"*2049)]:
