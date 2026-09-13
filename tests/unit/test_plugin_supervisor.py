@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 
 from musicdl.contracts.plugin import PluginInvocation, PluginManifest, PluginRequest
-from musicdl_plugin_runner.supervisor import Supervisor
+from musicdl_plugin_runner.supervisor import Supervisor, HostCommand
 
 
 def invocation(source="ok", timeout_ms=1000):
@@ -150,3 +150,24 @@ def test_reader_io_failure_is_sanitized_and_cleaned_up(monkeypatch):
         assert sup._active == 0
 
     asyncio.run(run())
+
+def test_host_command_passes_custom_stdin_and_environment_and_cleans_cwd():
+    async def run():
+        def build(inv):
+            code=("import os,sys; data=sys.stdin.read(); assert os.environ.get('MARK')=='ok' and data=='payload'; "
+                  "sys.stdout.write('{\"response\":{\"protocol\":\"musicdl.plugin/v1\",\"request_id\":\"00000000-0000-0000-0000-000000000000\",\"operation\":\"search\",\"ok\":true,\"result\":{\"ok\":true}},\"action\":null}')")
+            return HostCommand(child(code), {"MARK":"ok"}, b"payload")
+        sup=Supervisor(command_builder=build)
+        step=await sup.execute(invocation())
+        return step
+    step=asyncio.run(run())
+    assert step.response.ok and step.response.result == {"ok":True}
+
+def test_spawn_failure_releases_slot_and_sanitizes_error():
+    async def run():
+        sup=Supervisor(command_builder=lambda inv: ["definitely-not-a-real-host"])
+        step=await sup.execute(invocation())
+        assert sup._active == 0
+        return step
+    step=asyncio.run(run())
+    assert step.response.error.code == "spawn_failed"
