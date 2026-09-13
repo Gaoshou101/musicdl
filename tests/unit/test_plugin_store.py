@@ -116,6 +116,21 @@ def test_load_rejects_source_with_insecure_mode(tmp_path):
         store.load("demo", stored.manifest.sha256)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX fd-relative load assertion")
+def test_posix_load_does_not_read_source_by_path(tmp_path, monkeypatch):
+    store = PluginStore(tmp_path)
+    stored = install(store)
+    original = type(stored.path).read_bytes
+
+    def fail_path_read(self):
+        if self == stored.path:
+            raise AssertionError("source must be read through an anchored fd")
+        return original(self)
+
+    monkeypatch.setattr(type(stored.path), "read_bytes", fail_path_read)
+    assert store.load("demo", stored.manifest.sha256).manifest == stored.manifest
+
+
 def test_enabled_state_is_independent_per_version(tmp_path):
     store = PluginStore(tmp_path)
     one = install(store, version="1")

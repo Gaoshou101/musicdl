@@ -51,15 +51,17 @@ class PluginStore:
         if os.name != "nt":
             path.chmod(0o700)
 
-    def _open_plugin_dir_posix(self, plugin_id: str) -> tuple[int, int]:
+    def _open_plugin_dir_posix(self, plugin_id: str, *, create: bool = True) -> tuple[int, int]:
         """Open plugins/id anchored to directory fds (POSIX race resistance)."""
         directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         parent_fd = os.open(self._plugins, directory_flags)
+        child_fd = None
         try:
-            try:
-                os.mkdir(plugin_id, 0o700, dir_fd=parent_fd)
-            except FileExistsError:
-                pass
+            if create:
+                try:
+                    os.mkdir(plugin_id, 0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
             child_fd = os.open(plugin_id, directory_flags, dir_fd=parent_fd)
             mode = stat.S_IMODE(os.fstat(child_fd).st_mode)
             if mode != 0o700:
@@ -68,6 +70,8 @@ class PluginStore:
                     raise OSError("plugin directory mode must be 0700")
             return parent_fd, child_fd
         except BaseException:
+            if child_fd is not None:
+                os.close(child_fd)
             os.close(parent_fd)
             raise
 
@@ -252,13 +256,34 @@ class PluginStore:
         manifest = PluginManifest.model_validate(entry["manifest"])
         suffix = ".py" if manifest.language == "python" else ".js"
         path = self._plugins / plugin_id / f"{sha256}{suffix}"
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise OSError("plugin source must not be a symlink or non-file")
-        if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
-            raise OSError("plugin source mode must be 0600")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != sha256:
-            raise ValueError("stored source digest mismatch")
+        if os.name != "nt":
+            parent_fd, child_fd = self._open_plugin_dir_posix(plugin_id, create=False)
+            try:
+                fd = os.open(f"{sha256}{suffix}", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=child_fd)
+                try:
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                        raise OSError("plugin source must be a regular 0600 file")
+                    chunks = []
+                    while sum(map(len, chunks)) <= MAX_SOURCE_BYTES:
+                        chunk = os.read(fd, MAX_SOURCE_BYTES + 1 - sum(map(len, chunks)))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    source_bytes = b"".join(chunks)
+                    if hashlib.sha256(source_bytes).hexdigest() != sha256:
+                        raise ValueError("stored source digest mismatch")
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(child_fd)
+                os.close(parent_fd)
+        else:
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                raise OSError("plugin source must not be a symlink or non-file")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != sha256:
+                raise ValueError("stored source digest mismatch")
         return StoredPlugin(manifest, path, bool(entry.get("enabled", True)))
 
     def enabled(self) -> tuple[StoredPlugin, ...]:
