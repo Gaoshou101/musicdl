@@ -146,6 +146,10 @@ def test_restricted_plugin_invocation_rejects_source_digest_operation_and_action
         _invocation(actions=actions)
     with pytest.raises(ValidationError):
         _invocation(actions=(action,), observations=(HttpObservation(action_id="missing", status_code=200),))
+    four_actions = tuple(HttpAction(action_id=f"b{i}", method="GET", url="https://api.example.com/search") for i in range(4))
+    five_observations = tuple(HttpObservation(action_id="b0", status_code=200) for _ in range(5))
+    with pytest.raises(ValidationError):
+        _invocation(actions=four_actions, observations=five_observations)
 
 
 def test_plugin_step_requires_exactly_one_response_or_action():
