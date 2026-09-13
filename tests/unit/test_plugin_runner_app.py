@@ -30,11 +30,19 @@ def test_endpoint_maps_success_busy_and_failure(monkeypatch):
     request_id = uuid4()
     def step(code=None):
         return PluginStep(response=PluginResponse(protocol="musicdl.plugin/v1", request_id=request_id, operation="search", ok=False, error=PluginError(code=code, message="safe")))
+    success = PluginStep(response=PluginResponse(protocol="musicdl.plugin/v1", request_id=request_id, operation="search", ok=True, result={"ok": True}))
+    monkeypatch.setattr(runner_app, "supervisor", Fake(success))
+    assert TestClient(app).post("/v1/execute", json=body()).status_code == 200
     monkeypatch.setattr(runner_app, "supervisor", Fake(step("busy")))
     assert TestClient(app).post("/v1/execute", json=body()).status_code == 429
     monkeypatch.setattr(runner_app, "supervisor", Fake(step("plugin_failed")))
     response = TestClient(app).post("/v1/execute", json=body())
     assert response.status_code == 502 and "safe" in response.text
+    for code, expected in (("timeout", 504), ("other", 502)):
+        monkeypatch.setattr(runner_app, "supervisor", Fake(step(code)))
+        response = TestClient(app).post("/v1/execute", json=body("source-canary"))
+        assert response.status_code == expected
+        assert all(canary not in response.text for canary in ("source-canary", "payload-canary", "stderr-canary", "internal-exception"))
 
 
 def test_oversized_stream_rejected():

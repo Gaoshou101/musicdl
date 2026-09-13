@@ -104,8 +104,6 @@ class Supervisor:
         try:
             try:
                 encoded = invocation.model_dump_json().encode()
-            except asyncio.TimeoutError:
-                return self._with_request(self._error("timeout", "plugin execution timed out"), invocation)
             except Exception:
                 return self._with_request(self._error("invalid_invocation", "invalid invocation"), invocation)
             if len(encoded) > MAX_INVOCATION_BYTES:
@@ -120,6 +118,8 @@ class Supervisor:
                 else:
                     kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 proc = await asyncio.wait_for(asyncio.create_subprocess_exec(*command, **kwargs), max(0, deadline - asyncio.get_running_loop().time()))
+            except asyncio.TimeoutError:
+                return self._with_request(self._error("timeout", "plugin execution timed out"), invocation)
             except Exception:
                 return self._with_request(self._error("spawn_failed", "plugin host unavailable"), invocation)
             assert proc.stdin and proc.stdout and proc.stderr
@@ -139,7 +139,7 @@ class Supervisor:
                 done, _ = await asyncio.wait_for(asyncio.wait(readers + [wait_task], return_when=asyncio.FIRST_COMPLETED), max(0, deadline - asyncio.get_running_loop().time()))
                 if any(task in done and not task.cancelled() and task.result()[1] for task in readers):
                     await self._terminate(proc)
-                    await self._cancel_readers(readers)
+                    await self._cancel_readers(readers + [wait_task])
                     return self._with_request(self._error("output_too_large", "plugin output exceeds limit"), invocation)
                 await asyncio.wait_for(asyncio.gather(*readers), max(0, deadline - asyncio.get_running_loop().time()))
                 if any(task.result()[1] for task in readers):

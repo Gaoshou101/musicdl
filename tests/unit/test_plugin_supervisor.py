@@ -51,6 +51,14 @@ def test_nonzero_hides_stderr():
     assert "stderr-canary" not in step.response.error.message
 
 
+def test_spawn_timeout_maps_to_timeout(monkeypatch):
+    async def timeout(*args, **kwargs):
+        raise asyncio.TimeoutError
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", timeout)
+    step = run_supervisor("print('unused')")
+    assert step.response.error.code == "timeout"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
 def test_external_cancellation_reaps_child():
     async def run():
@@ -98,25 +106,27 @@ def test_term_trap_reaches_kill_after_grace():
 def test_descendant_group_is_killed():
     with tempfile.NamedTemporaryFile(delete=False) as handle:
         pid_file = handle.name
-    code = ("import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c',"
-            f"'import os,time; open({pid_file!r},\\\"w\\\").write(str(os.getpid())); time.sleep(10)']); time.sleep(10)")
-    step = run_supervisor(code, timeout_ms=100)
-    assert step.response.error.code == "timeout"
-    pid = None
-    for _ in range(20):
-        try:
-            text = open(pid_file, encoding="ascii").read()
-            if text: pid = int(text); break
-        except (FileNotFoundError, ValueError):
-            time.sleep(.02)
-    if pid is not None:
-        gone = False
+    try:
+        code = ("import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c',"
+                f"'import os,time; open({pid_file!r},\\\"w\\\").write(str(os.getpid())); time.sleep(10)']); time.sleep(10)")
+        step = run_supervisor(code, timeout_ms=100)
+        assert step.response.error.code == "timeout"
+        pid = None
+        for _ in range(20):
+            try:
+                text = open(pid_file, encoding="ascii").read()
+                if text: pid = int(text); break
+            except (FileNotFoundError, ValueError):
+                time.sleep(.02)
+        assert pid is not None
         for _ in range(20):
             try: os.kill(pid, 0)
-            except ProcessLookupError: gone = True; break
+            except ProcessLookupError: break
             time.sleep(.02)
-        assert gone
-    os.unlink(pid_file)
+        else: pytest.fail("descendant process survived group cleanup")
+    finally:
+        try: os.unlink(pid_file)
+        except FileNotFoundError: pass
 
 
 def test_stdout_and_stderr_overflow_are_bounded():
