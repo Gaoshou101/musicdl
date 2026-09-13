@@ -21,12 +21,17 @@ GRACE_SECONDS = 0.25
 class HostCommand:
     argv: list[str]
     env: dict[str, str]
+    stdin_payload: bytes | None = None
 
 def build_host_command(invocation: PluginInvocation) -> HostCommand:
     if invocation.manifest.language == "python":
         from musicdl_plugin_runner.python_host import build_command
         return build_command(invocation)
-    return HostCommand(["deno", "run", "--quiet", "--no-config", "--no-lock", "--no-npm", "--cached-only", "--v8-flags=--max-old-space-size=128", "-"], {"DENO_NO_PROMPT": "1"})
+    import json
+    from pathlib import Path
+    template = (Path(__file__).with_name("deno_host.js")).read_text(encoding="utf-8")
+    payload = "const invocation=JSON.parse(" + json.dumps(invocation.model_dump_json()) + ");\n" + template
+    return HostCommand(["deno", "run", "--quiet", "--no-config", "--no-lock", "--no-npm", "--cached-only", "--v8-flags=--max-old-space-size=128", "-"], {"DENO_NO_PROMPT": "1"}, payload.encode())
 
 
 class Supervisor:
@@ -143,7 +148,7 @@ class Supervisor:
                 return self._with_request(self._error("spawn_failed", "plugin host unavailable"), invocation)
             assert proc.stdin and proc.stdout and proc.stderr
             try:
-                proc.stdin.write(encoded)
+                proc.stdin.write(built.stdin_payload if isinstance(built, HostCommand) and built.stdin_payload is not None else encoded)
                 await asyncio.wait_for(proc.stdin.drain(), max(0, deadline - asyncio.get_running_loop().time()))
                 proc.stdin.close()
             except asyncio.TimeoutError:

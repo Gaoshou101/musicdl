@@ -1,6 +1,6 @@
 """Restricted, one-shot Python plugin host."""
 from __future__ import annotations
-import json, os, sys, tempfile
+import json, os, sys
 from typing import Any
 try: import resource
 except ImportError: resource = None
@@ -10,7 +10,10 @@ _BUILTINS={name:getattr(__builtins__ if not isinstance(__builtins__,dict) else t
 _LIMITS=(("RLIMIT_CPU",5,5),("RLIMIT_AS",256*1024*1024,256*1024*1024),("RLIMIT_FSIZE",1024*1024,1024*1024),("RLIMIT_NOFILE",32,32),("RLIMIT_CORE",0,0))
 def build_command(_invocation):
  from musicdl_plugin_runner.supervisor import HostCommand
- return HostCommand([sys.executable,"-I","-m","musicdl_plugin_runner.python_host"],{})
+ import pathlib
+ root = pathlib.Path(__file__).resolve().parents[1]
+ launcher = "import sys,runpy;sys.path.insert(0,%r);runpy.run_module('musicdl_plugin_runner.python_host',run_name='__main__')" % str(root)
+ return HostCommand([sys.executable,"-I","-c",launcher],{})
 def _error(inv,code,message):
     from musicdl.contracts.plugin import PluginError
     return PluginStep(response=PluginResponse(protocol="musicdl.plugin/v1",request_id=inv.request.request_id,operation=inv.request.operation,ok=False,error=PluginError(code=code,message=message)))
@@ -18,7 +21,7 @@ def _run(inv):
     try:
         if resource is None: return _error(inv,"sandbox_unavailable","plugin sandbox unavailable")
         for name,soft,hard in _LIMITS: resource.setrlimit(getattr(resource,name),(soft,hard))
-        os.environ.clear(); os.chdir(tempfile.mkdtemp(prefix="musicdl-plugin-"))
+        os.environ.clear()
         # Install the kernel policy before compiling or evaluating attacker source.
         try:
             available = seccomp.install()

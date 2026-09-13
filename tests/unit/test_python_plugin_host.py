@@ -18,4 +18,4 @@ def test_import_is_unavailable():
  p=run("def handle(request): __import__('os')"); code=json.loads(p.stdout)["response"]["error"]["code"]
  assert code == ("plugin_error" if os.name == "posix" else "sandbox_unavailable")
 def test_command_is_isolated():
- c=build_command(invoke("def handle(request): return {}")); assert c.env=={} and c.argv[1:3]==["-I","-m"]
+ c=build_command(invoke("def handle(request): return {}")); assert c.env=={} and c.argv[1:3]==["-I","-c"]
