@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from musicdl.config import AppSettings
+from musicdl.config import AISettings, AppSettings
 
 
 def test_settings_map_prefixed_nested_environment(monkeypatch):
@@ -134,5 +134,39 @@ def test_ai_rejects_invalid_timeout(monkeypatch, timeout):
 @pytest.mark.parametrize("max_candidates", ["true", "0", "101"])
 def test_ai_rejects_invalid_max_candidates(monkeypatch, max_candidates):
     monkeypatch.setenv("MUSICDL_AI__MAX_CANDIDATES", max_candidates)
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
+def test_ai_rejects_boolean_max_candidates_directly():
+    with pytest.raises(ValidationError):
+        AISettings(max_candidates=True)
+
+
+def test_ai_accepts_numeric_max_candidates_environment_string(monkeypatch):
+    monkeypatch.setenv("MUSICDL_AI__ENABLED", "true")
+    monkeypatch.setenv("MUSICDL_AI__API_KEY", "phase5-secret")
+    monkeypatch.setenv("MUSICDL_AI__MODEL", "phase5-model")
+    monkeypatch.setenv("MUSICDL_AI__MAX_CANDIDATES", "12")
+
+    settings = AppSettings().ai
+
+    assert settings.max_candidates == 12
+
+
+def test_redis_timeouts_default_and_environment_override(monkeypatch):
+    settings = AppSettings()
+    assert settings.redis.connect_timeout == 2.0
+    assert settings.redis.operation_timeout == 2.0
+    monkeypatch.setenv("MUSICDL_REDIS__CONNECT_TIMEOUT", "4.5")
+    monkeypatch.setenv("MUSICDL_REDIS__OPERATION_TIMEOUT", "3")
+    settings = AppSettings()
+    assert settings.redis.connect_timeout == 4.5
+    assert settings.redis.operation_timeout == 3.0
+
+
+@pytest.mark.parametrize("name", ["CONNECT_TIMEOUT", "OPERATION_TIMEOUT"])
+def test_redis_timeouts_reject_invalid_values(monkeypatch, name):
+    monkeypatch.setenv(f"MUSICDL_REDIS__{name}", "31")
     with pytest.raises(ValidationError):
         AppSettings()

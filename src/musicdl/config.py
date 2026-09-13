@@ -19,6 +19,8 @@ class ConfigVersion(BaseModel):
 class RedisSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: SecretStr = SecretStr("redis://localhost:6379/0")
+    connect_timeout: float = Field(default=2.0, gt=0, le=30)
+    operation_timeout: float = Field(default=2.0, gt=0, le=30)
 
     @field_validator("url")
     @classmethod
@@ -131,6 +133,13 @@ class AISettings(BaseModel):
     def timeout_must_be_finite(cls, value: float):
         if not math.isfinite(value):
             raise ValueError("AI timeout must be finite")
+        return value
+
+    @field_validator("max_candidates", mode="before")
+    @classmethod
+    def max_candidates_must_not_be_boolean(cls, value: object):
+        if isinstance(value, bool):
+            raise ValueError("AI max candidates must be an integer")
         return value
 
     @model_validator(mode="after")

@@ -23,6 +23,16 @@ class AsyncEvalClient:
             raise self.error
         return self.results.pop(0)
 
+    async def ping(self):
+        if self.error:
+            raise self.error
+        return True
+
+    async def get(self, key):
+        if self.error:
+            raise self.error
+        return b"1"
+
 
 def run(awaitable):
     return asyncio.run(awaitable)
@@ -83,3 +93,17 @@ def test_consume_rejects_wrong_index():
     token = run(store.issue_selection(context()))
     with pytest.raises(SelectionRejected):
         run(store.consume_selection(token, context(), 2))
+
+
+def test_ping_and_lookup_success():
+    store = RedisStateStore(AsyncEvalClient())
+    assert run(store.ping()) is True
+    assert run(store.lookup_message("corp", "req")) is True
+
+
+def test_ping_and_lookup_errors_are_unavailable():
+    store = RedisStateStore(AsyncEvalClient(error=RuntimeError("secret")))
+    with pytest.raises(StateUnavailable):
+        run(store.ping())
+    with pytest.raises(StateUnavailable):
+        run(store.lookup_message("corp", "req"))

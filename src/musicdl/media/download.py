@@ -46,8 +46,10 @@ async def download_candidate(
                 size += len(chunk)
                 if size > max_bytes:
                     raise MediaError("file_too_large")
-                if len(header) < 64:
-                    header.extend(chunk[: 64 - len(header)])
+                if metadata.declared_size is not None and size > metadata.declared_size:
+                    raise MediaError("size_mismatch")
+                if len(header) < 512:
+                    header.extend(chunk[: 512 - len(header)])
                 pending = memoryview(chunk)
                 while pending:
                     written = os.write(fd, pending)
@@ -90,6 +92,14 @@ async def download_candidate(
             except FileExistsError:
                 counter += 1
                 target = base.with_name(f"{base.stem} ({counter}){base.suffix}")
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1 or getattr(exc, "errno", None) in {18, 38, 95}:
+                    while target.exists():
+                        counter += 1
+                        target = base.with_name(f"{base.stem} ({counter}){base.suffix}")
+                    os.replace(temp_path, target)
+                    break
+                raise
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:

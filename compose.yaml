@@ -23,7 +23,7 @@ services:
     networks:
       - default
       - plugin-control
-    command: ["uvicorn", "musicdl.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "musicdl.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 30s
@@ -38,7 +38,11 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    tmpfs: [/tmp]
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 64
+    init: true
+    tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
     networks:
       - plugin-control
     command: ["uvicorn", "musicdl_plugin_runner.app:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -2,6 +2,6 @@
 
 from .models import Candidate
 from .registry import MusicSource, SourceEntry, SourceRegistry
-from .search import SearchResult, SourceStatus, search_sources
+from .search import SearchResult, SourceStatus, search_result_version, search_sources
 
-__all__ = ["Candidate", "MusicSource", "SourceEntry", "SourceRegistry", "SearchResult", "SourceStatus", "search_sources"]
+__all__ = ["Candidate", "MusicSource", "SourceEntry", "SourceRegistry", "SearchResult", "SourceStatus", "search_result_version", "search_sources"]

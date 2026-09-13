@@ -28,7 +28,13 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+musicdl_plugin_runner = ["*.js"]
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+  "integration: requires a Docker Engine and runs the Compose plugin runner",
+]

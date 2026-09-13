@@ -2,13 +2,13 @@
 
 ## Current implementation
 
-The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and music-Bot adapter contracts, and the Phase 4 injected download/media-safety engine. Concrete provider adapters, AI ranking, plugin execution, and the management UI remain integration work or later phases.
+The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and music-Bot adapter contracts, the Phase 4 injected download/media-safety engine, Phase 5 optional advisory ranking and language suggestions, and the Phase 6 restricted plugin runtime. AI is disabled by default and uses deterministic, redacted fallback behavior. Compatibility with a live provider remains deployment validation; no live provider call is claimed here. Concrete provider adapters and the management UI remain integration work or later phases.
 
 `compose.yaml` defines only `musicdl` and `plugin-runner`; Redis remains an external service. Copy `.env.example` to `.env` and set `MUSICDL_REDIS__URL` before starting Compose. Never put credentials in the example file or source tree.
 
 The main service owns the media, application-data, and Telegram-session volumes. The plugin runner receives no Redis URL, session, environment file, API key, main configuration, Docker socket, or host path.
 
-Health handlers do not contact Redis, the plugin runner, or other external dependencies. The container images nevertheless install the Python runtime dependencies required by FastAPI and the application.
+The `/healthz` liveness handler does not contact Redis, the plugin runner, or other external dependencies. When WeCom is enabled, `/readyz` pings Redis-backed state to verify readiness. The container images nevertheless install the Python runtime dependencies required by FastAPI and the application.
 
 ## Prerequisites
 
@@ -24,7 +24,35 @@ python3.12 -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
-The current development host does not provide Docker, so image build and container runtime behavior are not verified here. Compose and Dockerfile contracts are verified statically.
+The plugin runner is a restricted capability boundary, not a general-purpose Python or
+JavaScript environment. Python plugins run in a one-shot subprocess with restricted
+builtins, seccomp, resource limits, and no inherited environment. JavaScript plugins
+run in Deno with all permissions denied. Plugins cannot read host/container files,
+spawn processes, open sockets, or use the Docker socket. Network access is represented
+by HTTPS actions handled by the main service's exact-host broker; the runner itself
+has no egress.
+
+A manifest names the language, operations, SHA-256 source digest, and exact allowed
+hosts, for example:
+
+```json
+{"plugin_id":"example","version":"1","language":"python",
+ "operations":["search"],"allowed_hosts":["api.example.com"],
+ "sha256":"<64 lowercase hex characters>"}
+```
+
+The supported entry point is a `handle(request)` function. A plugin may return a
+JSON-compatible result or one HTTPS `GET` action at a time; the main action loop
+supplies bounded observations. Source is limited to 128 KiB, payload/result to 64 KiB,
+invocations to 6 MiB, and at most four HTTP actions/observations. Jobs are limited to
+30 seconds wall time, 5 seconds CPU, 256 MiB Python address space (128 MiB Deno heap),
+1 MiB file size, 32 file descriptors, 64 KiB stdout, and 16 KiB stderr.
+
+Incompatibilities are intentional: plugins cannot import arbitrary packages, access
+environment variables or secrets, persist files, use arbitrary URLs/redirects/proxies,
+use credentials in URLs, or call the main service directly. Docker runtime checks are
+required for release; this Windows checkout can only report the static/unit evidence
+when Docker Engine is unavailable.
 
 ## Configuration
 
@@ -58,7 +86,7 @@ curl http://127.0.0.1:${MUSICDL_PORT:-8000}/healthz
 docker compose logs --tail=100 musicdl plugin-runner
 ```
 
-Only `musicdl` publishes a loopback port. `plugin-runner` is attached only to the internal `plugin-control` network; the main service is attached to both the default and plugin-control networks. Plugin execution and external plugin egress remain disabled until Phase 6 establishes controlled egress.
+Only `musicdl` publishes a loopback port. `plugin-runner` is attached only to the internal `plugin-control` network; the main service is attached to both the default and plugin-control networks. Plugin execution is enabled only through the restricted runner and main-owned HTTPS action broker described above.
 
 ## Verification
 
