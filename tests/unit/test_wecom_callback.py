@@ -31,7 +31,7 @@ class Chunks(httpx.AsyncByteStream):
 
 
 def settings(**kw):
-    w = dict(enabled=True, corp_id="corp", agent_id=7, token=SecretStr("tok"), encoding_aes_key=SecretStr(KEY), allowed_users=["u1"])
+    w = dict(enabled=True, corp_id="corp", agent_id=7, token=SecretStr("tok"), secret=SecretStr("outbound-secret"), encoding_aes_key=SecretStr(KEY), allowed_users=["u1"])
     w.update(kw)
     return AppSettings(wecom=WeComSettings(**w))
 
