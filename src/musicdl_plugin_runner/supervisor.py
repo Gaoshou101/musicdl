@@ -118,6 +118,7 @@ class Supervisor:
         if not await self._claim():
             return self._with_request(self._error("busy", "plugin runner is busy"), invocation)
         proc: asyncio.subprocess.Process | None = None
+        job_dir: str | None = None
         readers: list[asyncio.Task] = []
         deadline = asyncio.get_running_loop().time() + invocation.request.timeout_ms / 1000
         try:
@@ -195,6 +196,6 @@ class Supervisor:
         finally:
             if proc is not None and proc.returncode is None:
                 await self._terminate(proc)
-            if 'job_dir' in locals():
+            if job_dir is not None:
                 shutil.rmtree(job_dir, ignore_errors=True)
             await self._release()
