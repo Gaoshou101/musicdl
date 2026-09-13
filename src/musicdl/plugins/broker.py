@@ -113,10 +113,18 @@ class HttpsActionBroker:
                 wrapped = self.ssl_context.wrap_socket(raw, server_hostname=approved)
             except Exception as exc:
                 raise ActionDenied("tls_error", "TLS negotiation failed") from exc
+            def apply_deadline_timeout() -> None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ActionDenied("timeout", "action timed out")
+                try:
+                    wrapped.settimeout(max(0.001, remaining))
+                except OSError as exc:
+                    raise ActionDenied("connect_error", "connection failed") from exc
+            apply_deadline_timeout()
             wrapped.sendall((f"GET {target} HTTP/1.1\r\nHost: {approved}\r\n"
                              "Accept: application/json\r\nConnection: close\r\n\r\n").encode("ascii"))
-            if time.monotonic() >= deadline:
-                raise ActionDenied("timeout", "action timed out")
+            apply_deadline_timeout()
             response = http.client.HTTPResponse(wrapped)
             response.begin()
             if 300 <= response.status < 400:
@@ -138,9 +146,9 @@ class HttpsActionBroker:
                 value = int(length)
                 if value > MAX_ACTION_BODY_BYTES:
                     raise ActionDenied("body_too_large", "response body exceeds 1 MiB")
+            apply_deadline_timeout()
             body = response.read(MAX_ACTION_BODY_BYTES + 1)
-            if time.monotonic() >= deadline:
-                raise ActionDenied("timeout", "action timed out")
+            apply_deadline_timeout()
             if len(body) > MAX_ACTION_BODY_BYTES:
                 raise ActionDenied("body_too_large", "response body exceeds 1 MiB")
             import base64

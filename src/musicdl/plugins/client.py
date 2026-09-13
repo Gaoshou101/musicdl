@@ -18,6 +18,10 @@ from .broker import ActionDenied, HttpsActionBroker
 from .store import StoredPlugin
 
 
+class PluginClientError(RuntimeError):
+    """Stable internal client failure which must not be remapped."""
+
+
 class PluginClient:
     def __init__(self, service_url: str, *, broker: HttpsActionBroker | None = None,
                  http_client: httpx.AsyncClient | None = None, timeout: float = 30.0):
@@ -104,10 +108,16 @@ class PluginClient:
                         async for chunk in response.aiter_bytes():
                             body.extend(chunk)
                             if len(body) > 64 * 1024:
-                                raise RuntimeError("runner_response_too_large")
+                                raise PluginClientError("runner_response_too_large")
+                except PluginClientError:
+                    raise
                 except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
                     raise RuntimeError("runner_timeout") from exc
                 except httpx.HTTPError as exc:
+                    raise RuntimeError("runner_http_error") from exc
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
                     raise RuntimeError("runner_http_error") from exc
                 try:
                     step = PluginStep.model_validate_json(bytes(body))

@@ -122,6 +122,61 @@ def test_runner_response_body_is_capped_before_json_parse(tmp_path):
     asyncio.run(run())
 
 
+def test_runner_stream_failure_is_sanitized_and_response_closed(tmp_path):
+    class Broken(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"{}"
+            raise RuntimeError("SECRET")
+        async def aclose(self):
+            self.closed = True
+    stream = Broken(); closed = []
+    def handler(request): return httpx.Response(200, stream=stream)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False, follow_redirects=False)
+    client = PluginClient("http://runner:8080", http_client=http, timeout=1)
+    async def run():
+        try:
+            with pytest.raises(RuntimeError, match="runner_http_error") as exc:
+                await client.invoke(stored(tmp_path), PluginRequest(protocol="musicdl.plugin/v1", request_id=uuid4(), operation="search"))
+            assert "SECRET" not in str(exc.value)
+        finally: await http.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("count", [1, 2, 3, 4])
+def test_successful_action_loops_accumulate_context(tmp_path, count):
+    request_id = uuid4(); steps = []; requests = []
+    for i in range(count):
+        steps.append(PluginStep(action=HttpAction(action_id=f"a{i}", method="GET", url="https://api.example.com/x")))
+    steps.append(response(request_id, result={"items": []}))
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=steps.pop(0).model_dump(mode="json"))
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False, follow_redirects=False)
+    class Broker:
+        def fetch(self, action, allowed, *, timeout=None):
+            return HttpObservation(action_id=action.action_id, status_code=200, body="")
+    client = PluginClient("http://runner:8080", broker=Broker(), http_client=http, timeout=2)
+    async def run():
+        try: await client.invoke(stored(tmp_path), PluginRequest(protocol="musicdl.plugin/v1", request_id=request_id, operation="search"))
+        finally: await http.aclose()
+    asyncio.run(run())
+    assert [len(item["actions"]) for item in requests] == list(range(count + 1))
+    assert [len(item["observations"]) for item in requests] == list(range(count + 1))
+
+
+@pytest.mark.parametrize("field", ["request_id", "operation"])
+def test_final_response_identity_is_checked(tmp_path, field):
+    request_id = uuid4(); kwargs = {field: uuid4() if field == "request_id" else "health"}
+    step = PluginStep(response=PluginResponse(protocol="musicdl.plugin/v1", request_id=kwargs.get("request_id", request_id), operation=kwargs.get("operation", "search"), ok=True, result={"items": []}))
+    client, http = make_client(tmp_path, [step])
+    async def run():
+        try:
+            with pytest.raises(RuntimeError, match="runner_response_mismatch"):
+                await client.invoke(stored(tmp_path), PluginRequest(protocol="musicdl.plugin/v1", request_id=request_id, operation="search"))
+        finally: await http.aclose()
+    asyncio.run(run())
+
+
 def test_injected_client_must_prove_transport_policy(tmp_path):
     class Unknown:
         pass

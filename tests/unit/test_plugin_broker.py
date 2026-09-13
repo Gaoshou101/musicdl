@@ -13,6 +13,10 @@ class FakeSocket:
         self.raw = raw
         self.sent = b""
         self.closed = False
+        self.timeouts = []
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
 
     def sendall(self, data):
         self.sent += data
