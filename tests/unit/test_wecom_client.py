@@ -84,3 +84,18 @@ def test_invalid_message_inputs_are_rejected():
     c=WeComClient("c","s",1,Redis())
     for user,content in [("","x"),("u","") ,("u","x"*2049)]:
         with pytest.raises(ValueError): run(c.send_text(user,content))
+
+def test_owned_http_client_disables_proxy_environment(monkeypatch):
+    seen = []
+    class SpyClient:
+        def __init__(self, **kwargs): seen.append(kwargs)
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        async def request(self, *_args, **_kwargs):
+            class Response:
+                def raise_for_status(self): pass
+                def json(self): return {"errcode": 0, "access_token": "tok", "expires_in": 120}
+            return Response()
+    monkeypatch.setattr("musicdl.wecom.client.httpx.AsyncClient", SpyClient)
+    run(WeComClient("c", "s", 1, Redis()).access_token())
+    assert seen and seen[0]["trust_env"] is False

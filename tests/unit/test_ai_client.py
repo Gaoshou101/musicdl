@@ -241,3 +241,21 @@ async def test_deeply_nested_inner_json_is_invalid_response():
     with pytest.raises(AIError) as caught:
         await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])
     assert caught.value.code == "invalid_response"
+
+@run_sync
+async def test_owned_http_client_disables_proxy_environment(monkeypatch):
+    seen = []
+    class Response:
+        def raise_for_status(self): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        async def aiter_bytes(self):
+            yield b'{"choices":[{"message":{"content":"{}"}}]}'
+    class SpyClient:
+        def __init__(self, **kwargs): seen.append(kwargs)
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        def stream(self, *_args, **_kwargs): return Response()
+    monkeypatch.setattr("musicdl.ai.client.httpx.AsyncClient", SpyClient)
+    assert await OpenAICompatibleClient(settings()).complete_json([]) == {}
+    assert seen and seen[0]["trust_env"] is False

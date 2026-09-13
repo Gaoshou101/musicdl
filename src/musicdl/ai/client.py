@@ -33,6 +33,7 @@ class OpenAICompatibleClient:
                 transport=self._transport,
                 timeout=self._settings.timeout,
                 follow_redirects=False,
+                trust_env=False,
             ) as client:
                 async with asyncio.timeout(self._settings.timeout):
                     async with client.stream("POST", endpoint, headers=headers, json=payload) as response:

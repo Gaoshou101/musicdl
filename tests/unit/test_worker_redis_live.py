@@ -18,6 +18,8 @@ from musicdl.sources.registry import SourceEntry, SourceRegistry
 from musicdl.sources.search import SearchResult
 from musicdl.wecom.state import RedisStateStore
 from musicdl.worker.workers import JobWorker, MessageWorker
+from musicdl.worker import bind_user_selection
+from musicdl.wecom.state import SelectionContext
 
 
 REDIS_URL = os.getenv("MUSICDL_TEST_REDIS_URL")
@@ -69,6 +71,25 @@ async def _cleanup(client, namespace: str):
 
 def test_live_redis_search_selection_job_download_path(monkeypatch):
     _run(_test_live_redis_search_selection_job_download_path(monkeypatch))
+
+def test_live_redis_selection_indexes_are_atomic_and_share_ttl():
+    _run(_test_live_redis_selection_indexes_are_atomic_and_share_ttl())
+
+async def _test_live_redis_selection_indexes_are_atomic_and_share_ttl():
+    client = await _new_client()
+    namespace = _namespace()
+    try:
+        context = SelectionContext("corp", "user", "request", "version", {1: "item"})
+        await bind_user_selection(client, "token", context, ttl=120, namespace=namespace)
+        digest = hashlib.sha256(b"token").hexdigest()
+        keys = [f"{namespace}:worker-selection:{digest}", f"{namespace}:worker-user:" + hashlib.sha256(b"corp:user").hexdigest(), f"{namespace}:worker-request:" + hashlib.sha256(b"request").hexdigest()]
+        assert await client.exists(*keys) == 3
+        ttls = [await client.ttl(key) for key in keys]
+        assert all(0 < ttl <= 120 for ttl in ttls)
+        assert max(ttls) - min(ttls) <= 1
+    finally:
+        await _cleanup(client, namespace)
+        await client.aclose()
 
 
 async def _test_live_redis_search_selection_job_download_path(monkeypatch):
@@ -148,7 +169,7 @@ async def _test_live_redis_xautoclaim_retry_dead_letter_is_sanitized(monkeypatch
         worker = MessageWorker(
             client, SourceRegistry(), wecom, state=state,
             group=namespace + ":retry-group", consumer="retry-live",
-            pending_idle_ms=1, max_attempts=2,
+            search_timeout=0.0005, pending_idle_ms=1, max_attempts=2,
         )
         request_id = "retry-" + secrets.token_hex(6)
         await state.enqueue_message(

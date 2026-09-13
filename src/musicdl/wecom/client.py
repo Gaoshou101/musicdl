@@ -34,7 +34,7 @@ class WeComClient:
 
     async def _request_data(self, method: str, url: str, error: str, **kwargs: Any) -> dict[str, Any]:
         try:
-            async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
                 response = await client.request(method, url, **kwargs)
                 response.raise_for_status()
             data = response.json()

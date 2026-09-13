@@ -11,9 +11,16 @@ def _request_key(namespace: str, request_id: str) -> str: return f"{namespace}:w
 async def bind_user_selection(redis: Any, token: str, context: SelectionContext, *, query: str = "", candidates: dict | None = None, ttl: int = 900, namespace: str = "{musicdl}") -> None:
     data = {"corp_id": context.corp_id, "from_user": context.from_user, "request_id": context.request_id, "version": context.candidate_set_version, "candidates": candidates or context.candidates, "query": query}
     encoded = json.dumps({**data, "token": token}, ensure_ascii=False)
-    await redis.set(_key(namespace, token), encoded, ex=min(max(ttl, 60), 86400))
-    await redis.set(_user_key(namespace, context.corp_id, context.from_user), token, ex=min(max(ttl, 60), 86400))
-    await redis.set(_request_key(namespace, context.request_id), encoded, ex=min(max(ttl, 60), 86400))
+    expiry = min(max(ttl, 60), 86400)
+    keys = [_key(namespace, token), _user_key(namespace, context.corp_id, context.from_user), _request_key(namespace, context.request_id)]
+    if hasattr(redis, "eval"):
+        script = "local value = ARGV[1]; local token = ARGV[2]; local ttl = tonumber(ARGV[3]); redis.call('SET', KEYS[1], value, 'EX', ttl); redis.call('SET', KEYS[2], token, 'EX', ttl); redis.call('SET', KEYS[3], value, 'EX', ttl); return 1"
+        await redis.eval(script, len(keys), *keys, encoded, token, expiry)
+        return
+    # Minimal fakes used by unit tests do not implement EVAL; real Redis always does.
+    await redis.set(keys[0], encoded, ex=expiry)
+    await redis.set(keys[1], token, ex=expiry)
+    await redis.set(keys[2], encoded, ex=expiry)
 
 async def _get_by_token(redis: Any, token: str, *, namespace: str = "{musicdl}") -> dict[str, Any] | None:
     raw = await redis.get(_key(namespace, token))

@@ -113,7 +113,7 @@ def test_message_reclaims_stale_pending_before_new_messages(monkeypatch):
     monkeypatch.setattr("musicdl.worker.workers.search_sources",search)
     pending=[("1-0",{b"payload":json.dumps({"corp_id":"c","from_user":"u","request_id":"r","payload":{"command":"search","value":"song"}}).encode()})]
     redis=StreamRedis(messages=[("2-0",{})],pending=pending)
-    assert run(MessageWorker(redis,object(),WeCom(),state=State(),pending_idle_ms=1234).run_once())==1
+    assert run(MessageWorker(redis,object(),WeCom(),state=State(),search_timeout=1.0,pending_idle_ms=1234).run_once())==1
     assert redis.claims[0][3]==1234 and redis.reads==0 and redis.acks[0][2]=="1-0"
 
 def test_message_failure_retries_then_dead_letters_notifies_and_acks(monkeypatch):
@@ -202,6 +202,21 @@ def test_message_malformed_ack_failure_does_not_clear_retry():
 def test_message_delivery_settings_are_strictly_validated(kwargs):
     with pytest.raises(ValueError):
         MessageWorker(Redis(),object(),WeCom(),state=State(),**kwargs)
+
+def test_default_message_consumers_are_unique_and_bounded():
+    first = MessageWorker(Redis(), object(), WeCom(), state=State())
+    second = MessageWorker(Redis(), object(), WeCom(), state=State())
+    assert first.consumer != second.consumer
+    assert 1 <= len(first.consumer) <= 128
+    assert 1 <= len(second.consumer) <= 128
+
+def test_explicit_message_consumer_is_preserved():
+    worker = MessageWorker(Redis(), object(), WeCom(), state=State(), consumer="worker-explicit")
+    assert worker.consumer == "worker-explicit"
+
+def test_message_pending_lease_exceeds_search_timeout():
+    worker = MessageWorker(Redis(), object(), WeCom(), state=State(), search_timeout=2.5, pending_idle_ms=2501)
+    assert worker.pending_idle_ms > worker.search_timeout * 1000
 
 def test_message_run_forever_propagates_cancellation():
     class Idle(MessageWorker):

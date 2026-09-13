@@ -4,6 +4,7 @@ import inspect
 import asyncio
 import hashlib
 import math
+import secrets
 from collections.abc import Mapping
 from typing import Any, Callable
 
@@ -137,17 +138,22 @@ class _StreamWorker:
 
 class MessageWorker(_StreamWorker):
     def __init__(self, redis: Any, registry: Any, wecom: Any, *, state: RedisStateStore | None = None,
-                 ai_ranker: Callable | None = None, group: str = "musicdl-workers", consumer: str = "message-worker",
+                 ai_ranker: Callable | None = None, group: str = "musicdl-workers", consumer: str | None = None,
                  max_results: int = 10, search_timeout: float = 10.0, selection_ttl: int = 600,
-                 pending_idle_ms: int = 30000, max_attempts: int = 3):
+                 pending_idle_ms: int = 30001, max_attempts: int = 3):
         self.redis, self.registry, self.wecom = redis, registry, wecom
         self.state = state or RedisStateStore(redis)
-        self.ai_ranker, self.group, self.consumer = ai_ranker, group, consumer
+        if not isinstance(search_timeout, (int, float)) or isinstance(search_timeout, bool) or not math.isfinite(search_timeout) or search_timeout <= 0:
+            raise ValueError("invalid search timeout")
+        self.ai_ranker, self.group = ai_ranker, group
+        self.consumer = consumer if consumer is not None else f"message-{secrets.token_hex(12)}"
         self.max_results, self.search_timeout = max_results, search_timeout
         if not isinstance(selection_ttl, int) or isinstance(selection_ttl, bool) or not 60 <= selection_ttl <= 86400:
             raise ValueError("invalid selection ttl")
         self.selection_ttl = selection_ttl
         self._configure_delivery(self.state.namespace, pending_idle_ms, max_attempts)
+        if self.pending_idle_ms <= self.search_timeout * 1000:
+            raise ValueError("pending idle must exceed search timeout")
         self.stream = self.state.message_stream
 
     async def handle(self, envelope: dict[str, Any]) -> str | None:
@@ -225,15 +231,22 @@ class MessageWorker(_StreamWorker):
 
 class JobWorker(_StreamWorker):
     def __init__(self, redis: Any, wecom: Any, sources: dict, media_root: str, *, state: RedisStateStore | None = None,
-                 refresh: Callable | None = None, group: str = "musicdl-workers", consumer: str = "job-worker",
-                 job_ttl: int = 86400, pending_idle_ms: int = 30000, max_attempts: int = 3):
+                 refresh: Callable | None = None, group: str = "musicdl-workers", consumer: str | None = None,
+                 job_ttl: int = 86400, pending_idle_ms: int = 30001, max_attempts: int = 3,
+                 job_timeout: float = 10.0):
         self.redis, self.wecom, self.sources, self.media_root = redis, wecom, sources, media_root
         self.state, self.refresh = state or RedisStateStore(redis), refresh
         if not isinstance(job_ttl, int) or isinstance(job_ttl, bool) or not 60 <= job_ttl <= 604800:
             raise ValueError("invalid job ttl")
         self.job_ttl = job_ttl
+        if not isinstance(job_timeout, (int, float)) or isinstance(job_timeout, bool) or not math.isfinite(job_timeout) or job_timeout <= 0:
+            raise ValueError("invalid job timeout")
+        self.job_timeout = float(job_timeout)
         self._configure_delivery(self.state.namespace, pending_idle_ms, max_attempts)
-        self.group, self.consumer = group, consumer
+        self.group = group
+        self.consumer = consumer if consumer is not None else f"job-{secrets.token_hex(12)}"
+        if self.pending_idle_ms <= self.job_timeout * 1000:
+            raise ValueError("pending idle must exceed job timeout")
         self.stream = self.state.job_stream
         self.selection_stream = self.state.message_stream
         self.selection_group = group + "-selection"
@@ -300,7 +313,8 @@ class JobWorker(_StreamWorker):
             candidate = Candidate.model_validate(candidate)
         if self.refresh is None: raise RuntimeError("refresh callback is required")
         refresh = self.refresh
-        result = await download_with_fallback(candidate, self.sources, self.media_root, request_id=str(job["request_id"]), query=str(job.get("query", candidate.title)), refresh=refresh)
+        async with asyncio.timeout(self.job_timeout):
+            result = await download_with_fallback(candidate, self.sources, self.media_root, request_id=str(job["request_id"]), query=str(job.get("query", candidate.title)), refresh=refresh)
         user = job.get("from_user") or job.get("user")
         if user:
             message = f"下载成功：{result.download.relative_path}" if result.download else f"下载失败，已重试：{result.download_error or result.refresh_error or 'unknown'}"

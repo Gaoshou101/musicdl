@@ -148,3 +148,23 @@ def test_job_selection_success_delete_failure_is_not_recorded(monkeypatch):
     key=worker._retry_key(worker.selection_stream,"1-0"); redis.retries[key]=1
     run(worker.run_selection_once())
     assert redis.acks[-1][2]=="1-0" and key in redis.retries and redis.dead_letters==[]
+
+def test_default_job_consumers_are_unique_and_bounded():
+    first = JobWorker(Redis(), WeCom(), {}, "/tmp", state=State())
+    second = JobWorker(Redis(), WeCom(), {}, "/tmp", state=State())
+    assert first.consumer != second.consumer
+    assert 1 <= len(first.consumer) <= 128
+    assert 1 <= len(second.consumer) <= 128
+
+def test_explicit_job_consumer_is_preserved():
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=State(), consumer="worker-explicit")
+    assert worker.consumer == "worker-explicit"
+
+def test_job_pending_lease_exceeds_job_timeout_and_download_is_bounded(monkeypatch):
+    async def slow_download(*_args, **_kwargs):
+        await asyncio.sleep(0.2)
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", slow_download)
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=State(), job_timeout=0.05, pending_idle_ms=51, refresh=lambda *_args: None)
+    assert worker.pending_idle_ms > worker.job_timeout * 1000
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(worker.handle_job({"candidate": cand(), "request_id": "r", "query": "q"}))
