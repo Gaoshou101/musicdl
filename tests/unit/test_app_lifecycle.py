@@ -1,0 +1,198 @@
+"""RED contract tests for application-owned worker lifecycle orchestration."""
+
+import asyncio
+import base64
+from dataclasses import dataclass
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+from pydantic import SecretStr
+
+from musicdl.app import create_app
+from musicdl.config import AppSettings, WeComSettings
+
+
+AES_KEY = base64.b64encode(b"k" * 32).decode().rstrip("=")
+
+
+def enabled_settings() -> AppSettings:
+    return AppSettings(
+        wecom=WeComSettings(
+            enabled=True,
+            corp_id="corp",
+            agent_id=7,
+            token=SecretStr("token"),
+            secret=SecretStr("outbound-secret"),
+            encoding_aes_key=SecretStr(AES_KEY),
+            allowed_users=["user"],
+        )
+    )
+
+
+class LiveWorker:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run_forever(self) -> None:
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
+class ExitingWorker:
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.error = error
+
+    async def run_forever(self) -> None:
+        self.started.set()
+        if self.error is not None:
+            raise self.error
+
+
+@dataclass
+class Runtime:
+    state: object
+    service: object
+    message_worker: object
+    job_worker: object
+
+    def __post_init__(self) -> None:
+        self.closed = False
+        self.strict_close = True
+
+    async def aclose(self) -> None:
+        if self.strict_close:
+            assert self.message_worker.cancelled.is_set()
+            assert self.job_worker.cancelled.is_set()
+        self.closed = True
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def test_enabled_app_starts_both_workers_and_readyz_requires_live_tasks():
+    async def scenario():
+        state = AsyncMock()
+        state.ping.return_value = True
+        message = LiveWorker()
+        jobs = LiveWorker()
+        runtime = Runtime(state, object(), message, jobs)
+        calls = []
+
+        def factory(settings):
+            calls.append(settings)
+            return runtime
+
+        app = create_app(enabled_settings(), runtime_factory=factory)
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(
+                asyncio.gather(message.started.wait(), jobs.started.wait()), 1
+            )
+            assert app.state.runtime is runtime
+            assert app.state.message_worker is message
+            assert app.state.job_worker is jobs
+            assert len(app.state.worker_tasks) == 2
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.get("/readyz")
+            assert response.status_code == 200
+        assert runtime.closed
+        assert len(calls) == 1
+        assert calls[0].wecom.enabled is True
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError("worker failed")])
+def test_readyz_is_503_when_a_worker_exits_normally_or_with_exception(error):
+    async def scenario():
+        state = AsyncMock()
+        state.ping.return_value = True
+        message = ExitingWorker(error)
+        jobs = LiveWorker()
+        runtime = Runtime(state, object(), message, jobs)
+        runtime.strict_close = False
+
+        app = create_app(
+            enabled_settings(), runtime_factory=lambda _settings: runtime
+        )
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(message.started.wait(), 1)
+            await asyncio.sleep(0)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.get("/readyz")
+            assert response.status_code == 503
+            if error is not None:
+                assert app.state.worker_error is error
+
+    run(scenario())
+
+
+def test_shutdown_cancels_both_workers_before_runtime_close():
+    async def scenario():
+        state = AsyncMock()
+        state.ping.return_value = True
+        message = LiveWorker()
+        jobs = LiveWorker()
+        runtime = Runtime(state, object(), message, jobs)
+        app = create_app(
+            enabled_settings(), runtime_factory=lambda _settings: runtime
+        )
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(
+                asyncio.gather(message.started.wait(), jobs.started.wait()), 1
+            )
+        assert message.cancelled.is_set()
+        assert jobs.cancelled.is_set()
+        assert runtime.closed
+
+    run(scenario())
+
+
+def test_disabled_wecom_does_not_call_runtime_factory_and_is_ready():
+    async def scenario():
+        called = False
+
+        def factory(_settings):
+            nonlocal called
+            called = True
+            raise AssertionError("disabled WeCom must not construct runtime")
+
+        app = create_app(AppSettings(), runtime_factory=factory)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.get("/readyz")
+        assert response.status_code == 200
+        assert called is False
+
+    run(scenario())
+
+
+def test_runtime_factory_failure_fails_closed_without_redis_fallback():
+    async def scenario():
+        failure = FileNotFoundError("app data missing")
+
+        def factory(_settings):
+            raise failure
+
+        app = create_app(enabled_settings(), runtime_factory=factory)
+        with pytest.raises(FileNotFoundError) as raised:
+            async with app.router.lifespan_context(app):
+                pytest.fail("runtime construction should fail before lifespan yields")
+        assert raised.value is failure
+
+    run(scenario())
