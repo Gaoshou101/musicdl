@@ -6,6 +6,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import time
 from urllib.parse import urlsplit
 from typing import Callable, Iterable
 
@@ -41,7 +42,9 @@ class HttpsActionBroker:
     def _connect(address, timeout):
         return socket.create_connection(address, timeout=timeout)
 
-    def fetch(self, action: HttpAction, allowed_hosts: Iterable[str]) -> HttpObservation:
+    def fetch(self, action: HttpAction, allowed_hosts: Iterable[str], *, timeout: float | None = None) -> HttpObservation:
+        request_timeout = self.timeout if timeout is None else min(self.timeout, max(0.001, timeout))
+        deadline = time.monotonic() + request_timeout
         if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in action.url):
             raise ActionDenied("url_denied", "URL contains whitespace or controls")
         try:
@@ -64,6 +67,8 @@ class HttpsActionBroker:
             raise ActionDenied("url_denied", "request target contains non-ASCII, whitespace, or controls")
 
         try:
+            # A synchronous resolver cannot be interrupted; callers still enforce
+            # the outer deadline and this check bounds connect/read work.
             resolved = list(self.resolver(approved, 443))
             candidates: dict[tuple[int, str, int], tuple[int, tuple]] = {}
             for item in resolved:
@@ -84,6 +89,8 @@ class HttpsActionBroker:
                 candidates[(family, str(ip), 443)] = (family, numeric)
             if not candidates:
                 raise ActionDenied("dns_error", "host did not resolve")
+            if time.monotonic() >= deadline:
+                raise ActionDenied("timeout", "action timed out")
         except ActionDenied:
             raise
         except (OSError, ValueError, TypeError, IndexError):
@@ -93,7 +100,10 @@ class HttpsActionBroker:
         try:
             for _, (family, address) in sorted(candidates.items(), key=lambda x: (x[0][0], x[0][1])):
                 try:
-                    raw = self.connector(address, self.timeout)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ActionDenied("timeout", "action timed out")
+                    raw = self.connector(address, remaining)
                     break
                 except OSError:
                     raw = None
@@ -105,6 +115,8 @@ class HttpsActionBroker:
                 raise ActionDenied("tls_error", "TLS negotiation failed") from exc
             wrapped.sendall((f"GET {target} HTTP/1.1\r\nHost: {approved}\r\n"
                              "Accept: application/json\r\nConnection: close\r\n\r\n").encode("ascii"))
+            if time.monotonic() >= deadline:
+                raise ActionDenied("timeout", "action timed out")
             response = http.client.HTTPResponse(wrapped)
             response.begin()
             if 300 <= response.status < 400:
@@ -127,6 +139,8 @@ class HttpsActionBroker:
                 if value > MAX_ACTION_BODY_BYTES:
                     raise ActionDenied("body_too_large", "response body exceeds 1 MiB")
             body = response.read(MAX_ACTION_BODY_BYTES + 1)
+            if time.monotonic() >= deadline:
+                raise ActionDenied("timeout", "action timed out")
             if len(body) > MAX_ACTION_BODY_BYTES:
                 raise ActionDenied("body_too_large", "response body exceeds 1 MiB")
             import base64

@@ -4,15 +4,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import stat
 import time
-from pathlib import Path
-from typing import Any
-from uuid import UUID
 
 import httpx
 
 from musicdl.contracts.plugin import (
-    MAX_HTTP_ACTIONS, HttpAction, HttpObservation, PluginInvocation, PluginRequest,
+    MAX_HTTP_ACTIONS, MAX_SOURCE_BYTES, HttpAction, HttpObservation, PluginInvocation, PluginRequest,
     PluginResponse, PluginStep,
 )
 from .broker import ActionDenied, HttpsActionBroker
@@ -41,24 +40,47 @@ class PluginClient:
 
     @staticmethod
     def _source(stored: StoredPlugin) -> str:
+        fd = None
         try:
-            data = Path(stored.path).read_bytes()
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(os.fspath(stored.path), flags)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_SOURCE_BYTES:
+                raise RuntimeError("source_invalid")
+            chunks: list[bytes] = []
+            total = 0
+            while total <= MAX_SOURCE_BYTES:
+                chunk = os.read(fd, min(16 * 1024, MAX_SOURCE_BYTES + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_SOURCE_BYTES:
+                    raise RuntimeError("source_invalid")
+            data = b"".join(chunks)
+            if len(data) != info.st_size:
+                raise RuntimeError("source_invalid")
+            if hashlib.sha256(data).hexdigest() != stored.manifest.sha256:
+                raise RuntimeError("source_digest_mismatch")
+            try:
+                return data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise RuntimeError("source_invalid") from exc
+        except RuntimeError:
+            raise
         except (OSError, ValueError) as exc:
             raise RuntimeError("source_unavailable") from exc
-        digest = hashlib.sha256(data).hexdigest()
-        if digest != stored.manifest.sha256:
-            raise RuntimeError("source_digest_mismatch")
-        try:
-            return data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise RuntimeError("source_invalid") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
 
     async def invoke(self, stored: StoredPlugin, request: PluginRequest) -> PluginResponse:
         if not stored.enabled:
             raise RuntimeError("plugin_disabled")
         if request.operation not in stored.manifest.operations:
             raise RuntimeError("operation_not_declared")
-        source = self._source(stored)
         deadline = time.monotonic() + min(self.timeout, request.timeout_ms / 1000)
         actions: list[HttpAction] = []
         observations: list[HttpObservation] = []
@@ -66,24 +88,29 @@ class PluginClient:
         async def loop() -> PluginResponse:
             while True:
                 # Re-read immutable content immediately before every send.
-                current_source = self._source(stored)
+                current_source = await asyncio.to_thread(self._source, stored)
                 invocation = PluginInvocation(manifest=stored.manifest, source=current_source,
                                               request=request, actions=tuple(actions), observations=tuple(observations))
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError("runner_timeout")
                 try:
-                    response = await self.http.post(self.service_url,
-                        content=invocation.model_dump_json().encode(),
-                        timeout=remaining, follow_redirects=False)
+                    async with self.http.stream("POST", self.service_url,
+                            content=invocation.model_dump_json().encode(),
+                            timeout=remaining, follow_redirects=False) as response:
+                        if response.status_code < 200 or response.status_code >= 300:
+                            raise RuntimeError("runner_http_error")
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) > 64 * 1024:
+                                raise RuntimeError("runner_response_too_large")
                 except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
                     raise RuntimeError("runner_timeout") from exc
                 except httpx.HTTPError as exc:
                     raise RuntimeError("runner_http_error") from exc
-                if response.status_code < 200 or response.status_code >= 300:
-                    raise RuntimeError("runner_http_error")
                 try:
-                    step = PluginStep.model_validate(response.json())
+                    step = PluginStep.model_validate_json(bytes(body))
                 except (ValueError, TypeError, json.JSONDecodeError) as exc:
                     raise RuntimeError("runner_invalid_json") from exc
                 if step.response is not None:
@@ -105,12 +132,10 @@ class PluginClient:
                 if remaining <= 0:
                     raise RuntimeError("runner_timeout")
                 try:
-                    observation = await asyncio.wait_for(
-                        asyncio.to_thread(self.broker.fetch, action, stored.manifest.allowed_hosts), remaining)
-                except asyncio.TimeoutError as exc:
-                    raise RuntimeError("runner_timeout") from exc
+                    observation = await asyncio.to_thread(
+                        self.broker.fetch, action, stored.manifest.allowed_hosts, timeout=remaining)
                 except ActionDenied as exc:
-                    raise RuntimeError("action_denied") from exc
+                    raise RuntimeError("runner_timeout" if exc.code == "timeout" else "action_denied") from exc
                 except Exception as exc:
                     raise RuntimeError("action_failed") from exc
                 if observation.action_id != action.action_id:

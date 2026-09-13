@@ -58,7 +58,7 @@ def test_four_actions_accumulate_and_fifth_is_rejected(tmp_path):
         steps.append(PluginStep(action=HttpAction(action_id=f"a{i}", method="GET", url="https://api.example.com/x")))
     steps.append(PluginStep(action=HttpAction(action_id="a4", method="GET", url="https://api.example.com/x")))
     class Broker:
-        def fetch(self, action, allowed):
+        def fetch(self, action, allowed, *, timeout=None):
             return HttpObservation(action_id=action.action_id, status_code=200, body="")
     client, http = make_client(tmp_path, steps, Broker())
     async def run():
@@ -79,7 +79,7 @@ def test_action_ids_and_broker_results_are_bounded(tmp_path, mode, expected):
     else:
         steps.append(response(request_id, result={"items": []}))
     class Broker:
-        def fetch(self, action, allowed):
+        def fetch(self, action, allowed, *, timeout=None):
             if mode == "denied": raise ActionDenied("host_denied", "secret")
             return HttpObservation(action_id="wrong" if mode == "mismatch" else action.action_id, status_code=200, body="")
     client, http = make_client(tmp_path, steps, Broker())
@@ -106,6 +106,36 @@ def test_runner_failures_are_stable_and_do_not_leak_body(tmp_path, kind):
             assert "SECRET" not in str(exc.value)
         finally: await http.aclose()
     asyncio.run(run())
+
+
+def test_runner_response_body_is_capped_before_json_parse(tmp_path):
+    async def stream(request):
+        yield b"{" + b"x" * 65536
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"{" + b"x" * 65536)), trust_env=False, follow_redirects=False)
+    client = PluginClient("http://runner:8080", http_client=http, timeout=1)
+    async def run():
+        try:
+            with pytest.raises(RuntimeError, match="runner_response_too_large") as exc:
+                await client.invoke(stored(tmp_path), PluginRequest(protocol="musicdl.plugin/v1", request_id=uuid4(), operation="search"))
+            assert "x" not in str(exc.value)
+        finally: await http.aclose()
+    asyncio.run(run())
+
+
+def test_injected_client_must_prove_transport_policy(tmp_path):
+    class Unknown:
+        pass
+    with pytest.raises(ValueError, match="http_client"):
+        PluginClient("http://runner:8080", http_client=Unknown())
+
+
+def test_source_special_file_and_oversize_are_rejected(tmp_path):
+    p = stored(tmp_path)
+    p.path.unlink()
+    p.path.symlink_to(tmp_path / "target.py")
+    (tmp_path / "target.py").write_bytes(b"x")
+    with pytest.raises(RuntimeError, match="source"):
+        PluginClient._source(p)
 
 
 def test_digest_and_operation_are_checked_before_send(tmp_path):
