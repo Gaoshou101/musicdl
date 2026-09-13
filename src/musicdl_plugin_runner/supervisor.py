@@ -156,6 +156,12 @@ class Supervisor:
                 await asyncio.shield(self._terminate(proc))
                 await asyncio.shield(self._cancel_readers(readers + [wait_task]))
                 raise
+            except (BrokenPipeError, ConnectionError, OSError):
+                # Stream-reader failures are expected I/O faults. Reap every task
+                # before returning a request-bound, sanitized failure.
+                await self._terminate(proc)
+                await self._cancel_readers(readers + [wait_task])
+                return self._with_request(self._error("io_failed", "plugin I/O failed"), invocation)
             if proc.returncode != 0:
                 return self._with_request(self._error("plugin_failed", "plugin execution failed"), invocation)
             try:

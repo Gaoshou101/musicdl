@@ -134,3 +134,19 @@ def test_stdout_and_stderr_overflow_are_bounded():
     stderr_step = run_supervisor("import sys; sys.stderr.write('x'*16385)")
     assert stdout_step.response.error.code == "output_too_large"
     assert stderr_step.response.error.code == "output_too_large"
+
+
+def test_reader_io_failure_is_sanitized_and_cleaned_up(monkeypatch):
+    async def failing_reader(stream, limit):
+        raise OSError("attacker-controlled reader failure")
+
+    async def run():
+        sup = Supervisor(command_builder=lambda inv: child("import time; time.sleep(10)"))
+        monkeypatch.setattr(sup, "_read_bounded", failing_reader)
+        step = await sup.execute(invocation(timeout_ms=1000))
+        await asyncio.sleep(0)
+        assert step.response and step.response.error.code == "io_failed"
+        assert "attacker-controlled" not in step.response.error.message
+        assert sup._active == 0
+
+    asyncio.run(run())
