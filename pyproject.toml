@@ -32,3 +32,6 @@ where = ["src"]
 addopts = "-ra --strict-config --strict-markers"
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+  "integration: requires a Docker Engine and runs the Compose plugin runner",
+]
