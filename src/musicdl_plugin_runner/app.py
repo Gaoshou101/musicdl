@@ -3,14 +3,14 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from musicdl.contracts.plugin import MAX_INVOCATION_BYTES, PROTOCOL, PluginInvocation
-from musicdl_plugin_runner.supervisor import Supervisor
+from musicdl_plugin_runner.supervisor import Supervisor, build_host_command
 
 app = FastAPI(title="musicdl-plugin-runner", docs_url=None, redoc_url=None)
 def _unavailable_builder(_invocation: PluginInvocation) -> list[str]:
     raise RuntimeError("host builders are configured by the runtime")
 
 
-supervisor = Supervisor(_unavailable_builder)
+supervisor = Supervisor(build_host_command)
 
 
 @app.get("/healthz")

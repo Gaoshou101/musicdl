@@ -1,6 +1,8 @@
 const raw = await new Response(Deno.stdin.readable).text();
 let invocation; try { invocation=JSON.parse(raw); } catch (_) { Deno.exit(1); }
-const request=Object.freeze(invocation.request), source=invocation.source;
+function freeze(value) { if(value && typeof value === "object" && !Object.isFrozen(value)) { for(const child of Object.values(value)) freeze(child); Object.freeze(value); } return value; }
+const request=freeze(invocation.request), source=invocation.source;
+Object.defineProperty(globalThis,"Worker",{value:undefined,writable:false,configurable:false});
 try {
   const fn=new Function("request", `"use strict"; const Worker=undefined; ${source}\n; return typeof handle === "function" ? handle(request) : undefined;`);
   const result=await fn(request);

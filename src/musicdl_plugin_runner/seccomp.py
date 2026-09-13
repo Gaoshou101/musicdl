@@ -5,14 +5,14 @@ _DENIED = ("open openat openat2 creat socket socketpair connect bind listen acce
 def install() -> bool:
     if os.name != "posix": return False
     try: lib = ctypes.CDLL("libseccomp.so.2")
-    except OSError: return False
+    except OSError as exc: raise RuntimeError("libseccomp unavailable") from exc
     lib.seccomp_init.argtypes=[ctypes.c_uint32]; lib.seccomp_init.restype=ctypes.c_void_p
     lib.seccomp_syscall_resolve_name.argtypes=[ctypes.c_char_p]; lib.seccomp_syscall_resolve_name.restype=ctypes.c_int
     lib.seccomp_rule_add.argtypes=[ctypes.c_void_p,ctypes.c_uint32,ctypes.c_int,ctypes.c_uint]; lib.seccomp_rule_add.restype=ctypes.c_int
     lib.seccomp_load.argtypes=[ctypes.c_void_p]; lib.seccomp_load.restype=ctypes.c_int
     lib.seccomp_release.argtypes=[ctypes.c_void_p]
     ctx=lib.seccomp_init(0x7FFF0000)
-    if not ctx: return False
+    if not ctx: raise RuntimeError("seccomp init failed")
     try:
         for name in _DENIED:
             number=lib.seccomp_syscall_resolve_name(name.encode())

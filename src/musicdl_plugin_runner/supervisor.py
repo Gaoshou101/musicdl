@@ -5,6 +5,9 @@ import asyncio
 import os
 import signal
 import subprocess
+import shutil
+import tempfile
+from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -13,6 +16,17 @@ from musicdl.contracts.plugin import MAX_INVOCATION_BYTES, PluginInvocation, Plu
 MAX_STDOUT_BYTES = 64 * 1024
 MAX_STDERR_BYTES = 16 * 1024
 GRACE_SECONDS = 0.25
+
+@dataclass(frozen=True)
+class HostCommand:
+    argv: list[str]
+    env: dict[str, str]
+
+def build_host_command(invocation: PluginInvocation) -> HostCommand:
+    if invocation.manifest.language == "python":
+        from musicdl_plugin_runner.python_host import build_command
+        return build_command(invocation)
+    return HostCommand(["deno", "run", "--quiet", "--no-config", "--no-lock", "--no-npm", "--cached-only", "--v8-flags=--max-old-space-size=128", "-"], {"DENO_NO_PROMPT": "1"})
 
 
 class Supervisor:
@@ -109,10 +123,15 @@ class Supervisor:
             if len(encoded) > MAX_INVOCATION_BYTES:
                 return self._with_request(self._error("invocation_too_large", "invocation exceeds limit"), invocation)
             try:
-                command = self.command_builder(invocation)
+                built = self.command_builder(invocation)
+                if isinstance(built, HostCommand):
+                    command, environment = built.argv, built.env
+                else:
+                    command, environment = built, {}
                 if not command or any(not isinstance(part, str) for part in command):
                     raise ValueError
-                kwargs: dict[str, Any] = {"stdin": asyncio.subprocess.PIPE, "stdout": asyncio.subprocess.PIPE, "stderr": asyncio.subprocess.PIPE, "env": {}, "close_fds": True}
+                job_dir = tempfile.mkdtemp(prefix="musicdl-plugin-job-")
+                kwargs: dict[str, Any] = {"stdin": asyncio.subprocess.PIPE, "stdout": asyncio.subprocess.PIPE, "stderr": asyncio.subprocess.PIPE, "env": environment, "cwd": job_dir, "close_fds": True}
                 if os.name == "posix":
                     kwargs["start_new_session"] = True
                 else:
@@ -171,4 +190,6 @@ class Supervisor:
         finally:
             if proc is not None and proc.returncode is None:
                 await self._terminate(proc)
+            if 'job_dir' in locals():
+                shutil.rmtree(job_dir, ignore_errors=True)
             await self._release()
