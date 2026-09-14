@@ -5,12 +5,16 @@ from .plugin import (
     MAX_HTTP_ACTIONS,
     MAX_INVOCATION_BYTES,
     MAX_SOURCE_BYTES,
+    RESOLVED_MEDIA_MAX_BYTES,
+    RESOLVED_MEDIA_TYPES,
     HttpAction,
     HttpObservation,
     PluginInvocation,
     PluginLanguage,
     PluginManifest,
     PluginStep,
+    ResolvedExtension,
+    ResolvedMedia,
 )
 
 __all__ = [
@@ -18,10 +22,14 @@ __all__ = [
     "MAX_HTTP_ACTIONS",
     "MAX_INVOCATION_BYTES",
     "MAX_SOURCE_BYTES",
+    "RESOLVED_MEDIA_MAX_BYTES",
+    "RESOLVED_MEDIA_TYPES",
     "HttpAction",
     "HttpObservation",
     "PluginInvocation",
     "PluginLanguage",
     "PluginManifest",
     "PluginStep",
+    "ResolvedExtension",
+    "ResolvedMedia",
 ]

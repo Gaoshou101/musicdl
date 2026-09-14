@@ -10,15 +10,23 @@ from urllib.parse import urlsplit
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
 
 PROTOCOL = "musicdl.plugin/v1"
 Operation = Literal["capabilities", "search", "resolve", "download", "health"]
+ResolvedExtension = Literal["mp3", "flac", "m4a", "ogg"]
 MAX_PAYLOAD_BYTES = 64 * 1024
 MAX_SOURCE_BYTES = 128 * 1024
 MAX_ACTION_BODY_BYTES = 1024 * 1024
 MAX_INVOCATION_BYTES = 6 * 1024 * 1024
 MAX_HTTP_ACTIONS = 4
+RESOLVED_MEDIA_MAX_BYTES = 500 * 1024 * 1024
+RESOLVED_MEDIA_TYPES = {
+    "mp3": frozenset({"audio/mpeg"}),
+    "flac": frozenset({"audio/flac"}),
+    "m4a": frozenset({"audio/mp4", "audio/x-m4a"}),
+    "ogg": frozenset({"audio/ogg", "application/ogg"}),
+}
 PluginLanguage = Literal["python", "javascript"]
 
 
@@ -102,6 +110,37 @@ class PluginResponse(BaseModel):
             raise ValueError("successful response requires result and forbids error")
         if not self.ok and (self.error is None or self.result is not None):
             raise ValueError("failed response requires error and forbids result")
+        return self
+
+
+class ResolvedMedia(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    candidate_id: StrictStr = Field(min_length=1, max_length=256)
+    url: StrictStr = Field(min_length=1, max_length=4096)
+    extension: ResolvedExtension
+    media_type: StrictStr
+    declared_size: StrictInt | None = Field(default=None, ge=0, le=RESOLVED_MEDIA_MAX_BYTES)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def url_is_https_without_unsafe_parts(cls, value: str) -> str:
+        if not isinstance(value, str) or any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in value):
+            raise ValueError("URL contains controls or whitespace")
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ValueError("malformed HTTPS URL") from exc
+        if (parsed.scheme != "https" or not parsed.hostname or
+                parsed.username is not None or parsed.password is not None or
+                parsed.fragment or port is not None):
+            raise ValueError("URL must be implicit-port HTTPS without credentials or fragment")
+        return value
+
+    @model_validator(mode="after")
+    def media_type_matches_extension(self):
+        if self.media_type.casefold() not in RESOLVED_MEDIA_TYPES[self.extension]:
+            raise ValueError("media_type does not match extension")
         return self
 
 
