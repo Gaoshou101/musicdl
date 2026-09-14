@@ -33,9 +33,10 @@ Return to `medium` after the difficult decision is resolved. Luna remains at `ma
 Fast mode is enabled by default as an execution policy:
 
 - Keep one planning pass and one review pass unless new evidence requires revision.
-- Split work into the fewest useful independently verifiable Luna packages; do not create filler work.
-- Dispatch independent Luna packages concurrently up to the observed host limit. Run shared-file or dependent changes serially.
-- Reuse a compatible Luna worker for bounded corrections when practical, minimize repeated searches, and keep returns concise and evidence-heavy.
+- For every concrete-work wave, the main coordinator directly dispatches and uniformly coordinates exactly three useful, bounded Luna subagents; do not create filler work. Each subagent has a distinct package or read-only verification slice.
+- Run the three subagents concurrently only when their scopes are independent. Keep shared-file or dependent changes serial and ordered under the main coordinator; on a four-slot host, the intended topology is main plus three Luna subagents.
+- If the host cannot provide three eligible Luna subagents or slots, preserve only useful work within the observed limit and report the capability shortfall and actual topology; never claim three-way execution.
+- Reuse compatible Luna subagents across waves for bounded corrections when practical, minimize repeated searches, and keep returns concise and evidence-heavy.
 - Start verification as soon as its prerequisites settle, but never treat a launched command as a passing result.
 
 If the runtime exposes a distinct provider `fast` or service-tier control, request it and record whether it was observed. Otherwise, apply only this workflow policy and do not claim that a provider-level fast mode was enabled.
@@ -44,16 +45,16 @@ If the runtime exposes a distinct provider `fast` or service-tier control, reque
 
 Before dispatch, verify that the subagent tool actually supports all three model overrides, the required reasoning levels, and enough concurrency for the planned wave. A model shown elsewhere in the app does not prove subagent availability.
 
-If a required model or reasoning control is unavailable, finish safe preparation and report the exact blocker. Do not silently substitute a model or reasoning level. If concurrency is lower than desired, preserve useful parallelism within the observed limit and report the actual topology.
+If a required model or reasoning control is unavailable, finish safe preparation and report the exact blocker. Do not silently substitute a model or reasoning level. If fewer than three useful bounded slices can be formed, or fewer than three eligible Luna subagents or slots are available, do not create filler; preserve useful work within the observed limit and report the capability shortfall and actual topology without claiming exact three-way execution. The main coordinator must still keep shared-file or dependent work serial.
 
 ## Route the work
 
 1. The coordinator captures the requested outcome, permissions, existing changes, and repository constraints.
 2. Dispatch Astra to inspect dependencies, risks, rollback boundaries, acceptance checks, and task ordering. Astra returns a bounded plan with Luna work packages and exclusive write ownership.
-3. Dispatch Luna packages according to the accepted dependency order. Use Luna for bounded exploration, reversible implementation, and independent tests or log analysis. Every Luna runs with reasoning `max`.
-4. Collect completed results, inspect the real changed-file scope, and route integration or correction work to one explicitly responsible Luna worker. Workers must preserve user and concurrent changes.
+3. For each concrete-work wave, the main coordinator directly dispatches and uniformly coordinates exactly three useful, bounded Luna subagents according to the accepted dependency order. Use Luna for bounded exploration, reversible implementation, and independent tests or log analysis. Every Luna runs with reasoning `max`; run independent scopes concurrently and keep shared-file or dependent work serial. On a four-slot host, use main plus three Luna subagents.
+4. Collect completed results, inspect the real changed-file scope, and route integration or correction work to one explicitly responsible Luna subagent within a subsequent wave that still has exactly three useful Luna subagents. Workers must preserve user and concurrent changes, and the main coordinator directly coordinates the wave.
 5. After changes settle, dispatch Sol with the request, Astra plan, actual diff, changed-file list, and completed verification evidence. Sol independently returns `ACCEPT`, `REVISE`, or `BLOCKED` with traceable evidence.
-6. On `REVISE`, issue bounded Luna correction work and obtain fresh Sol review of the updated result. On `BLOCKED`, report the missing authority, capability, or evidence without widening scope.
+6. On `REVISE`, issue bounded Luna correction work in a subsequent exactly-three-subagent wave and obtain fresh Sol review of the updated result. On `BLOCKED`, report the missing authority, capability, or evidence without widening scope.
 7. Report only the result Sol accepted, including completed checks, skipped checks, remaining limitations, rollback, and observed model/reasoning settings.
 
 ## Delegation contract
