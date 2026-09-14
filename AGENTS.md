@@ -1,16 +1,18 @@
-# Sol-Luna project rules
+# Astra-Sol-Luna project rules
 
-The main Sol thread owns requirements, architectural decisions, risk decisions, acceptance, rollback decisions, and the final user-facing result. Search output, repetitive test logs, and intermediate exploration should stay in bounded Luna threads whenever practical.
+The main coordinator owns user intent, permissions, rollback decisions, and the final user-facing result. Astra owns planning, Luna performs concrete work, and Sol independently reviews the settled result. Search output, repetitive test logs, and intermediate exploration should stay in bounded Luna threads whenever practical.
 
-- Use `luna_explorer` for read-only searches and call-chain evidence, `luna_implementer` for small reversible edits, and `luna_tester` for independent test or log evidence.
+- Run Astra planning with model `gpt-6-astra` and automatically selected reasoning (`medium` by default). Run Sol review with model `gpt-5.6-sol` and the same adaptive policy. Use `low` for mechanical work, `high` for demonstrated architecture/security/migration/concurrency/irreversibility risk, and higher levels only when unresolved complexity justifies them.
+- Run concrete exploration, implementation, and verification on `gpt-5.6-luna` with reasoning fixed at `max`. Use generic overridable agents instead of fixed-effort `luna_*` roles when those roles cannot satisfy `max`.
+- Fast mode is the default execution policy: minimize handoffs, parallelize useful independent Luna tasks up to the observed host limit, reuse compatible workers for corrections, and avoid redundant searches. Do not claim provider-level fast mode unless the runtime exposes and confirms it.
 - Read-intensive, mutually independent tasks may run in parallel. Tasks that modify the same file or code region must run serially.
 - Without separate worktrees, never allow multiple subagents to edit the same code area concurrently.
 - Every delegation must state its objective, allowed scope, prohibited scope, known context, completion criteria, verification, rollback, and required structured return.
-- Luna finishing a task does not mean it passed. Sol must review the real diff, changed-file scope, and test evidence before acceptance.
+- Luna finishing a task does not mean it passed. Independent Sol review must inspect the real diff, changed-file scope, and completed test evidence before acceptance.
 - Never treat “the test command started” as “the tests passed.” Record the completed result and exit status or equivalent evidence.
 - Key conclusions require traceable evidence such as a file and symbol, command output, test result, or configuration value.
 - Keep changes minimal. Do not opportunistically refactor unrelated code, add production dependencies, or alter architecture outside the approved task.
 - A Luna agent must stop and report ambiguity, risk, or required work outside its authorization instead of expanding scope.
-- Use `sol_escalation` only for qualified cross-system architecture, migration or irreversible change, security or permission risk, concurrency or consistency risk, major long-term tradeoffs, two failed Medium analyses, or credible production/data-loss risk. Do not use High for ordinary features, formatting, routine tests, simple bugs, search, or documentation.
+- Do not use fixed-effort `sol_escalation` for ordinary review. Use an explicitly configured Sol reviewer and select its reasoning from task risk; reserve High or above for qualified cross-system architecture, migration or irreversible change, security or permission risk, concurrency or consistency risk, major long-term tradeoffs, two failed Medium analyses, or credible production/data-loss risk.
 - After Sol accepts a change and its commit succeeds, promptly push the current branch to `origin` (Gaoshou101/musicdl) so GitHub stays synchronized.
 - Never force-push automatically, and never push failed or unaccepted work; report authentication, remote, rejection, or CI blockers accurately.
