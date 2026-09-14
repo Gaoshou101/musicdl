@@ -114,7 +114,8 @@ def test_descendant_group_is_killed():
         pid = None
         for _ in range(20):
             try:
-                text = open(pid_file, encoding="ascii").read()
+                with open(pid_file, encoding="ascii") as pid_handle:
+                    text = pid_handle.read()
                 if text: pid = int(text); break
             except (FileNotFoundError, ValueError):
                 time.sleep(.02)
