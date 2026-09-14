@@ -4,16 +4,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import stat
 import time
+from uuid import uuid4
 
 import httpx
+from pydantic import ValidationError
 
 from musicdl.contracts.plugin import (
-    MAX_HTTP_ACTIONS, MAX_SOURCE_BYTES, HttpAction, HttpObservation, PluginInvocation, PluginRequest,
-    PluginResponse, PluginStep,
+    MAX_HTTP_ACTIONS, MAX_PAYLOAD_BYTES, MAX_SOURCE_BYTES, HttpAction, HttpObservation,
+    PluginInvocation, PluginRequest, PluginResponse, PluginStep, ResolvedMedia,
 )
+from musicdl.sources.models import Candidate
 from .broker import ActionDenied, HttpsActionBroker
 from .store import StoredPlugin
 
@@ -41,6 +45,71 @@ class PluginClient:
     async def aclose(self) -> None:
         if self._owned_client:
             await self.http.aclose()
+
+    @staticmethod
+    def _normalize_timeout_ms(timeout_ms: int | None, default_timeout: float) -> int:
+        if timeout_ms is None:
+            return max(1, min(30_000, math.ceil(default_timeout * 1000)))
+        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 1 <= timeout_ms <= 30_000:
+            raise ValueError("invalid_timeout")
+        return timeout_ms
+
+    async def resolve(
+        self,
+        stored: StoredPlugin,
+        candidate: Candidate,
+        *,
+        timeout_ms: int | None = None,
+    ) -> ResolvedMedia:
+        request_timeout_ms = self._normalize_timeout_ms(timeout_ms, self.timeout)
+        try:
+            request = PluginRequest(
+                protocol="musicdl.plugin/v1",
+                request_id=uuid4(),
+                operation="resolve",
+                timeout_ms=request_timeout_ms,
+                payload={"candidate": candidate.public_representation},
+            )
+            response = await self.invoke(stored, request)
+        except asyncio.CancelledError:
+            raise
+        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+            if str(exc) in {"runner_invalid_json", "runner_response_too_large", "runner_response_mismatch"}:
+                raise RuntimeError("plugin_resolve_invalid") from None
+            raise RuntimeError("plugin_resolve_failed") from None
+
+        if not response.ok:
+            raise RuntimeError("plugin_resolve_failed")
+        try:
+            resolved = ResolvedMedia.model_validate(response.result)
+        except (ValidationError, TypeError, ValueError):
+            raise RuntimeError("plugin_resolve_invalid") from None
+        if resolved.candidate_id != candidate.item_id:
+            raise RuntimeError("candidate_mismatch")
+        return resolved
+
+    async def health(
+        self,
+        stored: StoredPlugin,
+        *,
+        timeout_ms: int | None = None,
+    ) -> bool:
+        request_timeout_ms = self._normalize_timeout_ms(timeout_ms, self.timeout)
+        try:
+            request = PluginRequest(
+                protocol="musicdl.plugin/v1",
+                request_id=uuid4(),
+                operation="health",
+                timeout_ms=request_timeout_ms,
+            )
+            response = await self.invoke(stored, request)
+            if not response.ok or not isinstance(response.result, bool):
+                raise ValueError("invalid_health_response")
+            return response.result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise RuntimeError("plugin_health_failed") from None
 
     @staticmethod
     def _source(stored: StoredPlugin) -> str:
@@ -107,7 +176,7 @@ class PluginClient:
                         body = bytearray()
                         async for chunk in response.aiter_bytes():
                             body.extend(chunk)
-                            if len(body) > 64 * 1024:
+                            if len(body) > MAX_PAYLOAD_BYTES:
                                 raise PluginClientError("runner_response_too_large")
                 except PluginClientError:
                     raise
