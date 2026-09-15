@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from musicdl.ai.models import AIRankResult
 from musicdl.media.fallback import download_with_fallback
+from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult, search_sources
 from musicdl.wecom.commands import CommandKind, ParsedCommand, parse_command
 from musicdl.wecom.results import format_results
@@ -20,6 +21,33 @@ from .selection import bind_user_selection, get_user_selection, get_selection_fo
 async def _call(fn, *args, **kwargs):
     value = fn(*args, **kwargs)
     return await value if inspect.isawaitable(value) else value
+
+
+def _positive_seconds(value, name: str):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError(name)
+    return float(value)
+
+
+def _retry_window(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 604800:
+        raise ValueError("invalid retry window")
+    return value
+
+
+def _context_from_route(data: Mapping[str, Any]) -> SelectionContext:
+    """Rebuild the frozen selection context stored beside a token."""
+    candidates = {}
+    for key, value in (data.get("candidates") or {}).items():
+        candidates[int(key)] = value if isinstance(value, Candidate) else Candidate.model_validate(value)
+    generation = data.get("generation", 0)
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        raise SelectionRejected()
+    return SelectionContext(str(data["corp_id"]), str(data["from_user"]), str(data["request_id"]),
+                            str(data["version"]), candidates, query=str(data.get("query", "")),
+                            selection_generation=generation)
 
 
 def _field(fields: dict, name: str, default=None):
@@ -109,7 +137,7 @@ class _StreamWorker:
     async def _record_failure(self, stream: str, group: str, message_id: Any, user: str = "") -> None:
         key = self._retry_key(stream, message_id)
         attempts = int(await self.redis.hincrby(key, "attempts", 1))
-        await self.redis.expire(key, 604800)
+        await self.redis.expire(key, self.retry_window_seconds)
         if attempts < self.max_attempts:
             return
         fields = {
@@ -140,9 +168,10 @@ class MessageWorker(_StreamWorker):
     def __init__(self, redis: Any, registry: Any, wecom: Any, *, state: RedisStateStore | None = None,
                  ai_ranker: Callable | None = None, group: str = "musicdl-workers", consumer: str | None = None,
                  max_results: int = 10, search_timeout: float = 10.0, selection_ttl: int = 600,
-                 pending_idle_ms: int = 30001, max_attempts: int = 3):
+                 pending_idle_ms: int = 30001, max_attempts: int = 3, retry_window_seconds: int = 86400):
         self.redis, self.registry, self.wecom = redis, registry, wecom
         self.state = state or RedisStateStore(redis)
+        self.retry_window_seconds = _retry_window(retry_window_seconds)
         if not isinstance(search_timeout, (int, float)) or isinstance(search_timeout, bool) or not math.isfinite(search_timeout) or search_timeout <= 0:
             raise ValueError("invalid search timeout")
         self.ai_ranker, self.group = ai_ranker, group
@@ -174,14 +203,11 @@ class MessageWorker(_StreamWorker):
         if not result.candidates:
             await _call(self.wecom.send_text, str(payload["from_user"]), "没有找到匹配结果。")
             return None
-        context = SelectionContext(str(payload["corp_id"]), str(payload["from_user"]), str(payload["request_id"]), result.version,
-                                   {i: c.item_id for i, c in enumerate(result.candidates[:100], 1)})
+        snapshot = {i: c for i, c in enumerate(result.candidates[:100], 1)}
+        context = SelectionContext(str(payload["corp_id"]), str(payload["from_user"]), str(payload["request_id"]),
+                                   result.version, snapshot, query=str(command.value), selection_generation=0)
         token = await self.state.issue_selection(context, ttl=self.selection_ttl)
-        await bind_user_selection(
-            self.redis, token, context, query=str(command.value),
-            candidates={i: c.model_dump(mode="json") for i, c in enumerate(result.candidates[:100], 1)},
-            ttl=self.selection_ttl, namespace=self.namespace,
-        )
+        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace)
         prompt = "\n\n回复序号下载。"
         text = format_results(result.candidates, max_items=self.max_results, max_bytes=2048 - len(prompt.encode("utf-8"))) or "没有找到匹配结果。"
         await _call(self.wecom.send_text, context.from_user, text + prompt)
@@ -233,9 +259,15 @@ class JobWorker(_StreamWorker):
     def __init__(self, redis: Any, wecom: Any, sources: dict, media_root: str, *, state: RedisStateStore | None = None,
                  refresh: Callable | None = None, group: str = "musicdl-workers", consumer: str | None = None,
                  job_ttl: int = 86400, pending_idle_ms: int = 30001, max_attempts: int = 3,
-                 job_timeout: float = 10.0):
+                 job_timeout: float = 10.0, resolve_stream_timeout: float | None = None,
+                 refresh_timeout: float | None = None, health_timeout: float = 10.0,
+                 retry_window_seconds: int = 86400):
         self.redis, self.wecom, self.sources, self.media_root = redis, wecom, sources, media_root
         self.state, self.refresh = state or RedisStateStore(redis), refresh
+        self.resolve_stream_timeout = _positive_seconds(resolve_stream_timeout, "invalid resolve stream timeout")
+        self.refresh_timeout = _positive_seconds(refresh_timeout, "invalid refresh timeout")
+        self.health_timeout = _positive_seconds(health_timeout, "invalid health timeout")
+        self.retry_window_seconds = _retry_window(retry_window_seconds)
         if not isinstance(job_ttl, int) or isinstance(job_ttl, bool) or not 60 <= job_ttl <= 604800:
             raise ValueError("invalid job ttl")
         self.job_ttl = job_ttl
@@ -258,8 +290,7 @@ class JobWorker(_StreamWorker):
         data = await _get_by_token(self.redis, token, namespace=self.namespace)
         if data is None:
             raise SelectionRejected()
-        context = SelectionContext(data["corp_id"], data["from_user"], data["request_id"], data["version"], {int(k): v["item_id"] if isinstance(v, dict) else v for k, v in data["candidates"].items()})
-        return await self.handle_selection(token, context, index)
+        return await self.handle_selection(token, _context_from_route(data), index)
 
     async def run_selection_once(self) -> int:
         await self._ensure_group(self.selection_stream, self.selection_group); count = 0
@@ -272,7 +303,7 @@ class JobWorker(_StreamWorker):
                     index, user, corp = command.value, envelope.get("from_user", ""), envelope.get("corp_id", "")
                     data = await get_user_selection(self.redis, corp, user, namespace=self.namespace)
                     if not data: raise SelectionRejected()
-                    await self.handle_selection(data["token"], SelectionContext(data["corp_id"], data["from_user"], data["request_id"], data["version"], {int(k): v["item_id"] if isinstance(v, dict) else v for k,v in data["candidates"].items()}), int(index))
+                    await self.handle_selection(data["token"], _context_from_route(data), int(index))
                 except asyncio.CancelledError:
                     raise
                 except (ValueError, KeyError, json.JSONDecodeError, SelectionRejected):
@@ -301,21 +332,29 @@ class JobWorker(_StreamWorker):
                     pass
         return count
 
-    async def handle_job(self, job: dict[str, Any]):
-        if "candidate" not in job:
-            route = await get_selection_for_request(self.redis, str(job["request_id"]), namespace=self.namespace)
+    async def handle_job(self, job: dict[str, Any], *, job_id: str):
+        if not isinstance(job_id, str) or not job_id or len(job_id) > 256:
+            raise ValueError("invalid job id")
+        payload = dict(job)
+        raw = payload.get("candidate")
+        if raw is None:
+            # Legacy payload: freeze one route snapshot now and never look the route up again.
+            route = await get_selection_for_request(self.redis, str(payload["request_id"]), namespace=self.namespace)
             if not route: raise SelectionRejected()
-            candidate = route["candidates"].get(str(job.get("index")), {})
-            job = {**job, "candidate": candidate, "from_user": route["from_user"], "query": route.get("query", "")}
-        candidate = job["candidate"]
-        if isinstance(candidate, dict):
-            from musicdl.sources.models import Candidate
-            candidate = Candidate.model_validate(candidate)
+            raw = (route.get("candidates") or {}).get(str(payload.get("index")), {})
+            payload = {**payload, "from_user": route["from_user"], "query": route.get("query", "")}
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        candidate = raw if isinstance(raw, Candidate) else Candidate.model_validate(raw)
         if self.refresh is None: raise RuntimeError("refresh callback is required")
         refresh = self.refresh
         async with asyncio.timeout(self.job_timeout):
-            result = await download_with_fallback(candidate, self.sources, self.media_root, request_id=str(job["request_id"]), query=str(job.get("query", candidate.title)), refresh=refresh)
-        user = job.get("from_user") or job.get("user")
+            result = await download_with_fallback(
+                candidate, self.sources, self.media_root, request_id=str(payload["request_id"]),
+                query=str(payload.get("query") or candidate.title), refresh=refresh,
+                resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
+                health_timeout=self.health_timeout)
+        user = payload.get("from_user") or payload.get("user")
         if user:
             message = f"下载成功：{result.download.relative_path}" if result.download else f"下载失败，已重试：{result.download_error or result.refresh_error or 'unknown'}"
             await _call(self.wecom.send_text, user, message)
@@ -357,7 +396,7 @@ class JobWorker(_StreamWorker):
                         pass
                     continue
                 try:
-                    await self.handle_job(job)
+                    await self.handle_job(job, job_id=str(_field({"id": message_id}, "id", "")))
                 except asyncio.CancelledError:
                     raise
                 except Exception:
