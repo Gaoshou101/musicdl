@@ -10,6 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _TELEGRAM_PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
+# One shared source of truth for the two worker allowances that are not operator tunables: the
+# Redis round-trip slack added to every derived effect lease and the bound on one WeCom notice.
+REDIS_OVERHEAD_SECONDS = 1.0
+WECOM_NOTICE_TIMEOUT_SECONDS = 10.0
+
 
 class ConfigVersion(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -165,6 +170,63 @@ class AISettings(BaseModel):
         return self
 
 
+class WorkerSettings(BaseModel):
+    """Worker budgets whose cross-field slack is validated before the app can start."""
+
+    model_config = ConfigDict(extra="forbid")
+    search_timeout: float = Field(default=8.0, gt=0, le=30)
+    resolve_stream_timeout: float = Field(default=15.0, gt=0, le=30)
+    health_timeout: float = Field(default=5.0, gt=0, le=30)
+    job_timeout: float = Field(default=30.0, gt=0, le=30)
+    budget_slack_seconds: float = Field(default=2.0, gt=0, le=30)
+    pending_idle_ms: int = Field(default=32000, ge=1, le=604800000)
+    job_ttl: int = Field(default=172800, ge=60, le=604800)
+    retry_window_seconds: int = Field(default=86400, ge=1, le=604800)
+    max_attempts: int = Field(default=3, ge=1, le=100)
+
+    @field_validator("search_timeout", "resolve_stream_timeout", "health_timeout", "job_timeout",
+                     "budget_slack_seconds", mode="before")
+    @classmethod
+    def durations_must_not_be_boolean(cls, value: object):
+        if isinstance(value, bool):
+            raise ValueError("worker durations must be numbers")
+        return value
+
+    @field_validator("pending_idle_ms", "job_ttl", "retry_window_seconds", "max_attempts", mode="before")
+    @classmethod
+    def budgets_must_not_be_boolean(cls, value: object):
+        if isinstance(value, bool):
+            raise ValueError("worker budgets must be integers")
+        return value
+
+    @field_validator("search_timeout", "resolve_stream_timeout", "health_timeout", "job_timeout",
+                     "budget_slack_seconds")
+    @classmethod
+    def durations_must_be_finite(cls, value: float):
+        if not math.isfinite(value):
+            raise ValueError("worker durations must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def budgets_must_be_consistent(self):
+        """Reject any budget set that cannot satisfy the worker's own delivery contract."""
+        longest_handler = max(self.search_timeout, self.job_timeout)
+        if self.pending_idle_ms <= 1000 * (longest_handler + REDIS_OVERHEAD_SECONDS):
+            raise ValueError("pending idle must exceed the longest handler timeout plus Redis overhead")
+        if self.health_timeout > self.job_timeout:
+            raise ValueError("health timeout must not exceed the job timeout")
+        download_budget = self.resolve_stream_timeout + self.search_timeout + self.health_timeout
+        if download_budget >= self.job_timeout:
+            raise ValueError("resolve, search, and health budgets must fit inside the job timeout")
+        if self.job_timeout - download_budget < self.budget_slack_seconds:
+            raise ValueError("job timeout must keep the configured budget slack")
+        if self.retry_window_seconds <= self.max_attempts * math.ceil(self.pending_idle_ms / 1000):
+            raise ValueError("retry window must outlast every configured attempt")
+        if self.job_ttl <= self.retry_window_seconds + math.ceil(self.job_timeout):
+            raise ValueError("job ttl must outlast the retry window plus the job timeout")
+        return self
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MUSICDL_", env_nested_delimiter="__", extra="ignore"
@@ -176,6 +238,7 @@ class AppSettings(BaseSettings):
     wecom: WeComSettings = WeComSettings()
     plugin: PluginSettings = PluginSettings()
     ai: AISettings = AISettings()
+    worker: WorkerSettings = WorkerSettings()
 
     @model_validator(mode="after")
     def roots_must_differ(self):

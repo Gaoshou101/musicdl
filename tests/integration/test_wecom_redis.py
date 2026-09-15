@@ -10,6 +10,9 @@ import pytest
 from musicdl.sources.models import Candidate
 from musicdl.wecom.state import (
     ArtifactConflict,
+    EffectConflict,
+    EffectLease,
+    JobEffect,
     RedisStateStore,
     SelectionContext,
     SelectionRejected,
@@ -26,6 +29,12 @@ def test_real_redis_atomic_state_contract():
     return asyncio.run(_test_real_redis_atomic_state_contract())
 
 
+def _ctx(corp="c"):
+    return SelectionContext(corp, "u", "r", "v1",
+                            {1: Candidate(source_id="src", source_version="1", item_id="candidate",
+                                          title="Song", artist="Artist", format="mp3")})
+
+
 async def _test_real_redis_atomic_state_contract():
     redis = pytest.importorskip("redis.asyncio")
     client = redis.Redis.from_url(redis_url, decode_responses=False)
@@ -38,12 +47,12 @@ async def _test_real_redis_atomic_state_contract():
         )
         assert len({r.stream_id for r in results}) == 1
         assert await client.xlen(store.message_stream) == 1
-        ctx = SelectionContext("c", "u", "r", "v1", {1: "candidate"})
+        ctx = _ctx()
         token = await store.issue_selection(ctx)
         with pytest.raises(SelectionRejected):
             await store.consume_selection(
                 token,
-                SelectionContext("c", "other", "r", "v1", {1: "candidate"}),
+                _ctx("other"),
                 1,
             )
         consumed = await asyncio.gather(*(store.consume_selection(token, ctx, 1) for _ in range(5)))
@@ -121,3 +130,57 @@ async def _test_real_redis_artifact_ledger_contract():
             await client.delete(*keys)
         await client.aclose()
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_real_redis_job_effect_contract():
+    return asyncio.run(_test_real_redis_job_effect_contract())
+
+
+async def _test_real_redis_job_effect_contract():
+    redis = pytest.importorskip("redis.asyncio")
+    client = redis.Redis.from_url(redis_url, decode_responses=False)
+    namespace = "{musicdl:test:" + secrets.token_hex(8) + "}"
+    store = RedisStateStore(client, namespace=namespace)
+    try:
+        await client.ping()
+        contenders = await asyncio.gather(*(
+            store.begin_job_effect("7-0", "download", f"owner-{index}", lease_ms=60000, ttl=600)
+            for index in range(10)))
+        leases = [item for item in contenders if isinstance(item, EffectLease)]
+        assert len(leases) == 1 and leases[0].fence == 1
+        assert [item.status for item in contenders if isinstance(item, JobEffect)] == ["busy"] * 9
+        assert store.effect_key("7-0", "download") == f"{namespace}:effect:7-0:download"
+        assert (await store.get_job_effect("7-0", "selection_prompt")) is None
+
+        lease = leases[0]
+        with pytest.raises(EffectConflict):
+            await store.renew_job_effect("7-0", "download", "owner-99", lease.fence, lease_ms=60000)
+        renewed = await store.renew_job_effect("7-0", "download", lease.owner, lease.fence, lease_ms=60000)
+        assert renewed.lease_until_ms >= lease.lease_until_ms
+        external = await store.begin_external_effect("7-0", "download", lease.owner, lease.fence, ttl=600)
+        assert external.stage == "external_started"
+        with pytest.raises(EffectConflict):
+            await store.complete_job_effect("7-0", "download", lease.owner, lease.fence + 1, {"ok": True}, ttl=600)
+        done = await store.complete_job_effect(
+            "7-0", "download", lease.owner, lease.fence, {"relative_path": "Song.mp3"}, ttl=600)
+        assert (done.status, done.stage, done.result) == ("done", "completed", {"relative_path": "Song.mp3"})
+        replayed = await store.begin_job_effect("7-0", "download", "owner-42", lease_ms=60000, ttl=600)
+        assert isinstance(replayed, JobEffect) and replayed.status == "done"
+
+        short = await store.begin_job_effect("8-0", "selection_prompt", "owner-1", lease_ms=1, ttl=600)
+        await store.begin_external_effect("8-0", "selection_prompt", "owner-1", short.fence, ttl=600)
+        await asyncio.sleep(0.05)
+        expired = await store.begin_job_effect("8-0", "selection_prompt", "owner-2", lease_ms=60000, ttl=600)
+        assert isinstance(expired, JobEffect) and (expired.status, expired.stage) == ("uncertain", "uncertain")
+        terminal = await store.begin_job_effect("8-0", "selection_prompt", "owner-3", lease_ms=60000, ttl=600)
+        assert terminal.status == "uncertain"
+
+        prompted = await store.begin_job_effect("8-0", "terminal_failure_notice", "owner-3", lease_ms=60000, ttl=600)
+        assert isinstance(prompted, EffectLease)
+        assert store.effect_key("8-0", "selection_prompt") != store.effect_key("8-0", "terminal_failure_notice")
+        assert (await client.ttl(store.effect_key("8-0", "terminal_failure_notice"))) > 0
+    finally:
+        keys = [key async for key in client.scan_iter(match=f"{namespace}*")]
+        if keys:
+            await client.delete(*keys)
+        await client.aclose()

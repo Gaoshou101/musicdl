@@ -8,7 +8,19 @@ import pytest
 from musicdl.media import DownloadMetadata, MediaError, download_candidate
 from musicdl.media.models import ArtifactRecord, _CloseOnce
 from musicdl.sources.models import Candidate
-from musicdl.wecom.state import ARTIFACT_TRANSITION_SCRIPT, CLAIM_ARTIFACT_SCRIPT, ArtifactConflict
+from musicdl.wecom.state import (
+    ARTIFACT_TRANSITION_SCRIPT,
+    CLAIM_ARTIFACT_SCRIPT,
+    EFFECT_BEGIN_SCRIPT,
+    EFFECT_COMPLETE_SCRIPT,
+    EFFECT_EXTERNAL_SCRIPT,
+    EFFECT_RENEW_SCRIPT,
+    EFFECT_UNCERTAIN_SCRIPT,
+    ArtifactConflict,
+    EffectConflict,
+    EffectLease,
+    JobEffect,
+)
 from musicdl.wecom.state import (
     RedisStateStore,
     SelectionContext,
@@ -211,6 +223,7 @@ class ScriptRedis:
         self.calls = []
         self.conflict_once = False
         self.race_slot = None
+        self.now = self.NOW_MS
 
     async def ping(self): return True
     async def get(self, key): return self.strings.get(key)
@@ -226,9 +239,94 @@ class ScriptRedis:
             return self._claim(keys, argv)
         if script == ARTIFACT_TRANSITION_SCRIPT:
             return self._transition(keys, argv)
+        if script == EFFECT_BEGIN_SCRIPT:
+            return self._effect_begin(keys, argv)
+        if script == EFFECT_RENEW_SCRIPT:
+            return self._effect_renew(keys, argv)
+        if script == EFFECT_EXTERNAL_SCRIPT:
+            return self._effect_external(keys, argv)
+        if script == EFFECT_COMPLETE_SCRIPT:
+            return self._effect_finish(keys, argv, "done")
+        if script == EFFECT_UNCERTAIN_SCRIPT:
+            return self._effect_finish(keys, argv, "uncertain")
         if "TIME" in script:
             return ["1700000000", "123456"]
         raise AssertionError("unexpected script")
+
+    NOW_MS = 1700000000123
+
+    def _effect_record(self, values, status):
+        return ["record", values["job_id"], values["effect"], status, values["stage"],
+                values.get("owner", ""), values.get("fence", "0"),
+                values.get("lease_until_ms", ""), values.get("result", "")]
+
+    def _effect_begin(self, keys, argv):
+        key = keys[0]
+        job_id, effect, owner, lease_ms, ttl = argv
+        values = self.hashes.get(key)
+        if not values:
+            values = {"job_id": job_id, "effect": effect, "owner": owner, "fence": "1",
+                      "stage": "claimed", "status": "running",
+                      "lease_until_ms": str(self.now + int(lease_ms))}
+            self.hashes[key] = values
+            if int(ttl) > 0:
+                self.expiries.append((key, int(ttl)))
+            return ["lease", job_id, effect, owner, "1", values["lease_until_ms"], "claimed"]
+        if values["status"] in {"done", "uncertain"}:
+            return self._effect_record(values, values["status"])
+        lease_until = int(values.get("lease_until_ms") or 0)
+        if lease_until > self.now:
+            if values["owner"] == owner:
+                return ["lease", job_id, effect, owner, values["fence"], str(lease_until), values["stage"]]
+            return self._effect_record(values, "busy")
+        if values["stage"] == "external_started":
+            values["status"] = "uncertain"; values["stage"] = "uncertain"; values["lease_until_ms"] = ""
+            if int(ttl) > 0:
+                self.expiries.append((key, int(ttl)))
+            return self._effect_record(values, "uncertain")
+        values.update({"owner": owner, "fence": str(int(values.get("fence", "0")) + 1), "stage": "claimed",
+                       "status": "running", "lease_until_ms": str(self.now + int(lease_ms))})
+        values.pop("result", None)
+        if int(ttl) > 0:
+            self.expiries.append((key, int(ttl)))
+        return ["lease", job_id, effect, owner, values["fence"], values["lease_until_ms"], "claimed"]
+
+    def _effect_renew(self, keys, argv):
+        values = self.hashes.get(keys[0])
+        if not values:
+            return ["__missing__"]
+        job_id, effect, owner, fence, lease_ms = argv
+        if values["owner"] != owner or str(values["fence"]) != fence or values["status"] != "running":
+            return ["__stale__"]
+        values["lease_until_ms"] = str(self.now + int(lease_ms))
+        return ["lease", job_id, effect, owner, fence, values["lease_until_ms"], values["stage"]]
+
+    def _effect_external(self, keys, argv):
+        values = self.hashes.get(keys[0])
+        if not values:
+            return ["__missing__"]
+        job_id, effect, owner, fence = argv[:4]
+        if values["owner"] != owner or str(values["fence"]) != fence:
+            return ["__stale__"]
+        if values["status"] in {"done", "uncertain"}:
+            return self._effect_record(values, values["status"])
+        if values["status"] != "running":
+            return ["__stale__"]
+        values["stage"] = "external_started"
+        return ["lease", job_id, effect, owner, fence, values.get("lease_until_ms", ""), "external_started"]
+
+    def _effect_finish(self, keys, argv, status):
+        values = self.hashes.get(keys[0])
+        if not values:
+            return ["__missing__"]
+        job_id, effect, owner, fence = argv[:4]
+        if values["owner"] != owner or str(values["fence"]) != fence or values["status"] != "running":
+            return ["__stale__"]
+        values["status"] = status
+        values["stage"] = "completed" if status == "done" else "uncertain"
+        values["result"] = argv[4]
+        values["lease_until_ms"] = ""
+        return self._effect_record(values, status)
 
     @staticmethod
     def _flat(values):
@@ -347,6 +445,14 @@ def test_takeover_action_reports_a_live_foreign_lease_only():
     assert artifact_takeover_action(live, new_owner="owner-2", new_fence=2, now_ms=1000) == "owner_conflict"
     assert artifact_takeover_action(live, new_owner="owner-1", new_fence=2, now_ms=1000) == "resume"
     assert artifact_takeover_action(live, new_owner="owner-2", new_fence=2, now_ms=2000) == "resume"
+
+
+@pytest.mark.parametrize("state,expected", [("published", "replay"), ("uncertain", "uncertain")])
+def test_terminal_states_beat_a_live_foreign_lease(state, expected):
+    # A published or uncertain record only owes idempotent verification, so a live lease from a
+    # previous owner must not block a higher-fence replay.
+    live = artifact(state, lease_until_ms=10 ** 12)
+    assert artifact_takeover_action(live, new_owner="owner-2", new_fence=2, now_ms=1000) == expected
 
 
 @pytest.mark.parametrize("fence", [1, 0, -1, True, "2", None])
@@ -561,3 +667,196 @@ def test_download_candidate_rejects_a_replayed_target_for_a_different_format(tmp
         return source.calls
 
     assert run(scenario()) == 1
+
+
+# --- fenced job-effect state machine -----------------------------------------
+
+
+def _effect_store():
+    redis = ScriptRedis()
+    return redis, RedisStateStore(redis)
+
+
+def test_begin_job_effect_creates_the_first_lease_under_a_per_effect_key():
+    redis, store = _effect_store()
+    lease = run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=5000, ttl=60))
+    assert isinstance(lease, EffectLease)
+    assert (lease.job_id, lease.effect, lease.owner, lease.fence, lease.stage) == (
+        "1-0", "download", "owner-1", 1, "claimed")
+    assert lease.lease_until_ms == ScriptRedis.NOW_MS + 5000
+    assert redis.calls[-1][2][0] == "{musicdl}:effect:1-0:download"
+    assert redis.calls[-1][2][1:] == ("1-0", "download", "owner-1", "5000", "60")
+
+
+def test_notification_effects_never_share_the_media_effect_key():
+    redis, store = _effect_store()
+    for effect in ("download", "success_notice", "selection_prompt", "terminal_failure_notice"):
+        run(store.begin_job_effect("1-0", effect, "owner-1", lease_ms=5000, ttl=60))
+    keys = [call[2][0] for call in redis.calls]
+    assert keys == [f"{{musicdl}}:effect:1-0:{effect}" for effect in
+                    ("download", "success_notice", "selection_prompt", "terminal_failure_notice")]
+
+
+def test_begin_job_effect_reports_a_live_foreign_lease_as_busy():
+    _, store = _effect_store()
+    run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=5000, ttl=60))
+    busy = run(store.begin_job_effect("1-0", "download", "owner-2", lease_ms=5000, ttl=60))
+    assert isinstance(busy, JobEffect)
+    assert (busy.status, busy.stage, busy.owner, busy.fence) == ("busy", "claimed", "owner-1", 1)
+    assert busy.lease_until_ms == ScriptRedis.NOW_MS + 5000
+
+
+def test_begin_job_effect_renews_the_same_owner_lease_without_bumping_the_fence():
+    _, store = _effect_store()
+    first = run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=5000, ttl=60))
+    again = run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=9000, ttl=60))
+    assert isinstance(again, EffectLease)
+    assert (again.fence, again.lease_until_ms) == (first.fence, first.lease_until_ms)
+
+
+def test_begin_job_effect_resumes_an_expired_claimed_stage_with_a_higher_fence():
+    redis, store = _effect_store()
+    run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=1, ttl=60))
+    redis.now += 1000
+    resumed = run(store.begin_job_effect("1-0", "download", "owner-2", lease_ms=5000, ttl=60))
+    assert isinstance(resumed, EffectLease)
+    assert (resumed.owner, resumed.fence, resumed.stage) == ("owner-2", 2, "claimed")
+
+
+def test_begin_job_effect_turns_an_expired_external_stage_terminal_without_replay():
+    redis, store = _effect_store()
+    run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=1, ttl=60))
+    run(store.begin_external_effect("1-0", "download", "owner-1", 1, ttl=60))
+    redis.now += 1000
+    record = run(store.begin_job_effect("1-0", "download", "owner-2", lease_ms=5000, ttl=60))
+    assert isinstance(record, JobEffect)
+    assert (record.status, record.stage) == ("uncertain", "uncertain")
+    assert record.owner == "owner-1"
+    again = run(store.begin_job_effect("1-0", "download", "owner-3", lease_ms=5000, ttl=60))
+    assert (again.status, again.stage) == ("uncertain", "uncertain")
+
+
+def test_begin_job_effect_replays_a_done_effect_without_issuing_a_new_lease():
+    _, store = _effect_store()
+    run(store.begin_job_effect("1-0", "success_notice", "owner-1", lease_ms=5000, ttl=60))
+    run(store.complete_job_effect("1-0", "success_notice", "owner-1", 1, {"delivered": True}, ttl=60))
+    replayed = run(store.begin_job_effect("1-0", "success_notice", "owner-2", lease_ms=5000, ttl=60))
+    assert isinstance(replayed, JobEffect)
+    assert (replayed.status, replayed.stage, replayed.result) == ("done", "completed", {"delivered": True})
+    assert replayed.lease_until_ms is None
+
+
+def test_renew_job_effect_requires_the_matching_owner_and_fence():
+    _, store = _effect_store()
+    lease = run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=5000, ttl=60))
+    renewed = run(store.renew_job_effect("1-0", "download", "owner-1", lease.fence, lease_ms=9000))
+    assert renewed.lease_until_ms == ScriptRedis.NOW_MS + 9000
+    for owner, fence in (("owner-2", lease.fence), ("owner-1", lease.fence + 1)):
+        with pytest.raises(EffectConflict):
+            run(store.renew_job_effect("1-0", "download", owner, fence, lease_ms=9000))
+    with pytest.raises(EffectConflict):
+        run(store.renew_job_effect("2-0", "download", "owner-1", 1, lease_ms=9000))
+
+
+def test_begin_external_effect_marks_the_stage_before_the_call_and_rejects_stale_owners():
+    _, store = _effect_store()
+    lease = run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=5000, ttl=60))
+    external = run(store.begin_external_effect("1-0", "download", "owner-1", lease.fence, ttl=60))
+    assert external.stage == "external_started" and external.fence == lease.fence
+    assert run(store.get_job_effect("1-0", "download")).stage == "external_started"
+    for owner, fence in (("owner-2", lease.fence), ("owner-1", lease.fence + 1)):
+        with pytest.raises(EffectConflict):
+            run(store.begin_external_effect("1-0", "download", owner, fence, ttl=60))
+
+
+def test_complete_job_effect_rejects_a_stale_fence_and_keeps_the_running_stage():
+    _, store = _effect_store()
+    lease = run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=5000, ttl=60))
+    run(store.begin_external_effect("1-0", "download", "owner-1", lease.fence, ttl=60))
+    with pytest.raises(EffectConflict):
+        run(store.complete_job_effect("1-0", "download", "owner-1", lease.fence + 1, {"ok": True}, ttl=60))
+    with pytest.raises(EffectConflict):
+        run(store.complete_job_effect("1-0", "download", "owner-2", lease.fence, {"ok": True}, ttl=60))
+    record = run(store.get_job_effect("1-0", "download"))
+    assert (record.status, record.stage, record.result) == ("running", "external_started", None)
+    done = run(store.complete_job_effect("1-0", "download", "owner-1", lease.fence, {"path": "Song.mp3"}, ttl=60))
+    assert (done.status, done.stage, done.result) == ("done", "completed", {"path": "Song.mp3"})
+
+
+def test_mark_job_effect_uncertain_records_a_stable_code_and_is_terminal():
+    _, store = _effect_store()
+    lease = run(store.begin_job_effect("1-0", "selection_prompt", "owner-1", lease_ms=5000, ttl=60))
+    run(store.begin_external_effect("1-0", "selection_prompt", "owner-1", lease.fence, ttl=60))
+    record = run(store.mark_job_effect_uncertain(
+        "1-0", "selection_prompt", "owner-1", lease.fence, "prompt_uncertain", ttl=60))
+    assert (record.status, record.stage, record.result) == ("uncertain", "uncertain", {"code": "prompt_uncertain"})
+    with pytest.raises(EffectConflict):
+        run(store.complete_job_effect("1-0", "selection_prompt", "owner-1", lease.fence, {}, ttl=60))
+    assert run(store.begin_job_effect("1-0", "selection_prompt", "owner-2", lease_ms=1, ttl=60)).status == "uncertain"
+
+
+def test_get_job_effect_returns_none_for_a_missing_stage_and_surfaces_redis_errors():
+    _, store = _effect_store()
+    assert run(store.get_job_effect("1-0", "download")) is None
+    with pytest.raises(StateUnavailable):
+        run(RedisStateStore(AsyncEvalClient(error=RuntimeError("secret"))).get_job_effect("1-0", "download"))
+
+
+@pytest.mark.parametrize("effect", ["", "Download", "download:1", "a b", "x" * 65, 1, None])
+def test_job_effects_validate_the_effect_name_before_redis(effect):
+    redis, store = _effect_store()
+    with pytest.raises(ValueError, match="invalid job effect"):
+        run(store.begin_job_effect("1-0", effect, "owner-1", lease_ms=5000, ttl=60))
+    assert redis.calls == []
+
+
+@pytest.mark.parametrize("job_id", ["", "x" * 257, None])
+def test_job_effects_validate_the_job_id_before_redis(job_id):
+    redis, store = _effect_store()
+    with pytest.raises(ValueError, match="invalid job id"):
+        run(store.begin_job_effect(job_id, "download", "owner-1", lease_ms=5000, ttl=60))
+    assert redis.calls == []
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(owner="", lease_ms=5000, ttl=60),
+    dict(owner="x" * 257, lease_ms=5000, ttl=60),
+    dict(owner="owner-1", lease_ms=0, ttl=60),
+    dict(owner="owner-1", lease_ms=True, ttl=60),
+    dict(owner="owner-1", lease_ms=5000, ttl=-1),
+    dict(owner="owner-1", lease_ms=5000, ttl=True),
+])
+def test_begin_job_effect_validates_owner_lease_and_ttl(kwargs):
+    redis, store = _effect_store()
+    with pytest.raises(ValueError):
+        run(store.begin_job_effect("1-0", "download", kwargs.pop("owner"), **kwargs))
+    assert redis.calls == []
+
+
+@pytest.mark.parametrize("result", [
+    ["not", "a", "dict"],
+    {"nested": {"x": 1}},
+    {1: "int-key"},
+    {"blob": "x" * 4096},
+    {"many": [1, 2, 3]},
+])
+def test_complete_job_effect_validates_a_redacted_result(result):
+    redis, store = _effect_store()
+    run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=5000, ttl=60))
+    with pytest.raises(ValueError):
+        run(store.complete_job_effect("1-0", "download", "owner-1", 1, result, ttl=60))
+    assert [call[2][0] for call in redis.calls] == ["{musicdl}:effect:1-0:download"]
+
+
+@pytest.mark.parametrize("code", ["", "x" * 65, 1, None])
+def test_mark_job_effect_uncertain_validates_the_code(code):
+    _, store = _effect_store()
+    run(store.begin_job_effect("1-0", "download", "owner-1", lease_ms=5000, ttl=60))
+    with pytest.raises(ValueError, match="invalid effect code"):
+        run(store.mark_job_effect_uncertain("1-0", "download", "owner-1", 1, code, ttl=60))
+
+
+def test_effect_conflict_is_a_stable_runtime_error_code():
+    error = EffectConflict()
+    assert isinstance(error, RuntimeError) and error.code == "effect_conflict"
+    assert str(error) == "effect_conflict"
