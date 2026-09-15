@@ -349,6 +349,14 @@ def test_takeover_action_reports_a_live_foreign_lease_only():
     assert artifact_takeover_action(live, new_owner="owner-2", new_fence=2, now_ms=2000) == "resume"
 
 
+@pytest.mark.parametrize("state,expected", [("published", "replay"), ("uncertain", "uncertain")])
+def test_terminal_states_beat_a_live_foreign_lease(state, expected):
+    # A published or uncertain record only owes idempotent verification, so a live lease from a
+    # previous owner must not block a higher-fence replay.
+    live = artifact(state, lease_until_ms=10 ** 12)
+    assert artifact_takeover_action(live, new_owner="owner-2", new_fence=2, now_ms=1000) == expected
+
+
 @pytest.mark.parametrize("fence", [1, 0, -1, True, "2", None])
 def test_takeover_action_rejects_a_non_higher_fence(fence):
     with pytest.raises(ValueError, match="stale artifact fence"):

@@ -26,6 +26,12 @@ def test_real_redis_atomic_state_contract():
     return asyncio.run(_test_real_redis_atomic_state_contract())
 
 
+def _ctx(corp="c"):
+    return SelectionContext(corp, "u", "r", "v1",
+                            {1: Candidate(source_id="src", source_version="1", item_id="candidate",
+                                          title="Song", artist="Artist", format="mp3")})
+
+
 async def _test_real_redis_atomic_state_contract():
     redis = pytest.importorskip("redis.asyncio")
     client = redis.Redis.from_url(redis_url, decode_responses=False)
@@ -38,12 +44,12 @@ async def _test_real_redis_atomic_state_contract():
         )
         assert len({r.stream_id for r in results}) == 1
         assert await client.xlen(store.message_stream) == 1
-        ctx = SelectionContext("c", "u", "r", "v1", {1: "candidate"})
+        ctx = _ctx()
         token = await store.issue_selection(ctx)
         with pytest.raises(SelectionRejected):
             await store.consume_selection(
                 token,
-                SelectionContext("c", "other", "r", "v1", {1: "candidate"}),
+                _ctx("other"),
                 1,
             )
         consumed = await asyncio.gather(*(store.consume_selection(token, ctx, 1) for _ in range(5)))

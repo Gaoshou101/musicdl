@@ -79,7 +79,7 @@ async def _test_live_redis_selection_indexes_are_atomic_and_share_ttl():
     client = await _new_client()
     namespace = _namespace()
     try:
-        context = SelectionContext("corp", "user", "request", "version", {1: "item"})
+        context = SelectionContext("corp", "user", "request", "version", {1: _candidate()})
         await bind_user_selection(client, "token", context, ttl=120, namespace=namespace)
         digest = hashlib.sha256(b"token").hexdigest()
         keys = [f"{namespace}:worker-selection:{digest}", f"{namespace}:worker-user:" + hashlib.sha256(b"corp:user").hexdigest(), f"{namespace}:worker-request:" + hashlib.sha256(b"request").hexdigest()]

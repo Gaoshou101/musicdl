@@ -198,12 +198,14 @@ def artifact_takeover_action(record: ArtifactRecord, *, new_owner: str, new_fenc
     """Decide how a higher-fence owner may resume the exact persisted artifact."""
     if isinstance(new_fence, bool) or not isinstance(new_fence, int) or new_fence <= record.fence:
         raise ValueError("stale artifact fence")
-    if record.lease_until_ms is not None and record.lease_until_ms > now_ms and record.owner != new_owner:
-        return "owner_conflict"
+    # Terminal states leave only idempotent verification work, so a live lease no longer blocks
+    # a takeover; a live lease only protects records that still owe an external call.
     if record.state == "published":
         return "replay"
     if record.state == "uncertain":
         return "uncertain"
+    if record.lease_until_ms is not None and record.lease_until_ms > now_ms and record.owner != new_owner:
+        return "owner_conflict"
     if record.state == "stream_complete":
         return "verify_publish"
     if record.state in {"publishing", "physically_published"}:
