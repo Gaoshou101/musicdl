@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from musicdl.ai.models import AIRankResult
+from musicdl.config import REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS
 from musicdl.media.fallback import download_with_fallback
 from musicdl.media.models import ArtifactRecord, FallbackResult, MediaError
 from musicdl.sources.models import Candidate
@@ -21,8 +22,6 @@ from musicdl.wecom.state import EffectLease, RedisStateStore, SelectionContext, 
 from .selection import bind_user_selection, get_user_selection, get_selection_for_user, get_selection_for_request, _get_by_token
 
 
-REDIS_OVERHEAD_SECONDS = 1.0
-WECOM_NOTICE_TIMEOUT_SECONDS = 10.0
 TERMINAL_FAILURE_TEXT = "处理失败，请稍后重试。"
 EFFECT_REPLAY_LIMIT = 100
 _MEDIA_TYPES = {"mp3": "audio/mpeg", "flac": "audio/flac", "m4a": "audio/mp4", "ogg": "audio/ogg"}

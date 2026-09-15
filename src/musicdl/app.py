@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import inspect
+import math
 from typing import Any, Callable
 import time
 
@@ -12,6 +13,7 @@ from .wecom.service import WeComService
 from .wecom.state import RedisStateStore, StateUnavailable
 from .plugins import PluginClient, PluginSource, PluginStore
 from .plugins.broker import HttpsActionBroker
+from .media.transport import SecureMediaTransport
 from .sources import SourceEntry, SourceRegistry, search_sources
 from .worker.workers import MessageWorker, JobWorker
 from .wecom.client import WeComClient
@@ -33,18 +35,21 @@ async def _maybe_close(value: Any) -> None:
 
 
 class _Runtime:
-    def __init__(self, *, redis, state, service, wecom, plugin_client, registry,
+    def __init__(self, *, redis, state, service, wecom, plugin_client, transport, registry,
                  message_worker, job_worker):
         self.redis, self.state, self.service = redis, state, service
         self.wecom, self.plugin_client, self.registry = wecom, plugin_client, registry
+        self.transport = transport
         self.message_worker, self.job_worker = message_worker, job_worker
 
     async def aclose(self) -> None:
+        await _maybe_close(self.transport)
         await _maybe_close(self.plugin_client)
         await _maybe_close(self.redis)
 
 
 def _build_runtime(settings: AppSettings, clock=None):
+    worker_settings = settings.worker
     store = PluginStore(settings.plugin.app_data_root)
     stored = tuple(store.enabled())
     search_plugins = [p for p in stored if getattr(p, "enabled", True) and "search" in p.manifest.operations]
@@ -61,12 +66,18 @@ def _build_runtime(settings: AppSettings, clock=None):
     wecom = WeComClient(settings.wecom.corp_id, settings.wecom.secret.get_secret_value(),
                         settings.wecom.agent_id, redis)
     plugin_client = PluginClient(str(settings.plugin.service_url), broker=HttpsActionBroker())
+    transport = SecureMediaTransport()
     entries = []
+    sources: dict[str, PluginSource] = {}
     for p in search_plugins:
-        source = PluginSource(p, plugin_client)
+        source = PluginSource(p, plugin_client, transport,
+                              resolve_stream_timeout_ms=math.ceil(worker_settings.resolve_stream_timeout * 1000),
+                              health_timeout_ms=math.ceil(worker_settings.health_timeout * 1000))
         entries.append(SourceEntry(p.manifest.plugin_id, p.manifest.version, source))
+        if "resolve" in p.manifest.operations:
+            sources[p.manifest.plugin_id] = source
     registry = SourceRegistry(entries)
-    search_timeout = 10.0
+    search_timeout = worker_settings.search_timeout
     ai_client = OpenAICompatibleClient(settings.ai)
 
     async def ranker(result, query):
@@ -80,11 +91,18 @@ def _build_runtime(settings: AppSettings, clock=None):
     message_worker = MessageWorker(redis, registry, wecom, state=state, ai_ranker=ranker,
                                    search_timeout=search_timeout,
                                    selection_ttl=settings.wecom.selection_ttl)
-    job_timeout = 10.0
-    job_worker = JobWorker(redis, wecom, sources={}, media_root=settings.media.root, state=state, refresh=refresh,
-                           job_timeout=job_timeout)
+    job_worker = JobWorker(redis, wecom, sources=sources, media_root=settings.media.root, state=state,
+                           refresh=refresh, job_timeout=worker_settings.job_timeout,
+                           resolve_stream_timeout=worker_settings.resolve_stream_timeout,
+                           refresh_timeout=worker_settings.search_timeout,
+                           health_timeout=worker_settings.health_timeout,
+                           pending_idle_ms=worker_settings.pending_idle_ms,
+                           job_ttl=worker_settings.job_ttl,
+                           retry_window_seconds=worker_settings.retry_window_seconds,
+                           max_attempts=worker_settings.max_attempts,
+                           selection_ttl=settings.wecom.selection_ttl)
     return _Runtime(redis=redis, state=state, service=service, wecom=wecom,
-                    plugin_client=plugin_client, registry=registry,
+                    plugin_client=plugin_client, transport=transport, registry=registry,
                     message_worker=message_worker, job_worker=job_worker)
 
 

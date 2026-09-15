@@ -1,7 +1,10 @@
+import math
+
 import pytest
 from pydantic import ValidationError
 
-from musicdl.config import AISettings, AppSettings
+from musicdl.config import (AISettings, AppSettings, REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS,
+                            WorkerSettings)
 
 
 def test_settings_map_prefixed_nested_environment(monkeypatch):
@@ -207,3 +210,106 @@ def test_redis_timeouts_reject_invalid_values(monkeypatch, name):
     monkeypatch.setenv(f"MUSICDL_REDIS__{name}", "31")
     with pytest.raises(ValidationError):
         AppSettings()
+
+
+def test_worker_budget_defaults_leave_material_slack():
+    worker = AppSettings().worker
+
+    assert (worker.search_timeout, worker.resolve_stream_timeout, worker.health_timeout) == (8.0, 15.0, 5.0)
+    assert (worker.job_timeout, worker.budget_slack_seconds) == (30.0, 2.0)
+    assert (worker.pending_idle_ms, worker.job_ttl, worker.retry_window_seconds) == (32000, 172800, 86400)
+    assert worker.max_attempts == 3
+    assert worker.job_timeout - (worker.resolve_stream_timeout + worker.search_timeout + worker.health_timeout) == worker.budget_slack_seconds
+    assert worker.pending_idle_ms > 1000 * (max(worker.search_timeout, worker.job_timeout) + REDIS_OVERHEAD_SECONDS)
+    assert worker.retry_window_seconds > worker.max_attempts * math.ceil(worker.pending_idle_ms / 1000)
+    assert worker.job_ttl > worker.retry_window_seconds + math.ceil(worker.job_timeout)
+
+
+def test_worker_overhead_constants_are_shared_with_the_worker_module():
+    from musicdl.worker import workers
+
+    assert (REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS) == (1.0, 10.0)
+    assert workers.REDIS_OVERHEAD_SECONDS == REDIS_OVERHEAD_SECONDS
+    assert workers.WECOM_NOTICE_TIMEOUT_SECONDS == WECOM_NOTICE_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("overrides", [
+    {"job_timeout": 28.0},
+    {"job_timeout": 29.0},
+    {"job_timeout": 30.0, "budget_slack_seconds": 2.0001},
+    {"resolve_stream_timeout": 16.0},
+    {"pending_idle_ms": 31000},
+    {"pending_idle_ms": 30999},
+    {"health_timeout": 30.0, "job_timeout": 29.0},
+    {"retry_window_seconds": 96},
+    {"retry_window_seconds": 95},
+    {"job_ttl": 86430},
+    {"job_ttl": 86429},
+])
+def test_worker_budget_inequalities_are_enforced(overrides):
+    with pytest.raises(ValidationError):
+        WorkerSettings(**overrides)
+
+
+@pytest.mark.parametrize("overrides", [
+    {"job_timeout": 30.0},
+    {"job_timeout": 29.0, "budget_slack_seconds": 1.0},
+    {"resolve_stream_timeout": 14.0, "search_timeout": 8.0},
+    {"pending_idle_ms": 31001},
+    {"retry_window_seconds": 97},
+    {"job_ttl": 86431},
+    {"max_attempts": 1, "retry_window_seconds": 33},
+])
+def test_worker_budget_boundaries_are_accepted(overrides):
+    assert isinstance(WorkerSettings(**overrides), WorkerSettings)
+
+
+@pytest.mark.parametrize("field", ["pending_idle_ms", "job_ttl", "retry_window_seconds", "max_attempts"])
+def test_worker_integer_budgets_reject_booleans(field):
+    with pytest.raises(ValidationError):
+        WorkerSettings(**{field: True})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0, 31.0, True])
+@pytest.mark.parametrize("field", ["search_timeout", "resolve_stream_timeout", "health_timeout", "job_timeout",
+                                   "budget_slack_seconds"])
+def test_worker_duration_budgets_are_strictly_validated(field, value):
+    with pytest.raises(ValidationError):
+        WorkerSettings(**{field: value})
+
+
+def test_worker_settings_map_nested_environment(monkeypatch):
+    monkeypatch.setenv("MUSICDL_WORKER__SEARCH_TIMEOUT", "7")
+    monkeypatch.setenv("MUSICDL_WORKER__PENDING_IDLE_MS", "33000")
+
+    worker = AppSettings().worker
+
+    assert worker.search_timeout == 7.0
+    assert worker.pending_idle_ms == 33000
+
+
+def test_worker_settings_reject_an_unsound_pending_idle_from_environment(monkeypatch):
+    monkeypatch.setenv("MUSICDL_WORKER__PENDING_IDLE_MS", "31000")
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
+def test_worker_settings_defaults_are_accepted_by_the_real_job_worker():
+    from musicdl.worker.workers import JobWorker
+
+    settings = AppSettings()
+    worker = settings.worker
+
+    real = JobWorker(None, None, {}, settings.media.root, refresh=lambda *args: None,
+                     job_timeout=worker.job_timeout, pending_idle_ms=worker.pending_idle_ms,
+                     job_ttl=worker.job_ttl, max_attempts=worker.max_attempts,
+                     retry_window_seconds=worker.retry_window_seconds,
+                     resolve_stream_timeout=worker.resolve_stream_timeout,
+                     refresh_timeout=worker.search_timeout, health_timeout=worker.health_timeout,
+                     selection_ttl=settings.wecom.selection_ttl)
+
+    assert (real.job_timeout, real.pending_idle_ms) == (30.0, 32000)
+    assert (real.resolve_stream_timeout, real.refresh_timeout, real.health_timeout) == (15.0, 8.0, 5.0)
+    assert (real.redis_overhead_seconds, real.wecom_notice_timeout) == (REDIS_OVERHEAD_SECONDS,
+                                                                       WECOM_NOTICE_TIMEOUT_SECONDS)
+    assert real.pending_idle_ms > 1000 * (max(real.job_timeout, real.refresh_timeout) + real.redis_overhead_seconds)
