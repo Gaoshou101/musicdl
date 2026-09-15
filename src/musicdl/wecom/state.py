@@ -57,6 +57,36 @@ class JobResult:
     duplicate: bool = False
 
 
+class EffectConflict(RuntimeError):
+    """A stale owner, fence, or stage prevented a job-effect mutation."""
+
+    def __init__(self, code: str = "effect_conflict"):
+        self.code = code
+        super().__init__(code)
+
+
+@dataclass(frozen=True)
+class JobEffect:
+    job_id: str
+    effect: str
+    status: str
+    stage: str
+    owner: str | None
+    fence: int
+    lease_until_ms: int | None
+    result: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class EffectLease:
+    job_id: str
+    effect: str
+    owner: str
+    fence: int
+    lease_until_ms: int
+    stage: str
+
+
 MESSAGE_SCRIPT = """local prior=redis.call('GET',KEYS[2]); if prior then return {1,prior} end; local id=redis.call('XADD',KEYS[1],'*','payload',ARGV[1]); redis.call('SET',KEYS[2],id,'EX',ARGV[2]); return {0,id}"""
 ISSUE_SCRIPT = """return redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2],'NX') and 1 or 0"""
 CONSUME_SCRIPT = """local existing=redis.call('GET',KEYS[2]);
@@ -139,6 +169,104 @@ if ARGV[12]~='' then redis.call('HSET',KEYS[1],'fence',ARGV[12]) end;
 if ARGV[13]~='' then redis.call('HSET',KEYS[1],'lease_until_ms',ARGV[13]) end;
 if tonumber(ARGV[5])>0 then redis.call('EXPIRE',KEYS[1],ARGV[5]) end;
 return redis.call('HGETALL',KEYS[1])"""
+
+EFFECT_NAMES = frozenset({
+    "download", "refresh", "health", "rebind",
+    "success_notice", "selection_prompt", "terminal_failure_notice",
+})
+EFFECT_RESULT_MAX_BYTES = 4096
+EFFECT_RESULT_MAX_FIELDS = 32
+EFFECT_RESULT_MAX_STRING = 512
+
+_EFFECT_COMMON = """local function now_ms() local t=redis.call('TIME') return tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000) end
+local function fields(key) local r=redis.call('HGETALL',key) local d={} for i=1,#r,2 do d[r[i]]=r[i+1] end return d end
+local function lease(job,effect,owner,fence,until_ms,stage) return {'lease',job,effect,owner,tostring(fence),tostring(until_ms),stage} end
+local function record(job,effect,d,status,stage) return {'record',job,effect,status,stage,d['owner'] or '',tostring(d['fence'] or '0'),d['lease_until_ms'] or '',d['result'] or ''} end
+"""
+
+# ``begin_job_effect`` atomically creates or claims one ``{job_id, effect}`` stage. A live lease
+# held by another owner is reported as ``busy`` instead of being stolen; an expired lease is
+# resumed with a strictly higher fence, except after ``external_started`` where the outcome of the
+# external call is unknown and the stage becomes terminal ``uncertain`` instead of being replayed.
+EFFECT_BEGIN_SCRIPT = _EFFECT_COMMON + """local key=KEYS[1]
+local job=ARGV[1] local effect=ARGV[2] local owner=ARGV[3]
+local lease_ms=tonumber(ARGV[4]) local ttl=tonumber(ARGV[5])
+local now=now_ms()
+local r=redis.call('HGETALL',key)
+if #r==0 then
+  local until_ms=now+lease_ms
+  redis.call('HSET',key,'job_id',job,'effect',effect,'owner',owner,'fence','1','stage','claimed','status','running','lease_until_ms',tostring(until_ms))
+  if ttl>0 then redis.call('EXPIRE',key,ttl) end
+  return lease(job,effect,owner,1,until_ms,'claimed')
+end
+local d=fields(key)
+local status=d['status'] or ''
+if status=='done' or status=='uncertain' then return record(job,effect,d,status,d['stage'] or status) end
+local held=tonumber(d['lease_until_ms'] or '0') or 0
+if held>now then
+  if d['owner']==owner then return lease(job,effect,owner,d['fence'],held,d['stage']) end
+  return record(job,effect,d,'busy',d['stage'] or 'claimed')
+end
+if d['stage']=='external_started' then
+  redis.call('HSET',key,'status','uncertain','stage','uncertain','lease_until_ms','')
+  if ttl>0 then redis.call('EXPIRE',key,ttl) end
+  return record(job,effect,d,'uncertain','uncertain')
+end
+local fence=tonumber(d['fence'] or '0')+1
+local until_ms=now+lease_ms
+redis.call('HSET',key,'owner',owner,'fence',tostring(fence),'stage','claimed','status','running','lease_until_ms',tostring(until_ms))
+redis.call('HDEL',key,'result')
+if ttl>0 then redis.call('EXPIRE',key,ttl) end
+return lease(job,effect,owner,fence,until_ms,'claimed')"""
+
+EFFECT_RENEW_SCRIPT = _EFFECT_COMMON + """local key=KEYS[1]
+local job=ARGV[1] local effect=ARGV[2] local owner=ARGV[3] local fence=ARGV[4]
+local lease_ms=tonumber(ARGV[5])
+local now=now_ms()
+local r=redis.call('HGETALL',key)
+if #r==0 then return {'__missing__'} end
+local d=fields(key)
+if d['owner']~=owner or tostring(d['fence'] or '')~=fence or (d['status'] or '')~='running' then return {'__stale__'} end
+local until_ms=now+lease_ms
+redis.call('HSET',key,'lease_until_ms',tostring(until_ms))
+return lease(job,effect,owner,fence,until_ms,d['stage'])"""
+
+EFFECT_EXTERNAL_SCRIPT = _EFFECT_COMMON + """local key=KEYS[1]
+local job=ARGV[1] local effect=ARGV[2] local owner=ARGV[3] local fence=ARGV[4] local ttl=tonumber(ARGV[5])
+local r=redis.call('HGETALL',key)
+if #r==0 then return {'__missing__'} end
+local d=fields(key)
+if d['owner']~=owner or tostring(d['fence'] or '')~=fence then return {'__stale__'} end
+local status=d['status'] or ''
+if status=='done' or status=='uncertain' then return record(job,effect,d,status,d['stage'] or status) end
+if status~='running' then return {'__stale__'} end
+if d['stage']~='external_started' then redis.call('HSET',key,'stage','external_started') end
+if ttl>0 then redis.call('EXPIRE',key,ttl) end
+return lease(job,effect,owner,fence,tonumber(d['lease_until_ms'] or '0') or 0,'external_started')"""
+
+EFFECT_COMPLETE_SCRIPT = _EFFECT_COMMON + """local key=KEYS[1]
+local job=ARGV[1] local effect=ARGV[2] local owner=ARGV[3] local fence=ARGV[4]
+local result=ARGV[5] local ttl=tonumber(ARGV[6])
+local r=redis.call('HGETALL',key)
+if #r==0 then return {'__missing__'} end
+local d=fields(key)
+if d['owner']~=owner or tostring(d['fence'] or '')~=fence or (d['status'] or '')~='running' then return {'__stale__'} end
+redis.call('HSET',key,'status','done','stage','completed','result',result,'lease_until_ms','')
+if ttl>0 then redis.call('EXPIRE',key,ttl) end
+d['result']=result d['lease_until_ms']=''
+return record(job,effect,d,'done','completed')"""
+
+EFFECT_UNCERTAIN_SCRIPT = _EFFECT_COMMON + """local key=KEYS[1]
+local job=ARGV[1] local effect=ARGV[2] local owner=ARGV[3] local fence=ARGV[4]
+local result=ARGV[5] local ttl=tonumber(ARGV[6])
+local r=redis.call('HGETALL',key)
+if #r==0 then return {'__missing__'} end
+local d=fields(key)
+if d['owner']~=owner or tostring(d['fence'] or '')~=fence or (d['status'] or '')~='running' then return {'__stale__'} end
+redis.call('HSET',key,'status','uncertain','stage','uncertain','result',result,'lease_until_ms','')
+if ttl>0 then redis.call('EXPIRE',key,ttl) end
+d['result']=result d['lease_until_ms']=''
+return record(job,effect,d,'uncertain','uncertain')"""
 
 ARTIFACT_SLOT_LIMIT = 1000
 ARTIFACT_CLAIM_ATTEMPTS = 8
@@ -267,6 +395,129 @@ def artifact_record_from_hash(values: dict[str, str]) -> ArtifactRecord | None:
 
 def _string(value: Any) -> str:
     return value.decode() if isinstance(value, bytes) else str(value)
+
+
+def _effect_int(value: str, default: int | None = None) -> int | None:
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise StateUnavailable() from exc
+
+
+def _decoded_effect_result(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise StateUnavailable() from exc
+    if not isinstance(payload, dict):
+        raise StateUnavailable()
+    return payload
+
+
+def job_effect_from_hash(values: dict[str, str]) -> JobEffect | None:
+    if not values or not values.get("job_id"):
+        return None
+    return JobEffect(
+        job_id=values["job_id"],
+        effect=values.get("effect", ""),
+        status=values.get("status", ""),
+        stage=values.get("stage", ""),
+        owner=values.get("owner") or None,
+        fence=_effect_int(values.get("fence"), 0) or 0,
+        lease_until_ms=_effect_int(values.get("lease_until_ms")),
+        result=_decoded_effect_result(values.get("result")),
+    )
+
+
+def _effect_response(raw: Any) -> EffectLease | JobEffect | None:
+    """Decode one effect-script reply, mapping stale owners and fences to `EffectConflict`."""
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise StateUnavailable()
+    items = [_string(value) for value in raw]
+    tag = items[0]
+    if tag == "__missing__":
+        return None
+    if tag == "__stale__":
+        raise EffectConflict()
+    if tag == "lease" and len(items) == 7:
+        _, job_id, effect, owner, fence, until_ms, stage = items
+        return EffectLease(job_id=job_id, effect=effect, owner=owner,
+                           fence=_effect_int(fence, 0) or 0,
+                           lease_until_ms=_effect_int(until_ms, 0) or 0, stage=stage)
+    if tag == "record" and len(items) == 9:
+        _, job_id, effect, status, stage, owner, fence, until_ms, result = items
+        if status not in {"busy", "done", "uncertain"}:
+            raise StateUnavailable()
+        return JobEffect(job_id=job_id, effect=effect, status=status, stage=stage,
+                         owner=owner or None, fence=_effect_int(fence, 0) or 0,
+                         lease_until_ms=_effect_int(until_ms), result=_decoded_effect_result(result))
+    raise StateUnavailable()
+
+
+def _require_effect_lease(response: EffectLease | JobEffect | None) -> EffectLease:
+    if isinstance(response, EffectLease):
+        return response
+    raise EffectConflict()
+
+
+def _require_job_effect(response: EffectLease | JobEffect | None) -> JobEffect:
+    if isinstance(response, JobEffect):
+        return response
+    raise EffectConflict()
+
+
+def _encode_effect_result(result: Any) -> str:
+    """Validate and canonicalize a redacted effect result before it is stored."""
+    if not isinstance(result, dict) or len(result) > EFFECT_RESULT_MAX_FIELDS:
+        raise ValueError("invalid effect result")
+    redacted: dict[str, Any] = {}
+    for key, value in result.items():
+        if not isinstance(key, str) or not 1 <= len(key) <= 64:
+            raise ValueError("invalid effect result")
+        if value is None or isinstance(value, bool) or isinstance(value, int):
+            redacted[key] = value
+        elif isinstance(value, float):
+            if value != value or value in {float("inf"), float("-inf")}:
+                raise ValueError("invalid effect result")
+            redacted[key] = value
+        elif isinstance(value, str) and len(value) <= EFFECT_RESULT_MAX_STRING:
+            redacted[key] = value
+        else:
+            raise ValueError("invalid effect result")
+    encoded = json.dumps(redacted, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    if len(encoded.encode("utf-8")) > EFFECT_RESULT_MAX_BYTES:
+        raise ValueError("invalid effect result")
+    return encoded
+
+
+def _validate_effect(effect: Any) -> str:
+    if not isinstance(effect, str) or effect not in EFFECT_NAMES:
+        raise ValueError("invalid job effect")
+    return effect
+
+
+def _validate_effect_owner(owner: Any) -> None:
+    if not isinstance(owner, str) or not owner or len(owner) > 256:
+        raise ValueError("invalid effect owner")
+
+
+def _validate_effect_fence(fence: Any) -> None:
+    if isinstance(fence, bool) or not isinstance(fence, int) or fence < 1:
+        raise ValueError("invalid effect fence")
+
+
+def _validate_effect_lease_ms(lease_ms: Any) -> None:
+    if isinstance(lease_ms, bool) or not isinstance(lease_ms, int) or lease_ms < 1:
+        raise ValueError("invalid effect lease")
+
+
+def _validate_effect_code(code: Any) -> None:
+    if not isinstance(code, str) or not 1 <= len(code) <= 64 or not code.replace("_", "").isalnum():
+        raise ValueError("invalid effect code")
 
 
 class RedisStateStore:
@@ -497,6 +748,118 @@ class RedisStateStore:
             new_owner=new_owner, new_fence=new_fence,
             lease_until_ms=None if action == "uncertain" else now_ms + lease_ms)
         return action
+
+    # --- fenced job-effect state machine ---------------------------------
+
+    def effect_key(self, job_id: str, effect: str) -> str:
+        return f"{self.namespace}:effect:{job_id}:{effect}"
+
+    async def get_job_effect(self, job_id: str, effect: str) -> JobEffect | None:
+        _validate_job_id(job_id)
+        _validate_effect(effect)
+        return job_effect_from_hash(await self._hash(self.effect_key(job_id, effect)))
+
+    async def begin_job_effect(
+        self,
+        job_id: str,
+        effect: str,
+        owner: str,
+        *,
+        lease_ms: int,
+        ttl: int,
+    ) -> EffectLease | JobEffect:
+        _validate_job_id(job_id)
+        _validate_effect(effect)
+        _validate_effect_owner(owner)
+        _validate_effect_lease_ms(lease_ms)
+        _validate_ttl(ttl)
+        result = await self._eval(
+            EFFECT_BEGIN_SCRIPT, [self.effect_key(job_id, effect)],
+            job_id, effect, owner, str(lease_ms), str(ttl))
+        response = _effect_response(result)
+        if response is None:
+            raise StateUnavailable()
+        return response
+
+    async def renew_job_effect(
+        self,
+        job_id: str,
+        effect: str,
+        owner: str,
+        fence: int,
+        *,
+        lease_ms: int,
+    ) -> EffectLease:
+        _validate_job_id(job_id)
+        _validate_effect(effect)
+        _validate_effect_owner(owner)
+        _validate_effect_fence(fence)
+        _validate_effect_lease_ms(lease_ms)
+        result = await self._eval(
+            EFFECT_RENEW_SCRIPT, [self.effect_key(job_id, effect)],
+            job_id, effect, owner, str(fence), str(lease_ms))
+        return _require_effect_lease(_effect_response(result))
+
+    async def begin_external_effect(
+        self,
+        job_id: str,
+        effect: str,
+        owner: str,
+        fence: int,
+        *,
+        ttl: int,
+    ) -> EffectLease:
+        _validate_job_id(job_id)
+        _validate_effect(effect)
+        _validate_effect_owner(owner)
+        _validate_effect_fence(fence)
+        _validate_ttl(ttl)
+        result = await self._eval(
+            EFFECT_EXTERNAL_SCRIPT, [self.effect_key(job_id, effect)],
+            job_id, effect, owner, str(fence), str(ttl))
+        return _require_effect_lease(_effect_response(result))
+
+    async def complete_job_effect(
+        self,
+        job_id: str,
+        effect: str,
+        owner: str,
+        fence: int,
+        result: dict[str, Any],
+        *,
+        ttl: int,
+    ) -> JobEffect:
+        _validate_job_id(job_id)
+        _validate_effect(effect)
+        _validate_effect_owner(owner)
+        _validate_effect_fence(fence)
+        _validate_ttl(ttl)
+        encoded = _encode_effect_result(result)
+        reply = await self._eval(
+            EFFECT_COMPLETE_SCRIPT, [self.effect_key(job_id, effect)],
+            job_id, effect, owner, str(fence), encoded, str(ttl))
+        return _require_job_effect(_effect_response(reply))
+
+    async def mark_job_effect_uncertain(
+        self,
+        job_id: str,
+        effect: str,
+        owner: str,
+        fence: int,
+        code: str,
+        *,
+        ttl: int,
+    ) -> JobEffect:
+        _validate_job_id(job_id)
+        _validate_effect(effect)
+        _validate_effect_owner(owner)
+        _validate_effect_fence(fence)
+        _validate_effect_code(code)
+        _validate_ttl(ttl)
+        reply = await self._eval(
+            EFFECT_UNCERTAIN_SCRIPT, [self.effect_key(job_id, effect)],
+            job_id, effect, owner, str(fence), _encode_effect_result({"code": code}), str(ttl))
+        return _require_job_effect(_effect_response(reply))
 
     async def redis_now_ms(self) -> int:
         """Read the state store clock so every lease decision uses Redis time."""
