@@ -6,16 +6,103 @@ import hashlib
 import math
 import secrets
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Callable
 
 from musicdl.ai.models import AIRankResult
 from musicdl.media.fallback import download_with_fallback
+from musicdl.media.models import ArtifactRecord, FallbackResult, MediaError
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult, search_sources
 from musicdl.wecom.commands import CommandKind, ParsedCommand, parse_command
 from musicdl.wecom.results import format_results
-from musicdl.wecom.state import RedisStateStore, SelectionContext, SelectionRejected
+from musicdl.media.validation import validated_destination
+from musicdl.wecom.state import EffectLease, RedisStateStore, SelectionContext, SelectionRejected
 from .selection import bind_user_selection, get_user_selection, get_selection_for_user, get_selection_for_request, _get_by_token
+
+
+REDIS_OVERHEAD_SECONDS = 1.0
+WECOM_NOTICE_TIMEOUT_SECONDS = 10.0
+TERMINAL_FAILURE_TEXT = "处理失败，请稍后重试。"
+EFFECT_REPLAY_LIMIT = 100
+_MEDIA_TYPES = {"mp3": "audio/mpeg", "flac": "audio/flac", "m4a": "audio/mp4", "ogg": "audio/ogg"}
+_NOTICE_CODES = {
+    "success_notice": "success_notice_uncertain",
+    "selection_prompt": "prompt_uncertain",
+    "terminal_failure_notice": "terminal_failure_notice_uncertain",
+}
+
+
+class JobDeferred(RuntimeError):
+    """A live lease owns this job effect; leave the message pending without retry or XACK."""
+
+
+class EffectUncertain(RuntimeError):
+    """A durable effect reached a terminal uncertain stage and must not be replayed."""
+
+    def __init__(self, code: str = "effect_uncertain"):
+        self.code = code
+        super().__init__(code)
+
+
+def _effect_code(record: Any, default: str) -> str:
+    result = getattr(record, "result", None) or {}
+    code = result.get("code") if isinstance(result, dict) else None
+    return code if isinstance(code, str) and 0 < len(code) <= 64 else default
+
+
+class _EffectGuard:
+    """Claim, fence, and durably complete one job effect around an external call."""
+
+    def __init__(self, state: Any, job_id: str, effect: str, owner: str, *, deadline: float,
+                 ttl: int, overhead: float, pending_idle_ms: int, clock: Callable[[], float]):
+        self.state, self.job_id, self.effect, self.owner = state, job_id, effect, owner
+        self.deadline, self.ttl, self.overhead = deadline, ttl, overhead
+        self.pending_idle_ms, self.clock = pending_idle_ms, clock
+
+    def lease_ms(self) -> int:
+        """Derive the lease from the one handler deadline plus a bounded Redis allowance."""
+        remaining = max(0.0, self.deadline - self.clock())
+        return max(1000, min(self.pending_idle_ms - 1000, math.ceil((remaining + self.overhead) * 1000)))
+
+    async def claim(self):
+        """Return ``(lease, None)`` when this worker may run the external call."""
+        record = await self.state.begin_job_effect(self.job_id, self.effect, self.owner,
+                                                   lease_ms=self.lease_ms(), ttl=self.ttl)
+        if isinstance(record, EffectLease):
+            return record, None
+        if record.status == "busy":
+            raise JobDeferred()
+        return None, record
+
+    async def external(self, lease: EffectLease) -> None:
+        """Renew the owner/fence lease and mark the external stage immediately before the call."""
+        await self.state.renew_job_effect(self.job_id, self.effect, self.owner, lease.fence,
+                                          lease_ms=self.lease_ms())
+        await self.state.begin_external_effect(self.job_id, self.effect, self.owner, lease.fence, ttl=self.ttl)
+
+    async def complete(self, lease: EffectLease, result: dict[str, Any]) -> None:
+        await self.state.complete_job_effect(self.job_id, self.effect, self.owner, lease.fence, result, ttl=self.ttl)
+
+    async def complete_quietly(self, lease: EffectLease, result: dict[str, Any]) -> None:
+        try:
+            await self.complete(lease, result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    async def uncertain(self, lease: EffectLease, code: str) -> None:
+        await self.state.mark_job_effect_uncertain(self.job_id, self.effect, self.owner, lease.fence, code,
+                                                   ttl=self.ttl)
+
+    async def uncertain_quietly(self, lease: EffectLease, code: str) -> None:
+        try:
+            await self.uncertain(lease, code)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
 
 
 async def _call(fn, *args, **kwargs):
@@ -148,14 +235,19 @@ class _StreamWorker:
             "attempts": str(attempts),
         }
         await self.redis.xadd(self.dead_letter_stream, fields, maxlen=1000, approximate=True)
-        if user:
-            try:
-                await _call(self.wecom.send_text, user, "处理失败，请稍后重试。")
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
+        await self._notify_terminal(stream, message_id, user)
         await self._ack_then_clear(stream, group, message_id)
+
+    async def _notify_terminal(self, stream: str, message_id: Any, user: str) -> None:
+        """Deliver the bounded dead-letter notice for one terminal message."""
+        if not user:
+            return
+        try:
+            await _call(self.wecom.send_text, user, TERMINAL_FAILURE_TEXT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
 
     async def _run_loop(self, operation: Callable[[], Any], poll_interval: float) -> None:
         while True:
@@ -261,9 +353,19 @@ class JobWorker(_StreamWorker):
                  job_ttl: int = 86400, pending_idle_ms: int = 30001, max_attempts: int = 3,
                  job_timeout: float = 10.0, resolve_stream_timeout: float | None = None,
                  refresh_timeout: float | None = None, health_timeout: float = 10.0,
-                 retry_window_seconds: int = 86400):
+                 retry_window_seconds: int = 86400, selection_ttl: int = 600, max_results: int = 10,
+                 redis_overhead_seconds: float = REDIS_OVERHEAD_SECONDS,
+                 wecom_notice_timeout: float = WECOM_NOTICE_TIMEOUT_SECONDS):
         self.redis, self.wecom, self.sources, self.media_root = redis, wecom, sources, media_root
         self.state, self.refresh = state or RedisStateStore(redis), refresh
+        if not isinstance(selection_ttl, int) or isinstance(selection_ttl, bool) or not 60 <= selection_ttl <= 86400:
+            raise ValueError("invalid selection ttl")
+        self.selection_ttl = selection_ttl
+        if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= 100:
+            raise ValueError("invalid max results")
+        self.max_results = max_results
+        self.redis_overhead_seconds = _positive_seconds(redis_overhead_seconds, "invalid redis overhead")
+        self.wecom_notice_timeout = _positive_seconds(wecom_notice_timeout, "invalid wecom notice timeout")
         self.resolve_stream_timeout = _positive_seconds(resolve_stream_timeout, "invalid resolve stream timeout")
         self.refresh_timeout = _positive_seconds(refresh_timeout, "invalid refresh timeout")
         self.health_timeout = _positive_seconds(health_timeout, "invalid health timeout")
@@ -342,23 +444,230 @@ class JobWorker(_StreamWorker):
             route = await get_selection_for_request(self.redis, str(payload["request_id"]), namespace=self.namespace)
             if not route: raise SelectionRejected()
             raw = (route.get("candidates") or {}).get(str(payload.get("index")), {})
-            payload = {**payload, "from_user": route["from_user"], "query": route.get("query", "")}
+            payload = {**payload, "from_user": route["from_user"], "query": route.get("query", ""),
+                       "corp_id": payload.get("corp_id") or route.get("corp_id", ""),
+                       "generation": payload.get("generation") or route.get("generation", 0)}
         if isinstance(raw, str):
             raw = json.loads(raw)
         candidate = raw if isinstance(raw, Candidate) else Candidate.model_validate(raw)
         if self.refresh is None: raise RuntimeError("refresh callback is required")
-        refresh = self.refresh
-        async with asyncio.timeout(self.job_timeout):
+        deadline = self._deadline()
+        owner = f"{self.consumer}:{secrets.token_hex(16)}"
+        async with asyncio.timeout_at(deadline):
+            result = await self._run_download_effect(job_id, payload, candidate, owner, deadline)
+            user = str(payload.get("from_user") or payload.get("user") or "")
+            if result.download is not None:
+                await self._notify(job_id, "success_notice", owner, deadline, user,
+                                   f"下载成功：{result.download.relative_path}")
+                return result
+            await self._finish_failure(job_id, payload, candidate, owner, deadline, result, user)
+            return result
+
+    def _clock(self) -> float:
+        return asyncio.get_running_loop().time()
+
+    def _deadline(self) -> float:
+        """Start one handler deadline that covers every Redis, media, and WeCom step."""
+        return self._clock() + self.job_timeout
+
+    def _guard(self, job_id: str, effect: str, owner: str, deadline: float) -> _EffectGuard:
+        return _EffectGuard(self.state, job_id, effect, owner, deadline=deadline, ttl=self.job_ttl,
+                            overhead=self.redis_overhead_seconds, pending_idle_ms=self.pending_idle_ms,
+                            clock=self._clock)
+
+    def _lease_ms(self, deadline: float) -> int:
+        return self._guard("", "download", "", deadline).lease_ms()
+
+    async def _reserve(self, job_id: str, candidate: Candidate, owner: str, lease: EffectLease,
+                       deadline: float) -> ArtifactRecord | None:
+        """Persist the deterministic artifact reservation before any source call.
+
+        A candidate without a usable extension has no deterministic target, so it keeps the
+        unreserved download path instead of inventing a reservation.
+        """
+        root = Path(self.media_root).resolve(strict=False)
+        extension = str(candidate.format or "").lstrip(".").lower()
+        if not extension:
+            return None
+        try:
+            base = validated_destination(root, None, candidate.artist, candidate.title, extension)
+        except MediaError:
+            return None
+        base_relative = base.resolve(strict=False).relative_to(root).as_posix()
+        record = await self.state.prepare_artifact(
+            job_id, candidate, media_root=root, base_relative_path=base_relative, extension=extension,
+            media_type=_MEDIA_TYPES.get(extension, f"audio/{extension}"), declared_size=None,
+            owner=owner, fence=lease.fence, ttl=self.job_ttl)
+        if record.fence > lease.fence:
+            raise EffectUncertain("artifact_uncertain")
+        if record.fence < lease.fence:
+            action = await self.state.takeover_artifact(
+                job_id, new_owner=owner, new_fence=lease.fence,
+                now_ms=await self.state.redis_now_ms(), lease_ms=self._lease_ms(deadline))
+            if action == "owner_conflict":
+                raise JobDeferred()
+            if action == "uncertain":
+                raise EffectUncertain("artifact_uncertain")
+            record = await self.state.get_artifact(job_id) or record
+        return record
+
+    async def _run_download_effect(self, job_id: str, payload: dict[str, Any], candidate: Candidate,
+                                   owner: str, deadline: float):
+        guard = self._guard(job_id, "download", owner, deadline)
+        lease, record = await guard.claim()
+        if lease is None:
+            if record.status == "uncertain":
+                raise EffectUncertain(_effect_code(record, "artifact_uncertain"))
+            if not (record.result or {}).get("ok", False):
+                return FallbackResult(download=None,
+                                      download_error=_effect_code(record, "download_failed"))
+            return await self._replay_download(job_id, payload, candidate, owner, deadline)
+        reservation = await self._reserve(job_id, candidate, owner, lease, deadline)
+        reserved = {} if reservation is None else {
+            "reservation": reservation, "artifact_store": self.state, "owner": owner, "fence": lease.fence}
+        await guard.external(lease)
+        try:
             result = await download_with_fallback(
-                candidate, self.sources, self.media_root, request_id=str(payload["request_id"]),
-                query=str(payload.get("query") or candidate.title), refresh=refresh,
+                candidate, self._guarded_sources(job_id, owner, deadline), self.media_root,
+                request_id=str(payload["request_id"]), query=str(payload.get("query") or candidate.title),
+                refresh=self._guarded_refresh(job_id, owner, deadline),
                 resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
-                health_timeout=self.health_timeout)
-        user = payload.get("from_user") or payload.get("user")
-        if user:
-            message = f"下载成功：{result.download.relative_path}" if result.download else f"下载失败，已重试：{result.download_error or result.refresh_error or 'unknown'}"
-            await _call(self.wecom.send_text, user, message)
+                health_timeout=self.health_timeout, **reserved)
+        except asyncio.CancelledError:
+            await guard.uncertain_quietly(lease, "download_cancelled")
+            raise
+        except (TimeoutError, MediaError) as exc:
+            code = exc.code if isinstance(exc, MediaError) else "media_timeout"
+            await guard.complete_quietly(lease, {"ok": False, "code": code})
+            return FallbackResult(download=None, download_error=code)
+        except JobDeferred:
+            raise
+        except EffectUncertain:
+            raise
+        except Exception:
+            await guard.uncertain_quietly(lease, "download_uncertain")
+            raise
+        if result.download is None:
+            code = result.download_error or "download_failed"
+            await guard.complete_quietly(lease, {"ok": False, "code": code})
+            if code == "artifact_uncertain":
+                raise EffectUncertain(code)
+            return result
+        await guard.complete(lease, {"ok": True})
         return result
+
+    async def _replay_download(self, job_id: str, payload: dict[str, Any], candidate: Candidate,
+                               owner: str, deadline: float):
+        """Replay a completed download from its durable artifact record without a source call."""
+        record = await self.state.get_artifact(job_id)
+        if record is None or record.state == "uncertain":
+            raise EffectUncertain("artifact_uncertain")
+        result = await download_with_fallback(
+            candidate, self._guarded_sources(job_id, owner, deadline), self.media_root,
+            request_id=str(payload["request_id"]), query=str(payload.get("query") or candidate.title),
+            refresh=self._guarded_refresh(job_id, owner, deadline),
+            resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
+            health_timeout=self.health_timeout, reservation=record, artifact_store=self.state,
+            owner=owner, fence=record.fence)
+        if result.download is None:
+            raise EffectUncertain(result.download_error or "artifact_uncertain")
+        return result
+
+    def _guarded_sources(self, job_id: str, owner: str, deadline: float) -> dict:
+        """Wrap every source so the shared health call is a separate fenced effect."""
+        return {source_id: _GuardedSource(source, self, job_id, owner, deadline)
+                for source_id, source in self.sources.items()}
+
+    def _guarded_refresh(self, job_id: str, owner: str, deadline: float):
+        """Wrap the search refresh callback in its own fenced effect."""
+        refresh = self.refresh
+
+        async def call(query: str, excluded: frozenset[str]):
+            guard = self._guard(job_id, "refresh", owner, deadline)
+            lease, record = await guard.claim()
+            if lease is None:
+                # A completed refresh cannot republish its candidate snapshot, so it is terminal.
+                raise EffectUncertain(_effect_code(record, "refresh_uncertain"))
+            await guard.external(lease)
+            try:
+                value = await refresh(query, excluded)
+            except asyncio.CancelledError:
+                await guard.uncertain_quietly(lease, "refresh_uncertain")
+                raise
+            except Exception:
+                await guard.complete_quietly(lease, {"ok": False, "code": "refresh_failed"})
+                raise
+            await guard.complete(lease, {"ok": True, "version": str(getattr(value, "version", ""))[:64],
+                                         "candidates": len(getattr(value, "candidates", None) or [])})
+            return value
+
+        return call
+
+    async def _finish_failure(self, job_id: str, payload: dict[str, Any], candidate: Candidate, owner: str,
+                              deadline: float, result, user: str) -> None:
+        """Rebind refreshed candidates under a new generation, or report the terminal failure."""
+        refreshed = result.refreshed
+        corp_id = str(payload.get("corp_id") or "")
+        if refreshed is None or not user or not corp_id:
+            await self._notify(job_id, "terminal_failure_notice", owner, deadline, user, self._failure_text(result))
+            return
+        token = await self._rebind(job_id, payload, refreshed, owner, deadline, user, corp_id)
+        if token is None:
+            return
+        prompt = "\n\n回复序号下载。"
+        text = format_results(refreshed.candidates, max_items=self.max_results,
+                              max_bytes=2048 - len(prompt.encode("utf-8")))
+        await self._notify(job_id, "selection_prompt", owner, deadline, user, (text or "没有找到匹配结果。") + prompt)
+
+    async def _rebind(self, job_id: str, payload: dict[str, Any], refreshed, owner: str, deadline: float,
+                      user: str, corp_id: str) -> str | None:
+        """Persist one refreshed selection generation and return its token."""
+        guard = self._guard(job_id, "rebind", owner, deadline)
+        lease, record = await guard.claim()
+        if lease is None:
+            if record.status == "uncertain":
+                await self._notify(job_id, "terminal_failure_notice", owner, deadline, user,
+                                   TERMINAL_FAILURE_TEXT)
+                return None
+            token = (record.result or {}).get("token")
+            return token if isinstance(token, str) and token else None
+        context = SelectionContext(
+            corp_id=corp_id, from_user=user, request_id=str(payload["request_id"]),
+            candidate_set_version=str(getattr(refreshed, "version", "")),
+            candidates={index: item for index, item in enumerate(refreshed.candidates[:EFFECT_REPLAY_LIMIT], 1)},
+            query=str(payload.get("query") or ""),
+            selection_generation=int(payload.get("generation") or 0) + 1)
+        await guard.external(lease)
+        token = await self.state.issue_selection(context, ttl=self.selection_ttl)
+        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace)
+        await guard.complete(lease, {"ok": True, "token": token,
+                                     "generation": context.selection_generation})
+        return token
+
+    @staticmethod
+    def _failure_text(result) -> str:
+        return f"下载失败，已重试：{result.download_error or result.refresh_error or 'unknown'}"
+
+    async def _notify(self, job_id: str, effect: str, owner: str, deadline: float, user: str, text: str) -> None:
+        """Send one bounded WeCom notice under its own fence; never resend an uncertain send."""
+        if not user:
+            return
+        guard = self._guard(job_id, effect, owner, deadline)
+        lease, record = await guard.claim()
+        if lease is None:
+            return
+        await guard.external(lease)
+        budget = min(self.wecom_notice_timeout, max(0.0, deadline - self._clock()))
+        try:
+            async with asyncio.timeout(budget):
+                await _call(self.wecom.send_text, user, text)
+        except asyncio.CancelledError:
+            await guard.uncertain_quietly(lease, _NOTICE_CODES.get(effect, f"{effect}_uncertain"))
+            raise
+        except Exception:
+            await guard.uncertain_quietly(lease, _NOTICE_CODES.get(effect, f"{effect}_uncertain"))
+            return
+        await guard.complete(lease, {"delivered": True})
 
     async def _job_user(self, job: dict[str, Any]) -> str:
         direct = job.get("from_user") or job.get("user")
@@ -397,6 +706,9 @@ class JobWorker(_StreamWorker):
                     continue
                 try:
                     await self.handle_job(job, job_id=str(_field({"id": message_id}, "id", "")))
+                except JobDeferred:
+                    # A live lease owns this job: leave the message pending with no retry and no XACK.
+                    continue
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -422,3 +734,48 @@ class JobWorker(_StreamWorker):
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(self._run_loop(self.run_selection_once, float(poll_interval)))
             tasks.create_task(self._run_loop(self.run_once, float(poll_interval)))
+
+    async def _notify_terminal(self, stream: str, message_id: Any, user: str) -> None:
+        """Claim the dead-letter notice as its own fenced effect before it is sent."""
+        if not user:
+            return
+        deadline = self._deadline()
+        owner = f"{self.consumer}:{secrets.token_hex(16)}"
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._notify(str(_field({"id": message_id}, "id", "")), "terminal_failure_notice",
+                                   owner, deadline, user, TERMINAL_FAILURE_TEXT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+
+class _GuardedSource:
+    """Source proxy that fences the shared health call behind its own durable effect."""
+
+    def __init__(self, source: Any, worker: JobWorker, job_id: str, owner: str, deadline: float):
+        self.source, self.worker = source, worker
+        self.job_id, self.owner, self.deadline = job_id, owner, deadline
+
+    async def download(self, candidate: Candidate):
+        return await self.source.download(candidate)
+
+    async def health(self):
+        guard = self.worker._guard(self.job_id, "health", self.owner, self.deadline)
+        lease, record = await guard.claim()
+        if lease is None:
+            if record.status == "uncertain":
+                return None
+            return bool((record.result or {}).get("healthy", True))
+        await guard.external(lease)
+        try:
+            healthy = await self.source.health()
+        except asyncio.CancelledError:
+            await guard.uncertain_quietly(lease, "health_uncertain")
+            raise
+        except Exception:
+            await guard.complete_quietly(lease, {"ok": False, "code": "health_failed"})
+            raise
+        await guard.complete(lease, {"ok": True, "healthy": bool(healthy)})
+        return healthy
