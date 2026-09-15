@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from musicdl.media import DownloadEvent, DownloadMetadata, MediaError, download_candidate
+from musicdl.media.models import _CloseOnce
 
 ID3 = b"ID3\x04\x00\x00\x00\x00\x00\x00"
 M4A = b"\x00\x00\x00\x14ftypM4A \x00\x00\x00\x00M4A "
@@ -28,6 +29,80 @@ class Source:
 
 async def chunks(*values):
     for value in values: yield value
+
+
+async def failed_chunks():
+    yield ID3
+    raise RuntimeError("stream failed")
+
+
+def tracked_metadata(chunks_value, *, extension="mp3", media_type="audio/mpeg", declared_size=None):
+    closed = {"count": 0}
+
+    async def close():
+        closed["count"] += 1
+
+    return (DownloadMetadata(chunks=chunks_value, extension=extension, media_type=media_type,
+                             declared_size=declared_size, _close_once=_CloseOnce(close)), closed)
+
+
+def test_download_closes_metadata_once_after_success(tmp_path):
+    metadata, closed = tracked_metadata(chunks(ID3))
+    result = asyncio.run(download_candidate(candidate(), Source(metadata), tmp_path, request_id="r"))
+    assert result.size_bytes == len(ID3)
+    assert closed["count"] == 1
+
+
+@pytest.mark.parametrize("stream_factory,code", [
+    (lambda: chunks(), "empty_download"),
+    (lambda: chunks("ID3"), "invalid_chunk"),
+    (lambda: failed_chunks(), "download_failed"),
+])
+def test_download_closes_metadata_once_after_failure(tmp_path, stream_factory, code):
+    chunks_value = stream_factory()
+    metadata, closed = tracked_metadata(chunks_value)
+    with pytest.raises(MediaError, match=code):
+        asyncio.run(download_candidate(candidate(), Source(metadata), tmp_path, request_id="r"))
+    assert closed["count"] == 1
+
+
+def test_download_closes_metadata_once_after_cancellation(tmp_path):
+    closed = {"count": 0}
+
+    async def slow_chunks():
+        yield ID3
+        await asyncio.sleep(10)
+
+    async def close():
+        closed["count"] += 1
+
+    metadata = DownloadMetadata(chunks=slow_chunks(), extension="mp3", _close_once=_CloseOnce(close))
+
+    async def run():
+        task = asyncio.create_task(download_candidate(candidate(), Source(metadata), tmp_path, request_id="r"))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert closed["count"] == 1
+
+
+def test_metadata_aclose_is_idempotent_under_concurrency():
+    closed = {"count": 0}
+
+    async def close():
+        await asyncio.sleep(0)
+        closed["count"] += 1
+
+    metadata = DownloadMetadata(chunks=(), _close_once=_CloseOnce(close))
+
+    async def run():
+        await asyncio.gather(metadata.aclose(), metadata.aclose(), metadata.close())
+
+    asyncio.run(run())
+    assert closed["count"] == 1
 
 
 def test_download_publishes_valid_media_atomically(tmp_path):

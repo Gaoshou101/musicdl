@@ -1,0 +1,382 @@
+"""Main-process HTTPS streaming for resolved plugin media."""
+
+from __future__ import annotations
+
+import asyncio
+import http.client
+import socket
+import ssl
+import time
+from collections.abc import Callable, Iterable
+from urllib.parse import SplitResult
+
+from musicdl.contracts.plugin import RESOLVED_MEDIA_TYPES, ResolvedMedia
+from musicdl.plugins.broker import ActionDenied, _parse_https_url, _resolve_global_addresses
+
+from .models import MAX_MEDIA_BYTES, DownloadMetadata, MediaError, _CloseOnce
+
+MAX_RESPONSE_HEADER_COUNT = 64
+MAX_RESPONSE_HEADER_FIELD_BYTES = 8 * 1024
+MAX_RESPONSE_HEADERS_BYTES = 64 * 1024
+
+
+class MediaTransportError(MediaError):
+    """Stable, redacted failure from the main-owned media transport."""
+
+
+def _remaining(clock: Callable[[], float], deadline: float) -> float:
+    value = deadline - clock()
+    if value <= 0:
+        raise MediaTransportError("media_timeout")
+    return value
+
+
+def _normalize_media_url(url: str) -> tuple[SplitResult, str, str]:
+    try:
+        return _parse_https_url(url)
+    except ActionDenied as exc:
+        raise MediaTransportError("media_url_denied") from exc
+
+
+def _close_sync(value: object) -> None:
+    close = getattr(value, "close", None)
+    if close is not None:
+        close()
+
+
+class SecureMediaTransport:
+    def __init__(
+        self,
+        *,
+        resolver: Callable[[str, int], Iterable[tuple]] | None = None,
+        connector: Callable[[tuple, float], socket.socket] | None = None,
+        tls_wrap: Callable[[socket.socket, str], socket.socket] | None = None,
+        response_factory: Callable[[socket.socket], http.client.HTTPResponse] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        default_timeout_ms: int = 30_000,
+        max_bytes: int = MAX_MEDIA_BYTES,
+        chunk_size: int = 64 * 1024,
+    ):
+        if isinstance(default_timeout_ms, bool) or not isinstance(default_timeout_ms, int) or not 0 < default_timeout_ms <= 30_000:
+            raise ValueError("invalid_timeout")
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 0 < max_bytes <= MAX_MEDIA_BYTES:
+            raise ValueError("invalid_max_bytes")
+        if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
+            raise ValueError("invalid_chunk_size")
+        self.resolver = resolver or self._resolve
+        self.connector = connector or self._connect
+        self._ssl_context = ssl.create_default_context()
+        self.tls_wrap = tls_wrap or self._wrap_tls
+        self.response_factory = response_factory or http.client.HTTPResponse
+        self.clock = clock
+        self.default_timeout_ms = default_timeout_ms
+        self.max_bytes = max_bytes
+        self.chunk_size = chunk_size
+        self._active: list[_CloseOnce] = []
+        self._active_lock = asyncio.Lock()
+
+    @staticmethod
+    def _resolve(host: str, port: int):
+        return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+
+    @staticmethod
+    def _connect(address, timeout):
+        return socket.create_connection(address, timeout=timeout)
+
+    def _wrap_tls(self, sock: socket.socket, server_hostname: str) -> socket.socket:
+        return self._ssl_context.wrap_socket(sock, server_hostname=server_hostname)
+
+    async def _run(self, operation: Callable[[], object], deadline: float) -> object:
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(operation), _remaining(self.clock, deadline))
+        except MediaTransportError:
+            raise
+        except asyncio.TimeoutError as exc:
+            raise MediaTransportError("media_timeout") from exc
+
+    async def _run_acquire(self, operation: Callable[[], object], deadline: float) -> object:
+        task = asyncio.create_task(asyncio.to_thread(operation))
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), _remaining(self.clock, deadline))
+        except asyncio.CancelledError as cancellation:
+            result = await self._drain(task)
+            if result is not None:
+                await asyncio.to_thread(_close_sync, result)
+            raise cancellation
+        except asyncio.TimeoutError as exc:
+            result = await self._drain(task)
+            if result is not None:
+                await asyncio.to_thread(_close_sync, result)
+            raise MediaTransportError("media_timeout") from exc
+
+    @staticmethod
+    async def _drain(task: asyncio.Task) -> object | None:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        if not task.done() or task.cancelled():
+            return None
+        try:
+            return task.result()
+        except BaseException:
+            return None
+
+    async def _register(self, closer: _CloseOnce) -> None:
+        async with self._active_lock:
+            self._active.append(closer)
+
+    async def _unregister(self, closer: _CloseOnce) -> None:
+        async with self._active_lock:
+            if closer in self._active:
+                self._active.remove(closer)
+
+    async def _close_handles(self, handles: tuple[object, ...], closer: _CloseOnce | None = None) -> None:
+        first_error: BaseException | None = None
+        seen: set[int] = set()
+        for handle in handles:
+            if handle is None or id(handle) in seen:
+                continue
+            seen.add(id(handle))
+            try:
+                await asyncio.to_thread(_close_sync, handle)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if closer is not None:
+            await self._unregister(closer)
+        if first_error is not None:
+            raise first_error
+
+    @staticmethod
+    def _response_headers(response: http.client.HTTPResponse) -> tuple[dict[str, str], int | None, str | None]:
+        try:
+            raw_headers = list(response.getheaders())
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            raise MediaTransportError("media_response_invalid") from exc
+        if len(raw_headers) > MAX_RESPONSE_HEADER_COUNT:
+            raise MediaTransportError("media_response_invalid")
+        selected: dict[str, str] = {}
+        aggregate = 0
+        for key, value in raw_headers:
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise MediaTransportError("media_response_invalid")
+            field_size = len(key.encode("utf-8")) + len(value.encode("utf-8")) + 4
+            aggregate += field_size
+            if field_size > MAX_RESPONSE_HEADER_FIELD_BYTES or aggregate > MAX_RESPONSE_HEADERS_BYTES:
+                raise MediaTransportError("media_response_invalid")
+            if any(ord(char) < 32 or ord(char) == 127 for char in key + value):
+                raise MediaTransportError("media_response_invalid")
+            name = key.casefold()
+            if name in selected:
+                raise MediaTransportError("media_response_invalid")
+            selected[name] = value.strip()
+
+        encoding = selected.get("content-encoding")
+        if encoding is not None and encoding.casefold() != "identity":
+            raise MediaTransportError("media_response_invalid")
+        length_header = selected.get("content-length")
+        content_length: int | None = None
+        if length_header is not None:
+            if not length_header or not length_header.isascii() or not length_header.isdecimal():
+                raise MediaTransportError("media_response_invalid")
+            content_length = int(length_header)
+        return selected, content_length, selected.get("content-type")
+
+    async def open(
+        self,
+        media: ResolvedMedia,
+        *,
+        allowed_hosts: Iterable[str],
+        timeout_ms: int | None = None,
+    ) -> DownloadMetadata:
+        if timeout_ms is None:
+            timeout_ms = self.default_timeout_ms
+        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
+            raise MediaTransportError("media_timeout")
+        deadline = self.clock() + timeout_ms / 1000
+        parsed, approved, target = _normalize_media_url(media.url)
+        try:
+            allowed = {_normalize_host(value) for value in allowed_hosts}
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise MediaTransportError("media_host_denied") from exc
+        if approved not in allowed:
+            raise MediaTransportError("media_host_denied")
+
+        raw = wrapped = response = None
+        close_once: _CloseOnce | None = None
+        try:
+            try:
+                candidates = await self._run(lambda: _resolve_global_addresses(self.resolver, approved, 443), deadline)
+            except ActionDenied as exc:
+                code = "media_address_denied" if exc.code == "address_denied" else "media_dns_failed"
+                raise MediaTransportError(code) from exc
+            except MediaError:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise MediaTransportError("media_dns_failed") from exc
+            for _, address in candidates:
+                try:
+                    raw = await self._run_acquire(lambda address=address: self.connector(address, _remaining(self.clock, deadline)), deadline)
+                    break
+                except MediaError as exc:
+                    if exc.code == "media_timeout":
+                        raise
+                    raw = None
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    raw = None
+            if raw is None:
+                raise MediaTransportError("media_connect_failed")
+            try:
+                wrapped = await self._run_acquire(lambda: self.tls_wrap(raw, approved), deadline)
+            except MediaError:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise MediaTransportError("media_tls_failed") from exc
+
+            def send_request() -> None:
+                remaining = _remaining(self.clock, deadline)
+                setter = getattr(wrapped, "settimeout", None)
+                if setter is not None:
+                    setter(max(0.001, remaining))
+                request = (f"GET {target} HTTP/1.1\r\nHost: {approved}\r\n"
+                           "Accept: application/octet-stream\r\n"
+                           "Accept-Encoding: identity\r\n"
+                           "Connection: close\r\n\r\n").encode("ascii")
+                wrapped.sendall(request)
+
+            await self._run(send_request, deadline)
+            try:
+                response = await self._run_acquire(lambda: self.response_factory(wrapped), deadline)
+            except MediaError:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise MediaTransportError("media_response_invalid") from exc
+
+            def begin_response() -> None:
+                remaining = _remaining(self.clock, deadline)
+                setter = getattr(wrapped, "settimeout", None)
+                if setter is not None:
+                    setter(max(0.001, remaining))
+                response.begin()
+
+            await self._run(begin_response, deadline)
+            status = int(getattr(response, "status", 0))
+            if 300 <= status < 400:
+                raise MediaTransportError("media_redirect_denied")
+            if status < 200 or status >= 300:
+                raise MediaTransportError("media_response_invalid")
+            headers, content_length, content_type = await self._run(
+                lambda: self._response_headers(response), deadline)
+            expected_types = RESOLVED_MEDIA_TYPES[media.extension]
+            if content_type is None or content_type.split(";", 1)[0].strip().casefold() not in expected_types:
+                raise MediaTransportError("media_response_invalid")
+            if content_length is not None and content_length > self.max_bytes:
+                raise MediaError("file_too_large")
+            if media.declared_size is not None and content_length is not None and content_length != media.declared_size:
+                raise MediaError("size_mismatch")
+
+            async def close_response() -> None:
+                await self._close_handles((response, wrapped, raw), close_once)
+
+            close_once = _CloseOnce(close_response)
+            await self._register(close_once)
+            observed = 0
+
+            async def chunks():
+                nonlocal observed
+                primary: BaseException | None = None
+                try:
+                    while True:
+                        def read_chunk() -> bytes:
+                            remaining = _remaining(self.clock, deadline)
+                            setter = getattr(wrapped, "settimeout", None)
+                            if setter is not None:
+                                setter(max(0.001, remaining))
+                            value = response.read(self.chunk_size)
+                            if not isinstance(value, bytes):
+                                raise MediaTransportError("media_response_invalid")
+                            return value
+
+                        try:
+                            chunk = await self._run(read_chunk, deadline)
+                        except MediaTransportError:
+                            raise
+                        except (OSError, http.client.HTTPException, ValueError) as exc:
+                            raise MediaTransportError("media_response_invalid") from exc
+                        if not chunk:
+                            break
+                        observed += len(chunk)
+                        if observed > self.max_bytes:
+                            raise MediaError("file_too_large")
+                        if media.declared_size is not None and observed > media.declared_size:
+                            raise MediaError("size_mismatch")
+                        yield chunk
+                    if content_length is not None and observed != content_length:
+                        raise MediaError("size_mismatch")
+                    if media.declared_size is not None and observed != media.declared_size:
+                        raise MediaError("size_mismatch")
+                except BaseException as exc:
+                    primary = exc
+                    raise
+                finally:
+                    try:
+                        await close_once.close()
+                    except BaseException:
+                        if primary is None:
+                            raise
+
+            return DownloadMetadata(chunks=chunks(), extension=media.extension,
+                                    media_type=media.media_type, declared_size=media.declared_size,
+                                    _close_once=close_once)
+        except asyncio.CancelledError:
+            if close_once is not None:
+                try:
+                    await close_once.close()
+                except BaseException:
+                    pass
+            else:
+                try:
+                    await self._close_handles((response, wrapped, raw))
+                except BaseException:
+                    pass
+            raise
+        except BaseException:
+            if close_once is not None:
+                try:
+                    await close_once.close()
+                except BaseException:
+                    pass
+            else:
+                try:
+                    await self._close_handles((response, wrapped, raw))
+                except BaseException:
+                    pass
+            raise
+
+    async def aclose(self) -> None:
+        async with self._active_lock:
+            active = tuple(self._active)
+        for closer in active:
+            try:
+                await closer.close()
+            except BaseException:
+                pass
+
+
+def _normalize_host(value: str) -> str:
+    try:
+        return value.rstrip(".").encode("idna").decode("ascii").lower()
+    except (AttributeError, UnicodeError) as exc:
+        raise ValueError("invalid host") from exc
