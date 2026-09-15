@@ -47,7 +47,8 @@ def test_message_search_binds_and_sends(monkeypatch):
     async def search(*a,**k): return SearchResult((candidate(),),(),"v1")
     monkeypatch.setattr("musicdl.worker.workers.search_sources",search); redis,state,wc=Redis(),State(),WeCom()
     token=run(MessageWorker(redis,object(),wc,state=state).handle({"corp_id":"c","from_user":"u","request_id":"r","command":"search","value":"song"}))
-    assert token=="tok" and state.issued[0][0].candidates=={1:"id1"}
+    assert token=="tok" and state.issued[0][0].candidates=={1:candidate()}
+    assert state.issued[0][0].query=="song" and state.issued[0][0].selection_generation==0
     assert wc.sent[0][0] == "u" and wc.sent[0][1].startswith("1. Song") and "\n\n" in wc.sent[0][1]
 def test_message_empty_result_sends_without_binding(monkeypatch):
     async def search(*a,**k): return SearchResult((),(),"v")
@@ -58,7 +59,7 @@ def test_message_ai_failure_falls_back(monkeypatch):
     async def rank(*a): raise RuntimeError("AI down")
     monkeypatch.setattr("musicdl.worker.workers.search_sources",search); state=State()
     run(MessageWorker(Redis(),object(),WeCom(),state=state,ai_ranker=rank).handle({"corp_id":"c","from_user":"u","request_id":"r","command":"search","value":"x"}))
-    assert state.issued[0][0].candidates=={1:"id1"}
+    assert state.issued[0][0].candidates=={1:candidate()}
 def test_message_ai_ranker_receives_search_and_query_and_airank_result_is_used(monkeypatch):
     async def search(*a,**k): return SearchResult((candidate("first"),),(),"v")
     calls=[]
@@ -67,7 +68,7 @@ def test_message_ai_ranker_receives_search_and_query_and_airank_result_is_used(m
         return AIRankResult(SearchResult((candidate("ranked"),),(),"rv"), True)
     monkeypatch.setattr("musicdl.worker.workers.search_sources",search); state=State()
     run(MessageWorker(Redis(),object(),WeCom(),state=state,ai_ranker=rank).handle({"corp_id":"c","from_user":"u","request_id":"r","command":"search","value":"x"}))
-    assert calls[0][1]=="x" and state.issued[0][0].candidates=={1:"ranked"}
+    assert calls[0][1]=="x" and state.issued[0][0].candidates=={1:candidate("ranked")}
 
 def test_message_uses_real_nested_command_envelope(monkeypatch):
     searches=[]

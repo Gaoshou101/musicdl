@@ -1,15 +1,22 @@
 from __future__ import annotations
 import hashlib, json
 from typing import Any
-from musicdl.wecom.state import SelectionContext
+from musicdl.wecom.state import SelectionContext, freeze_candidates, selection_payload
 
 def _hash(value: str) -> str: return hashlib.sha256(value.encode()).hexdigest()
 def _key(namespace: str, token: str) -> str: return f"{namespace}:worker-selection:{_hash(token)}"
 def _user_key(namespace: str, corp_id: str, user: str) -> str: return f"{namespace}:worker-user:{_hash(corp_id + ':' + user)}"
 def _request_key(namespace: str, request_id: str) -> str: return f"{namespace}:worker-request:{_hash(request_id)}"
 
-async def bind_user_selection(redis: Any, token: str, context: SelectionContext, *, query: str = "", candidates: dict | None = None, ttl: int = 900, namespace: str = "{musicdl}") -> None:
-    data = {"corp_id": context.corp_id, "from_user": context.from_user, "request_id": context.request_id, "version": context.candidate_set_version, "candidates": candidates or context.candidates, "query": query}
+async def bind_user_selection(redis: Any, token: str, context: SelectionContext, *, query: str | None = None, candidates: dict | None = None, ttl: int = 900, namespace: str = "{musicdl}") -> None:
+    """Bind one token to the durable user/request routes and the frozen candidate snapshot."""
+    data = selection_payload(context)
+    if query is not None:
+        if not isinstance(query, str) or len(query) > 512:
+            raise ValueError("invalid selection context")
+        data["query"] = query
+    if candidates is not None:
+        data["candidates"] = freeze_candidates(candidates)
     encoded = json.dumps({**data, "token": token}, ensure_ascii=False)
     expiry = min(max(ttl, 60), 86400)
     keys = [_key(namespace, token), _user_key(namespace, context.corp_id, context.from_user), _request_key(namespace, context.request_id)]

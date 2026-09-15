@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from musicdl.media import DownloadMetadata, MediaError, download_with_fallback
+from musicdl.media.models import ArtifactRecord
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
 from musicdl.sources.search import SourceStatus
@@ -264,3 +265,106 @@ def test_media_root_resolve_failure_direct_and_fallback(tmp_path, monkeypatch):
     outcome = asyncio.run(download_with_fallback(candidate(), {"a": source}, root, request_id="f", query="q", refresh=refresh))
     assert outcome.download_error == "download_failed" and calls == [frozenset({"a"})] and source.health_calls == 1
     assert "SECRET" not in repr((caught.value, events, outcome))
+
+
+def test_resolve_stream_budget_bounds_a_slow_download(tmp_path):
+    class Slow(Source):
+        async def download(self, item):
+            await asyncio.sleep(0.5)
+            return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg")
+
+    source = Slow()
+    events = []
+
+    async def refresh(query, excluded):
+        return result()
+
+    outcome = asyncio.run(download_with_fallback(candidate(), {"a": source}, tmp_path, request_id="r",
+        query="Song", refresh=refresh, resolve_stream_timeout=0.05, record=events.append))
+
+    assert outcome.download is None
+    assert outcome.download_error == "media_timeout"
+    assert source.health_calls == 1
+    assert [(e.stage, e.status, e.error_code) for e in events] == [
+        ("download", "failed", "download_cancelled"),
+        ("download", "failed", "media_timeout"),
+        ("refresh", "success", None),
+        ("health", "success", None),
+    ]
+
+
+def test_refresh_budget_is_enforced_before_health(tmp_path):
+    source = Source(fail=True)
+
+    async def slow_refresh(query, excluded):
+        await asyncio.sleep(0.5)
+        return result()
+
+    outcome = asyncio.run(download_with_fallback(candidate(), {"a": source}, tmp_path, request_id="r",
+        query="Song", refresh=slow_refresh, refresh_timeout=0.05))
+
+    assert outcome.refresh_error == "refresh_failed"
+    assert outcome.refreshed is None
+    assert source.health_calls == 1
+
+
+def test_health_budget_is_configurable(tmp_path):
+    class SlowHealth(Source):
+        async def health(self):
+            self.health_calls += 1
+            await asyncio.sleep(0.5)
+            return True
+
+    source = SlowHealth(fail=True)
+    events = []
+
+    async def refresh(query, excluded):
+        return result()
+
+    outcome = asyncio.run(download_with_fallback(candidate(), {"a": source}, tmp_path, request_id="r",
+        query="Song", refresh=refresh, health_timeout=0.05, record=events.append))
+
+    assert outcome.healthy is None
+    assert [(e.stage, e.status, e.error_code) for e in events][-1] == ("health", "failed", "health_failed")
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"resolve_stream_timeout": 0},
+    {"resolve_stream_timeout": -1},
+    {"resolve_stream_timeout": float("nan")},
+    {"resolve_stream_timeout": True},
+    {"refresh_timeout": 0},
+    {"refresh_timeout": float("inf")},
+    {"health_timeout": 0},
+    {"health_timeout": float("nan")},
+])
+def test_invalid_budgets_are_rejected(tmp_path, kwargs):
+    async def refresh(query, excluded):
+        return result()
+
+    with pytest.raises(ValueError, match="invalid_timeout"):
+        asyncio.run(download_with_fallback(candidate(), {"a": Source()}, tmp_path, request_id="r",
+            query="q", refresh=refresh, **kwargs))
+
+
+def test_reservation_owner_and_fence_are_forwarded_to_download(tmp_path, monkeypatch):
+    captured = {}
+
+    async def fake_download(candidate_value, source_value, media_root, **kwargs):
+        captured.update(kwargs)
+        return "downloaded"
+
+    monkeypatch.setattr("musicdl.media.fallback.download_candidate", fake_download)
+    reservation = ArtifactRecord(job_id="job", candidate_id="i", temporary_relative_path=".musicdl-staging/t.part",
+                                 target_relative_path="t.mp3", allocation_slot=0, extension="mp3",
+                                 media_type="audio/mpeg")
+
+    async def refresh(query, excluded):
+        return result()
+
+    outcome = asyncio.run(download_with_fallback(candidate(), {"a": Source()}, tmp_path, request_id="r",
+        query="q", refresh=refresh, reservation=reservation, artifact_store="store", owner="owner", fence=7))
+
+    assert outcome.download == "downloaded"
+    assert captured["reservation"] is reservation
+    assert (captured["artifact_store"], captured["owner"], captured["fence"]) == ("store", "owner", 7)
