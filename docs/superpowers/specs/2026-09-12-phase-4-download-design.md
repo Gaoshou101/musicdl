@@ -14,7 +14,7 @@ The adapter resolves the remote object from `Candidate.source_id` and `Candidate
 
 The module exposes these conceptual operations:
 
-- `download_candidate`: stream, validate, name, and atomically publish one confirmed candidate.
+- `download_candidate`: reserve the staging file, stream, validate, name, and atomically publish one confirmed candidate.
 - `download_with_fallback`: orchestrate one download attempt and the required failure transition.
 - `DownloadResult`: return the final relative path, SHA-256, byte size, media type, extension, and normalized language.
 - `DownloadEvent`: a structured, redacted status record emitted through an injected recorder.
@@ -28,6 +28,12 @@ Dependencies such as the source adapter, candidate refresh function, and event r
 - an asynchronous byte stream for a `Candidate`;
 - trusted response metadata when available: declared size, media type, and extension;
 - one asynchronous health check used only by fallback orchestration.
+
+The returned `DownloadMetadata` owns its response closer, which runs exactly once
+on success, failure, and cancellation. A plugin-backed source satisfies the same
+contract through a typed `resolve` descriptor followed by the main-owned secure
+media transport described in the Phase 6 design; the adapter never asks the
+plugin to return media bytes.
 
 The download engine does not retry internally. A failed transfer yields one fallback transition, preventing duplicate downloads or repeated health probes.
 
@@ -68,13 +74,13 @@ Final files use this hierarchy:
 
 Path components remove control characters, replace Windows and POSIX separator/illegal characters, trim trailing dots and spaces, and reject traversal tokens. Empty results use a stable `未知` placeholder. Windows reserved device names are prefixed safely. The engine resolves and verifies the complete destination is a descendant of the configured media root before creating directories or publishing files.
 
-Existing files are never overwritten. Collisions are resolved deterministically by probing `<title> - <artist> (2).<ext>`, then `(3)`, and so on. Publication uses exclusive reservation or an equivalent race-safe operation so concurrent writers cannot select the same target silently.
+Existing files are never overwritten. Collisions are resolved deterministically by probing `<title> - <artist> (2).<ext>`, then `(3)`, and so on. Publication uses exclusive reservation or an equivalent race-safe operation so concurrent writers cannot select the same target silently. The artifact ledger records each reservation as a durable owner/fence compare-and-set that advances `prepared -> stream_complete -> published`, stores only a safe POSIX-relative path, and hands concurrent same-title jobs distinct persistent suffixes, so a partial temporary file is never published.
 
 ## Failure and Fallback Flow
 
 Any transfer, size, media, path, filesystem, or validation failure performs these actions. Cancellation removes staging state best-effort and propagates immediately; it does not refresh, health-check, or return `FallbackResult`.
 
-1. Remove the temporary file in a `finally`-protected cleanup path.
+1. Close the reserved staging handle and remove the temporary file in a `finally`-protected cleanup path. The handle is released on every pre-transfer failure, so the staging path can always be unlinked and a later retry of the job is not refused as uncertain.
 2. Mark the selected source as failed for this fallback result.
 3. Refresh candidates while explicitly excluding the failed source.
 4. Invoke the failed source's health check exactly once.
