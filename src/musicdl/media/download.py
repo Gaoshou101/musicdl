@@ -251,7 +251,17 @@ async def download_candidate(
             if hasattr(os, "O_BINARY"):
                 flags |= os.O_BINARY
             fd = os.open(os.fspath(temp_path), flags, 0o600)
-            metadata = await source.download(candidate)
+            try:
+                metadata = await source.download(candidate)
+            except BaseException:
+                # Close the reserved staging file before the failure unwinds, otherwise the
+                # cleanup unlink cannot remove it and a later retry of the job is refused as
+                # uncertain because the staging path still exists.
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
         else:
             metadata = await source.download(candidate)
             fd, temp_name = tempfile.mkstemp(prefix=".musicdl-", suffix=".part", dir=root)
