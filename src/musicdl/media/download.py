@@ -124,7 +124,9 @@ def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation
 
 
 def _fsync_path(path: Path) -> None:
-    fd = os.open(os.fspath(path), os.O_RDONLY)
+    # Windows refuses fsync on a read-only handle (OSError 9), so flush through a writable one.
+    flags = (os.O_RDWR if os.name == "nt" else os.O_RDONLY) | getattr(os, "O_BINARY", 0)
+    fd = os.open(os.fspath(path), flags)
     try:
         os.fsync(fd)
     finally:
