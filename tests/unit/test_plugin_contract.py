@@ -19,6 +19,20 @@ from musicdl.contracts.plugin import (
 )
 
 
+def _resolved_media(**overrides):
+    values = {
+        "candidate_id": "candidate-1",
+        "url": "https://media.example.test/path/song.mp3?token=opaque",
+        "extension": "mp3",
+        "media_type": "audio/mpeg",
+        "declared_size": 123,
+    }
+    values.update(overrides)
+    from musicdl.contracts.plugin import ResolvedMedia
+
+    return ResolvedMedia(**values)
+
+
 def test_plugin_contract_accepts_v1_operations_and_fixture_shape():
     fixture_dir = Path(__file__).parents[1] / "fixtures" / "contracts"
     request = PluginRequest.model_validate(json.loads((fixture_dir / "plugin-search-request.json").read_text()))
@@ -161,3 +175,93 @@ def test_plugin_step_requires_exactly_one_response_or_action():
         PluginStep()
     with pytest.raises(ValidationError):
         PluginStep(action=action, response=response)
+
+
+@pytest.mark.parametrize(
+    ("extension", "media_type"),
+    (
+        ("mp3", "audio/mpeg"),
+        ("flac", "audio/flac"),
+        ("m4a", "audio/mp4"),
+        ("m4a", "audio/x-m4a"),
+        ("ogg", "audio/ogg"),
+        ("ogg", "application/ogg"),
+    ),
+)
+def test_resolved_media_accepts_supported_descriptor_formats(extension, media_type):
+    media = _resolved_media(extension=extension, media_type=media_type)
+
+    assert media.candidate_id == "candidate-1"
+    assert media.extension == extension
+    assert media.media_type == media_type
+    assert media.model_dump() == {
+        "candidate_id": "candidate-1",
+        "url": "https://media.example.test/path/song.mp3?token=opaque",
+        "extension": extension,
+        "media_type": media_type,
+        "declared_size": 123,
+    }
+
+
+def test_resolved_media_accepts_size_boundaries_and_optional_size():
+    from musicdl.contracts.plugin import RESOLVED_MEDIA_MAX_BYTES
+
+    assert _resolved_media(declared_size=0).declared_size == 0
+    assert _resolved_media(declared_size=RESOLVED_MEDIA_MAX_BYTES).declared_size == RESOLVED_MEDIA_MAX_BYTES
+    assert _resolved_media(declared_size=None).declared_size is None
+
+
+@pytest.mark.parametrize("field", ("headers", "data", "bytes"))
+def test_resolved_media_rejects_unknown_fields(field):
+    with pytest.raises(ValidationError):
+        _resolved_media(**{field: {}})
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://media.example.test/song.mp3",
+        "ftp://media.example.test/song.mp3",
+        "//media.example.test/song.mp3",
+        "https://user:password@media.example.test/song.mp3",
+        "https://user@media.example.test/song.mp3",
+        "https://media.example.test/song.mp3#fragment",
+        "https://media.example.test:443/song.mp3",
+        "https://media.example.test:8443/song.mp3",
+        "https://media.example.test/song.mp3\n",
+        "https://media.example.test/song.mp3\t",
+        "https://media.example.test/song.mp3\x00",
+        "https://media.example.test/song.mp3\x7f",
+    ),
+)
+def test_resolved_media_rejects_unsafe_urls(url):
+    with pytest.raises(ValidationError):
+        _resolved_media(url=url)
+
+
+@pytest.mark.parametrize(
+    ("extension", "media_type"),
+    (
+        ("mp3", "audio/flac"),
+        ("flac", "audio/mpeg"),
+        ("m4a", "audio/ogg"),
+        ("ogg", "audio/mp4"),
+    ),
+)
+def test_resolved_media_rejects_mismatched_extension_and_media_type(extension, media_type):
+    with pytest.raises(ValidationError):
+        _resolved_media(extension=extension, media_type=media_type)
+
+
+@pytest.mark.parametrize("declared_size", (-1, 500 * 1024 * 1024 + 1, True, 1.5, "1"))
+def test_resolved_media_rejects_invalid_declared_sizes(declared_size):
+    with pytest.raises(ValidationError):
+        _resolved_media(declared_size=declared_size)
+
+
+def test_resolved_media_is_frozen_and_uses_only_the_five_contract_fields():
+    media = _resolved_media()
+
+    with pytest.raises(ValidationError):
+        media.extension = "flac"
+    assert set(media.model_dump()) == {"candidate_id", "url", "extension", "media_type", "declared_size"}

@@ -7,7 +7,7 @@ import ipaddress
 import socket
 import ssl
 import time
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 from typing import Callable, Iterable
 
 from musicdl.contracts.plugin import MAX_ACTION_BODY_BYTES, HttpAction, HttpObservation
@@ -24,6 +24,58 @@ def _hostname(host: str) -> str:
         return host.rstrip(".").encode("idna").decode("ascii").lower()
     except (UnicodeError, AttributeError):
         raise ActionDenied("url_denied", "invalid hostname")
+
+
+def _parse_https_url(url: str) -> tuple[SplitResult, str, str]:
+    """Validate a no-credential, implicit-port HTTPS URL and return its target."""
+    if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in url):
+        raise ActionDenied("url_denied", "URL contains whitespace or controls")
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError, UnicodeError):
+        raise ActionDenied("url_denied", "malformed URL")
+    if (parsed.scheme != "https" or not host or parsed.username is not None or
+            parsed.password is not None or parsed.fragment or port is not None):
+        raise ActionDenied("url_denied", "only implicit-port HTTPS URLs are allowed")
+    approved = _hostname(host)
+    target = parsed.path or "/"
+    if parsed.query:
+        target += "?" + parsed.query
+    if not target.isascii() or any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in target):
+        raise ActionDenied("url_denied", "request target contains non-ASCII, whitespace, or controls")
+    return parsed, approved, target
+
+
+def _resolve_global_addresses(resolver: Callable, host: str, port: int) -> list[tuple[int, tuple]]:
+    """Resolve an exact host and reject malformed or non-global answers."""
+    try:
+        resolved = list(resolver(host, port))
+        candidates: dict[tuple[int, str, int], tuple[int, tuple]] = {}
+        for item in resolved:
+            family, sockaddr = (item[0], item[4]) if len(item) >= 5 else (item[0], item[1])
+            if not isinstance(sockaddr, tuple) or len(sockaddr) < 2:
+                raise ActionDenied("address_denied", "malformed resolved address")
+            try:
+                ip = ipaddress.ip_address(sockaddr[0])
+            except (ValueError, TypeError, IndexError) as exc:
+                raise ActionDenied("address_denied", "malformed resolved address") from exc
+            if ((family == socket.AF_INET and ip.version != 4) or
+                    (family == socket.AF_INET6 and ip.version != 6) or
+                    family not in (socket.AF_INET, socket.AF_INET6)):
+                raise ActionDenied("address_denied", "address family mismatch")
+            if not ip.is_global:
+                raise ActionDenied("address_denied", "resolved address is not global")
+            numeric = (str(ip), port) if family == socket.AF_INET else (str(ip), port, 0, 0)
+            candidates[(family, str(ip), port)] = (family, numeric)
+        if not candidates:
+            raise ActionDenied("dns_error", "host did not resolve")
+        return [value for _, value in sorted(candidates.items(), key=lambda item: (item[0][0], item[0][1]))]
+    except ActionDenied:
+        raise
+    except (OSError, ValueError, TypeError, IndexError):
+        raise ActionDenied("dns_error", "DNS resolution failed")
 
 
 class HttpsActionBroker:
@@ -45,50 +97,15 @@ class HttpsActionBroker:
     def fetch(self, action: HttpAction, allowed_hosts: Iterable[str], *, timeout: float | None = None) -> HttpObservation:
         request_timeout = self.timeout if timeout is None else min(self.timeout, max(0.001, timeout))
         deadline = time.monotonic() + request_timeout
-        if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in action.url):
-            raise ActionDenied("url_denied", "URL contains whitespace or controls")
-        try:
-            parsed = urlsplit(action.url)
-            host = parsed.hostname
-            port = parsed.port
-        except (ValueError, UnicodeError):
-            raise ActionDenied("url_denied", "malformed URL")
-        if (parsed.scheme != "https" or not host or parsed.username is not None or
-                parsed.password is not None or parsed.fragment or port is not None):
-            raise ActionDenied("url_denied", "only implicit-port HTTPS URLs are allowed")
-        approved = _hostname(host)
+        parsed, approved, target = _parse_https_url(action.url)
         allowed = {_hostname(item) for item in allowed_hosts}
         if approved not in allowed:
             raise ActionDenied("host_denied", "host is not allowlisted")
-        target = parsed.path or "/"
-        if parsed.query:
-            target += "?" + parsed.query
-        if not target.isascii() or any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in target):
-            raise ActionDenied("url_denied", "request target contains non-ASCII, whitespace, or controls")
 
         try:
             # A synchronous resolver cannot be interrupted; callers still enforce
             # the outer deadline and this check bounds connect/read work.
-            resolved = list(self.resolver(approved, 443))
-            candidates: dict[tuple[int, str, int], tuple[int, tuple]] = {}
-            for item in resolved:
-                family, sockaddr = (item[0], item[4]) if len(item) >= 5 else (item[0], item[1])
-                if not isinstance(sockaddr, tuple) or len(sockaddr) < 2:
-                    raise ActionDenied("address_denied", "malformed resolved address")
-                try:
-                    ip = ipaddress.ip_address(sockaddr[0])
-                except (ValueError, TypeError, IndexError) as exc:
-                    raise ActionDenied("address_denied", "malformed resolved address") from exc
-                if ((family == socket.AF_INET and ip.version != 4) or
-                        (family == socket.AF_INET6 and ip.version != 6) or
-                        family not in (socket.AF_INET, socket.AF_INET6)):
-                    raise ActionDenied("address_denied", "address family mismatch")
-                if not ip.is_global:
-                    raise ActionDenied("address_denied", "resolved address is not global")
-                numeric = (str(ip), 443) if family == socket.AF_INET else (str(ip), 443, 0, 0)
-                candidates[(family, str(ip), 443)] = (family, numeric)
-            if not candidates:
-                raise ActionDenied("dns_error", "host did not resolve")
+            candidates = _resolve_global_addresses(self.resolver, approved, 443)
             if time.monotonic() >= deadline:
                 raise ActionDenied("timeout", "action timed out")
         except ActionDenied:
@@ -98,7 +115,7 @@ class HttpsActionBroker:
 
         raw = wrapped = response = None
         try:
-            for _, (family, address) in sorted(candidates.items(), key=lambda x: (x[0][0], x[0][1])):
+            for _, address in candidates:
                 try:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:

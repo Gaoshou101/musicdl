@@ -12,6 +12,7 @@ from musicdl.contracts.plugin import (HttpAction, HttpObservation, PluginError, 
 from musicdl.plugins.broker import ActionDenied
 from musicdl.plugins.client import PluginClient
 from musicdl.plugins.store import StoredPlugin
+from musicdl.sources.models import Candidate
 
 
 def stored(tmp_path, *, operations=("search",), source="def handle(request):\n    return {'items': []}\n", enabled=True):
@@ -204,4 +205,268 @@ def test_digest_and_operation_are_checked_before_send(tmp_path):
             with pytest.raises(RuntimeError, match="operation"):
                 await client.invoke(stored(tmp_path, operations=("health",)), PluginRequest(protocol="musicdl.plugin/v1", request_id=uuid4(), operation="search"))
         finally: await http.aclose()
+    asyncio.run(run())
+
+
+def _candidate():
+    return Candidate(
+        source_id="demo",
+        source_version="1",
+        item_id="item-1",
+        title="Song",
+        artist="Artist",
+        album="Album",
+        duration=123,
+        bitrate=320,
+        format="mp3",
+        size=456,
+    )
+
+
+def _resolve_response(request_id, result, *, operation="resolve"):
+    return PluginStep(response=PluginResponse(
+        protocol="musicdl.plugin/v1",
+        request_id=request_id,
+        operation=operation,
+        ok=True,
+        result=result,
+    ))
+
+
+def test_resolve_sends_public_candidate_and_returns_typed_descriptor(tmp_path):
+    candidate = _candidate()
+    captured = []
+    descriptor = {
+        "candidate_id": candidate.item_id,
+        "url": "https://media.example.test/song.mp3?token=opaque",
+        "extension": "mp3",
+        "media_type": "audio/mpeg",
+        "declared_size": 456,
+    }
+
+    def handler(request):
+        captured.append(json.loads(request.content))
+        request_id = captured[-1]["request"]["request_id"]
+        return httpx.Response(200, json=_resolve_response(request_id, descriptor).model_dump(mode="json"))
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False, follow_redirects=False
+    )
+    client = PluginClient("http://runner:8080", http_client=http, timeout=2)
+
+    async def run():
+        try:
+            resolved = await client.resolve(
+                stored(tmp_path, operations=("resolve",)), candidate, timeout_ms=1234
+            )
+            assert resolved.candidate_id == candidate.item_id
+            assert resolved.url == descriptor["url"]
+        finally:
+            await http.aclose()
+
+    asyncio.run(run())
+    assert len(captured) == 1
+    request = captured[0]["request"]
+    assert request["operation"] == "resolve"
+    assert request["timeout_ms"] == 1234
+    assert request["payload"] == {"candidate": candidate.public_representation}
+    assert "bytes" not in json.dumps(request)
+    assert "base64" not in json.dumps(request).lower()
+
+
+def test_resolve_rejects_candidate_identity_mismatch(tmp_path):
+    candidate = _candidate()
+    descriptor = {
+        "candidate_id": "different-item",
+        "url": "https://media.example.test/song.mp3",
+        "extension": "mp3",
+        "media_type": "audio/mpeg",
+    }
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=_resolve_response(
+                    json.loads(request.content)["request"]["request_id"], descriptor
+                ).model_dump(mode="json"),
+            )
+        ),
+        trust_env=False,
+        follow_redirects=False,
+    )
+    client = PluginClient("http://runner:8080", http_client=http, timeout=2)
+
+    async def run():
+        try:
+            with pytest.raises(RuntimeError, match="candidate_mismatch"):
+                await client.resolve(stored(tmp_path, operations=("resolve",)), candidate)
+        finally:
+            await http.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        {
+            "candidate_id": "item-1",
+            "url": "https://media.example.test/song.mp3",
+            "extension": "mp3",
+            "media_type": "audio/mpeg",
+            "unexpected": "secret",
+        },
+        {
+            "candidate_id": "item-1",
+            "url": "http://media.example.test/song.mp3",
+            "extension": "mp3",
+            "media_type": "audio/mpeg",
+        },
+    ],
+)
+def test_resolve_rejects_malformed_descriptor_as_stable_invalid_error(tmp_path, descriptor):
+    candidate = _candidate()
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=_resolve_response(
+                    json.loads(request.content)["request"]["request_id"], descriptor
+                ).model_dump(mode="json"),
+            )
+        ),
+        trust_env=False,
+        follow_redirects=False,
+    )
+    client = PluginClient("http://runner:8080", http_client=http, timeout=2)
+
+    async def run():
+        try:
+            with pytest.raises(RuntimeError, match="plugin_resolve_invalid") as exc:
+                await client.resolve(stored(tmp_path, operations=("resolve",)), candidate)
+            assert "media.example" not in str(exc.value)
+            assert "secret" not in str(exc.value)
+        finally:
+            await http.aclose()
+
+    asyncio.run(run())
+
+
+def test_resolve_maps_runner_timeout_and_plugin_failure_without_leaking_details(tmp_path):
+    def handler(request):
+        raise httpx.ReadTimeout("https://user:secret@media.example.test/song.mp3")
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False, follow_redirects=False
+    )
+    client = PluginClient("http://runner:8080", http_client=http, timeout=1)
+
+    async def run():
+        try:
+            with pytest.raises(RuntimeError, match="plugin_resolve_failed") as exc:
+                await client.resolve(stored(tmp_path, operations=("resolve",)), _candidate())
+            assert "secret" not in str(exc.value)
+            assert "media.example" not in str(exc.value)
+        finally:
+            await http.aclose()
+
+    asyncio.run(run())
+
+
+def test_resolve_maps_oversized_runner_response_to_invalid_error(tmp_path):
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"x" * (64 * 1024 + 1))
+        ),
+        trust_env=False,
+        follow_redirects=False,
+    )
+    client = PluginClient("http://runner:8080", http_client=http, timeout=1)
+
+    async def run():
+        try:
+            with pytest.raises(RuntimeError, match="plugin_resolve_invalid"):
+                await client.resolve(stored(tmp_path, operations=("resolve",)), _candidate())
+        finally:
+            await http.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("result", [True, False])
+def test_health_returns_only_valid_boolean_result(tmp_path, result):
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=response(
+                    json.loads(request.content)["request"]["request_id"],
+                    result=result,
+                    operation="health",
+                ).model_dump(mode="json"),
+            )
+        ),
+        trust_env=False,
+        follow_redirects=False,
+    )
+    client = PluginClient("http://runner:8080", http_client=http, timeout=2)
+
+    async def run():
+        try:
+            assert await client.health(stored(tmp_path, operations=("health",))) is result
+        finally:
+            await http.aclose()
+
+    asyncio.run(run())
+
+
+def test_health_rejects_non_boolean_result_and_undeclared_operation(tmp_path):
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=response(
+                    json.loads(request.content)["request"]["request_id"],
+                    result=1,
+                    operation="health",
+                ).model_dump(mode="json"),
+            )
+        ),
+        trust_env=False,
+        follow_redirects=False,
+    )
+    client = PluginClient("http://runner:8080", http_client=http, timeout=2)
+
+    async def run():
+        try:
+            with pytest.raises(RuntimeError, match="plugin_health_failed"):
+                await client.health(stored(tmp_path, operations=("health",)))
+            with pytest.raises(RuntimeError, match="plugin_health_failed"):
+                await client.health(stored(tmp_path, operations=("search",)))
+        finally:
+            await http.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["timeout", "malformed"])
+def test_health_failures_are_stable_and_redacted(tmp_path, kind):
+    def handler(request):
+        if kind == "timeout":
+            raise httpx.ReadTimeout("secret health response")
+        return httpx.Response(200, content=b"not-json secret")
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), trust_env=False, follow_redirects=False
+    )
+    client = PluginClient("http://runner:8080", http_client=http, timeout=1)
+
+    async def run():
+        try:
+            with pytest.raises(RuntimeError, match="plugin_health_failed") as exc:
+                await client.health(stored(tmp_path, operations=("health",)))
+            assert "secret" not in str(exc.value)
+        finally:
+            await http.aclose()
+
     asyncio.run(run())
