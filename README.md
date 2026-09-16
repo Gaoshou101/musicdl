@@ -8,7 +8,7 @@ The repository currently contains the Phase 0 foundation, the WeCom callback bou
 
 The main service owns the media, application-data, and Telegram-session volumes. The plugin runner receives no Redis URL, session, environment file, API key, main configuration, Docker socket, or host path.
 
-The `/healthz` liveness handler does not contact Redis, the plugin runner, or other external dependencies. When WeCom is enabled, `/readyz` pings Redis-backed state to verify readiness. When Telegram is enabled, `/readyz` additionally requires a wired connector, at least one enabled Bot definition, and a session that restores as ready, so an enabled-but-idle deployment reports unhealthy instead of fine. The container images nevertheless install the Python runtime dependencies required by FastAPI and the application.
+The `/healthz` liveness handler does not contact Redis, the plugin runner, or other external dependencies. When WeCom is enabled, `/readyz` pings Redis-backed state to verify readiness. Telegram readiness is reported through the portal's dependency health rather than `/readyz`: an enabled deployment shows `failed` there unless a connector is wired, at least one Bot definition is registered, and the session restores as ready, while a disabled one shows `ok`. The container images nevertheless install the Python runtime dependencies required by FastAPI and the application.
 
 ## Prerequisites
 
