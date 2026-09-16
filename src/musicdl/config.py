@@ -129,6 +129,27 @@ class PluginSettings(BaseModel):
         return value
 
 
+class AdminSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    login_limit: int = Field(default=5, ge=1, le=1000)
+    login_window_seconds: float = Field(default=60.0, gt=0, le=3600)
+
+    @field_validator("login_limit", mode="before")
+    @classmethod
+    def login_limit_must_not_be_boolean(cls, value: object):
+        if isinstance(value, bool):
+            raise ValueError("admin login limit must be an integer")
+        return value
+
+    @field_validator("login_window_seconds")
+    @classmethod
+    def login_window_must_be_finite(cls, value: float):
+        if not math.isfinite(value):
+            raise ValueError("admin login window must be finite")
+        return value
+
+
 class AISettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
@@ -237,6 +258,7 @@ class AppSettings(BaseSettings):
     telegram: TelegramSettings = TelegramSettings()
     wecom: WeComSettings = WeComSettings()
     plugin: PluginSettings = PluginSettings()
+    admin: AdminSettings = AdminSettings()
     ai: AISettings = AISettings()
     worker: WorkerSettings = WorkerSettings()
 

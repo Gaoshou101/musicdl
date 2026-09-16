@@ -8,10 +8,21 @@ class SourceManager:
     def __init__(self, sources=()):
         self._sources = {}
         for item in sources:
-            if not isinstance(item, dict) or not isinstance(item.get("id"), str): raise ValueError("invalid id")
-            enabled, priority, timeout = item.get("enabled", True), item.get("priority", 0), item.get("timeout", 10.0)
-            if not isinstance(enabled, bool) or not isinstance(priority, int) or isinstance(priority, bool) or not -1000 <= priority <= 1000 or not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0.1 <= timeout <= 300: raise ValueError("invalid source configuration")
-            self._sources[item["id"]] = {"id": item["id"], "enabled": enabled, "priority": priority, "timeout": float(timeout)}
+            self.register(item)
+
+    @staticmethod
+    def _validated(item) -> dict:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str): raise ValueError("invalid id")
+        enabled, priority, timeout = item.get("enabled", True), item.get("priority", 0), item.get("timeout", 10.0)
+        if not isinstance(enabled, bool) or not isinstance(priority, int) or isinstance(priority, bool) or not -1000 <= priority <= 1000 or not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0.1 <= timeout <= 300: raise ValueError("invalid source configuration")
+        return {"id": item["id"], "enabled": enabled, "priority": priority, "timeout": float(timeout)}
+
+    def register(self, item) -> dict:
+        """Add one bounded entry; an existing id stays a hard error."""
+        entry = self._validated(item)
+        if entry["id"] in self._sources: raise ValueError("duplicate id")
+        self._sources[entry["id"]] = entry
+        return deepcopy(entry)
 
     def list(self) -> list[dict]:
         return sorted((deepcopy(item) for item in self._sources.values()), key=lambda x: (x["priority"], x["id"]))

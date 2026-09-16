@@ -41,7 +41,7 @@ def test_session_cookie_and_csrf_are_enforced():
     auth = AdminAuth(); session = auth.issue_session(); auth.bind_csrf(session, "token")
     app.add_middleware(CSRFMiddleware, auth=auth)
 
-    @app.post("/change")
+    @app.post("/admin/change")
     async def change():
         return {"ok": True}
 
@@ -50,7 +50,7 @@ def test_session_cookie_and_csrf_are_enforced():
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             client.cookies.set("csrf_token", "token")
             client.cookies.set("admin_session", session)
-            return await client.post("/change"), await client.post("/change", headers={"X-CSRF-Token": "token"})
+            return await client.post("/admin/change"), await client.post("/admin/change", headers={"X-CSRF-Token": "token"})
     response, response2 = asyncio.run(run())
     assert response.status_code == 403
     assert response2.status_code == 200
@@ -91,13 +91,13 @@ def test_password_hash_rejects_cpu_dos_iteration_counts_and_weak_passwords():
 def test_csrf_middleware_rejects_unbound_and_cross_session_tokens():
     auth = AdminAuth(); s1 = auth.issue_session(); s2 = auth.issue_session(); auth.bind_csrf(s1, "one"); auth.bind_csrf(s2, "two")
     app = FastAPI(); app.add_middleware(CSRFMiddleware, auth=auth)
-    @app.post("/change")
+    @app.post("/admin/change")
     async def change(): return {"ok": True}
     async def run():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
             c.cookies.set("admin_session", s1); c.cookies.set("csrf_token", "fake")
-            a = await c.post("/change", headers={"x-csrf-token":"fake"})
+            a = await c.post("/admin/change", headers={"x-csrf-token":"fake"})
             c.cookies.set("csrf_token", "two")
-            b = await c.post("/change", headers={"x-csrf-token":"two"})
+            b = await c.post("/admin/change", headers={"x-csrf-token":"two"})
             return a,b
     a,b=asyncio.run(run()); assert a.status_code == 403 and b.status_code == 403
