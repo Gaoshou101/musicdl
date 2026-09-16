@@ -1,0 +1,45 @@
+# Continuous integration for the release gates.
+#
+# Two gates are deliberately absent because a hosted runner cannot decide them
+# honestly, and a job that cannot really run a gate must never report PASS:
+#   * wecom-callback  needs a real WeCom application behind public HTTPS.
+#   * compose-recovery needs the deployment Redis plus a volume backup drill.
+# Both stay human-run against the test server, and `--gate all --dry-run` still
+# lists them as NOT_RUN with the real reason instead of hiding them.
+#
+# The plugin-security gate does run here: hosted runners provide a Docker
+# Engine, so the mandatory hostile runtime suite executes for real. If a runner
+# ever loses that engine the gate reports NOT_RUN rather than a false PASS.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-gates:
+    name: Tests and release gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Test suite
+        run: python -m pytest -q
+      - name: Release gates and tamper self-test
+        # Every gate is reported; a FAIL always fails the build, while a gate
+        # that genuinely cannot run here stays NOT_RUN with its reason.
+        run: python scripts/release/run_gates.py --self-test --dry-run
