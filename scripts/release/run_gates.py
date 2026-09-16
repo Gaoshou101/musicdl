@@ -1,6 +1,6 @@
 """Release gates; default publish mode treats NOT_RUN as failure."""
 from __future__ import annotations
-import argparse, subprocess, sys, urllib.request, urllib.parse
+import argparse, shutil, subprocess, sys, urllib.request, urllib.parse
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 COMPOSE=ROOT/'compose.prod.yaml'; NGINX=ROOT/'deploy/nginx/musicdl.conf'; CADDY=ROOT/'deploy/caddy/Caddyfile'
@@ -45,12 +45,26 @@ def wecom(url=None,expected=None):
   with urllib.request.urlopen(url,timeout=10) as r: body=r.read(4096).decode('utf-8','replace'); ok=r.status==int(expected) or body==expected
   return report('wecom-callback','PASS' if ok else 'FAIL','controlled HTTPS callback probe matched expected status/body')
  except Exception:return report('wecom-callback','FAIL','controlled callback probe failed (details suppressed)')
+BACKUP_VOLUMES=('musicdl-media','musicdl-app-data','musicdl-telegram')
+def backup_plan():
+ 'Exercise the real backup script; a placeholder cannot name every volume.'
+ script=ROOT/'scripts/release/backup_restore.ps1'
+ if not script.exists():return 'FAIL','backup script is absent'
+ host=shutil.which('pwsh') or shutil.which('powershell')
+ if not host:return 'NOT_RUN','no PowerShell host available for the backup dry-run'
+ r=subprocess.run([host,'-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',str(script),'-Action','dry-run'],cwd=ROOT,capture_output=True,text=True)
+ out=(r.stdout or '')+(r.stderr or '')
+ if r.returncode!=0:return 'FAIL',f'backup dry-run exit {r.returncode}'
+ missing=[n for n in BACKUP_VOLUMES if n not in out]
+ return ('FAIL','backup dry-run omits '+missing[0]) if missing else ('PASS',f'backup plan resolved for {len(BACKUP_VOLUMES)} volumes')
 def recovery(redis_url=None,confirm=False,namespace=None):
- t=COMPOSE.read_text(); ok='restart: unless-stopped' in t and all(x in t for x in ['musicdl-media:','musicdl-app-data:','musicdl-telegram:']) and (ROOT/'scripts/release/backup_restore.ps1').exists()
- if not ok:return report('compose-recovery','FAIL','restart/volume/backup contract invalid')
- if not redis_url or not confirm:return report('compose-recovery','NOT_RUN','isolated Redis recovery requires --redis-url and --confirm-isolated')
+ t=COMPOSE.read_text(); ok='restart: unless-stopped' in t and all(x in t for x in [n+':' for n in BACKUP_VOLUMES])
+ if not ok:return report('compose-recovery','FAIL','restart/volume contract invalid')
+ plan,detail=backup_plan()
+ if plan!='PASS':return report('compose-recovery',plan,detail)
+ if not redis_url or not confirm:return report('compose-recovery','NOT_RUN','backup drill resolved; isolated Redis recovery requires --redis-url and --confirm-isolated')
  ns=namespace or 'musicdl-gate-'+__import__('secrets').token_hex(6)
- r=subprocess.run([str(_python()),str(ROOT/'scripts/release/redis_recovery.py'),'--url',redis_url,'--namespace',ns,'--confirm-isolated'],cwd=ROOT); return report('compose-recovery','PASS' if r.returncode==0 else 'FAIL',f'isolated Redis recovery exit {r.returncode}')
+ r=subprocess.run([str(_python()),str(ROOT/'scripts/release/redis_recovery.py'),'--url',redis_url,'--namespace',ns,'--confirm-isolated'],cwd=ROOT); return report('compose-recovery','PASS' if r.returncode==0 else 'FAIL',detail+f'; isolated Redis recovery exit {r.returncode}')
 FUN={'compose':compose,'proxy':proxy,'wecom-callback':wecom,'telegram-session-isolation':telegram,'media-integrity':media,'plugin-security':plugin,'admin-auth':admin,'compose-recovery':recovery}
 def main():
  p=argparse.ArgumentParser(); p.add_argument('--gate',choices=['all',*FUN],default='all'); p.add_argument('--dry-run',action='store_true'); p.add_argument('--self-test',action='store_true'); p.add_argument('--wecom-url'); p.add_argument('--wecom-expected'); p.add_argument('--redis-url'); p.add_argument('--confirm-isolated',action='store_true'); p.add_argument('--namespace'); a=p.parse_args(); good=True
