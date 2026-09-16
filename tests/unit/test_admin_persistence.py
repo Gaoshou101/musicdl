@@ -118,7 +118,8 @@ def test_source_edits_survive_a_restart_and_beat_the_runtime(tmp_path):
             async with client_for(second) as client:
                 assert (await client.post("/admin/login", json=CHANGED_LOGIN)).status_code == 200
                 listed = await client.get("/admin/sources")
-        assert listed.json()["items"] == [{"id": "primary", "enabled": False, "priority": 5, "timeout": 10.0}]
+        assert listed.json()["items"] == [{"id": "primary", "enabled": False, "priority": 5,
+                                          "timeout": 10.0, "name": None, "plugin": None}]
 
     run(scenario())
 
@@ -196,7 +197,8 @@ def test_failed_write_rolls_the_source_change_back(tmp_path):
 
     with pytest.raises(OSError):
         run(scenario())
-    assert app.state.admin.sources.list() == [{"id": "primary", "enabled": True, "priority": 0, "timeout": 10.0}]
+    assert app.state.admin.sources.list() == [{"id": "primary", "enabled": True, "priority": 0,
+                                               "timeout": 10.0, "name": None}]
 
 
 def test_restore_ignores_malformed_credentials_and_entries():

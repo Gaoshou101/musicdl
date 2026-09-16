@@ -10,8 +10,23 @@ from musicdl.admin.health import EventLogStore
 def test_source_management_updates_enabled_priority_and_timeout():
     manager = SourceManager([{"id": "netease", "enabled": True, "priority": 2, "timeout": 10.0}])
     updated = manager.update("netease", enabled=False, priority=1, timeout=3.5)
-    assert updated == {"id": "netease", "enabled": False, "priority": 1, "timeout": 3.5}
+    assert updated == {"id": "netease", "enabled": False, "priority": 1, "timeout": 3.5, "name": None}
     assert manager.list() == [updated]
+
+
+def test_a_source_name_is_a_bounded_label_that_can_be_cleared():
+    manager = SourceManager([{"id": "xinghai"}])
+    assert manager.update("xinghai", name="  星海音乐源  ")["name"] == "星海音乐源"
+    # An empty label clears it; a null one keeps whatever was stored.
+    assert manager.update("xinghai", name=None)["name"] == "星海音乐源"
+    assert manager.update("xinghai", name="")["name"] is None
+    for value in ("x" * 121, "line\nbreak", 7):
+        try:
+            manager.update("xinghai", name=value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid name accepted: {value!r}")
 
 
 def test_unknown_source_is_rejected():
