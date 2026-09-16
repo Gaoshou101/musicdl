@@ -314,3 +314,64 @@ def test_a_source_with_the_shape_of_a_shipped_one_clears_every_hazard_at_once():
     assert final.response.ok
     assert final.response.result["url"] == "http://music.example/wy/wy.php?type=mp3&id=186016"
     assert final.response.result["extension"] == "mp3"
+
+
+DENIAL_SOURCE = """
+const { EVENT_NAMES, request, on, send } = globalThis.lx;
+function get(url) {
+  return new Promise((resolve, reject) => {
+    request(url, { method: "GET" }, (error, response) => {
+      if (error) return reject(error);
+      if (!response || response.statusCode >= 400) return reject(new Error("HTTP " + (response && response.statusCode)));
+      resolve(response);
+    });
+  });
+}
+const BRANCHES = [
+  "https://api.zhihu.example/a",
+  "https://api.zhihu.example/b",
+  "https://api.zhihu.example/c",
+];
+on(EVENT_NAMES.request, async () => {
+  const results = await Promise.allSettled(BRANCHES.map((url) => get(url)));
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    return JSON.parse(result.value.body).url;
+  }
+  throw new Error("every branch failed");
+});
+send(EVENT_NAMES.inited, { sources: { kw: { type: "music", actions: ["musicUrl"] } } });
+"""
+
+
+@requires_deno
+def test_a_refused_branch_looks_like_a_failed_branch_to_the_source():
+    # The main process answers a request the broker would not carry with a 599
+    # observation instead of ending the invocation, and this is the property
+    # that makes one dead endpoint cost one branch instead of the whole source.
+    # The status is the signal the sources already test for, so an unmodified
+    # third-party script walks its own chain without knowing about the policy.
+    candidate = dict(CANDIDATE, item_id="lx:kw:128014", source_id="kw")
+    refused = HttpObservation(action_id="lx-0", status_code=599)
+    first = _run(_invocation(DENIAL_SOURCE, operation="resolve", payload={"candidate": candidate}))
+    assert first.action is not None and first.action.url == "https://api.zhihu.example/a"
+
+    second = _run(_invocation(DENIAL_SOURCE, operation="resolve", payload={"candidate": candidate},
+                              actions=[first.action], observations=[refused]))
+    assert second.action is not None and second.action.url == "https://api.zhihu.example/b"
+
+    third = _run(_invocation(DENIAL_SOURCE, operation="resolve", payload={"candidate": candidate},
+                             actions=[first.action, second.action],
+                             observations=[refused, _observation("", action_id="lx-1", status_code=599)]))
+    assert third.action is not None and third.action.url == "https://api.zhihu.example/c"
+
+    answered = _observation(json.dumps({"url": "http://music.example/kw/kw.php?type=mp3&id=128014"}),
+                            action_id="lx-2")
+    final = _run(_invocation(DENIAL_SOURCE, operation="resolve", payload={"candidate": candidate},
+                             actions=[first.action, second.action, third.action],
+                             observations=[refused,
+                                           _observation("", action_id="lx-1", status_code=599),
+                                           answered]))
+    assert final.response.ok
+    assert final.response.result["url"] == "http://music.example/kw/kw.php?type=mp3&id=128014"
+    assert final.response.result["extension"] == "mp3"
