@@ -24,6 +24,8 @@ Telethon was introduced in Phase 3 behind injectable connector and response-deco
 
 The reference repository `liqman/tgmusic-wecom` exposes deployment/configuration files but no reviewable business source or LICENSE in the researched snapshot. Its implementation is therefore not copied into musicdl.
 
+The twelve lx custom-source scripts supplied on 2026-09-16 as adaptation blueprints are not vendored either, and that is a product decision rather than an oversight. Only `HYWmusic_beta` and `K x H测试` declare a license in their header (MIT); the other ten declare none, and this file already refuses to copy third-party code that has no reviewable LICENSE. None of them is baked into the image or seeded into the data volume, so no third-party source ships with a deployment. A script reaches an installation only when an operator imports it through the administration portal (`POST /admin/sources`), which is also the only route that can grant the per-source egress widening such a script needs: the analyzer verdict, including every grant it would have to be given, is what the operator reviews before any byte is stored.
+
 Phase 6 runtime supply-chain evidence:
 
 - Deno is downloaded only from `https://github.com/denoland/deno/releases/download/v2.9.6/`.
