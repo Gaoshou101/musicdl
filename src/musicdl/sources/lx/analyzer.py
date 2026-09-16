@@ -80,6 +80,10 @@ class LxAnalysis:
     ip_hosts: tuple[str, ...] = ()
     ports: tuple[int, ...] = ()
     insecure_http: bool = False
+    # Whether the endpoints this script *calls* could not be derived at all (an
+    # opaque script, or one with no readable URL).  Distinct from the
+    # ``allow_any_host`` requirement every lx source carries: the host in the
+    # media URL is produced while the script runs, so no analysis can see it.
     open_egress: bool = False
     opaque: bool = False
     blockers: tuple[LxFinding, ...] = ()
@@ -137,10 +141,18 @@ class LxAnalysis:
             grants["allow_insecure_http"] = True
         if self.ip_hosts:
             grants["allow_ip_hosts"] = True
-        if self.open_egress:
-            # Endpoints this analysis cannot derive are endpoints the strict
-            # allowlist cannot cover, so the only alternative is refusal.
-            grants["allow_any_host"] = True
+        # Every lx source gets open egress, not only the ones whose endpoints
+        # this analysis cannot derive.  The endpoints a script calls are
+        # allowlistable; the media URL it hands back is not, because that host
+        # is produced while the script runs.  Measured on 2026-09-16: the
+        # analysed aggregate source resolved kw/128014 to a kuwo CDN link
+        # (kw-er.kuwo.cn) its own text never mentions, and the media transport,
+        # which shares this manifest's policy, then failed the download with
+        # media_host_denied after a resolve that had succeeded.  Requiring the
+        # grant here makes that one decision explicit per source -- the portal
+        # refuses the install without it -- instead of leaving the operator to
+        # discover it as a download that never finishes.
+        grants["allow_any_host"] = True
         if self.ports:
             grants["allowed_ports"] = list(self.allowed_ports)
         return grants
@@ -369,6 +381,9 @@ def analyze_source(source: str, *, path: str | None = None) -> LxAnalysis:
     if not endpoints and referenced:
         caveats.append(LxFinding("literal_hosts_only",
                                  "every endpoint comes from bare domain literals rather than absolute URLs"))
+    caveats.append(LxFinding("resolved_host_unknown",
+                             "the media URL this script returns is assembled while it runs, so the host it "
+                             "points at cannot be allowlisted and the source always needs open egress"))
     open_egress = obfuscated or (not endpoints and not referenced)
     if not endpoints and not referenced and not obfuscated:
         caveats.append(LxFinding("undecidable_endpoints",

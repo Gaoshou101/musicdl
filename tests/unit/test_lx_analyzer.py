@@ -33,7 +33,8 @@ def test_an_endpoint_assembled_at_runtime_is_a_caveat_not_a_refusal():
     analysis = analyze_source(source)
 
     assert analysis.verdict == "installable"
-    assert sorted(item.code for item in analysis.caveats) == ["dynamic_endpoint", "literal_hosts_only"]
+    assert sorted(item.code for item in analysis.caveats) == ["dynamic_endpoint", "literal_hosts_only",
+                                                              "resolved_host_unknown"]
     # The domain table is the allowlist, and anything else fails closed in the broker.
     assert analysis.allowed_hosts == ("music.example.com",)
 
@@ -46,7 +47,9 @@ def test_plain_http_endpoint_becomes_a_grant_rather_than_a_refusal():
     assert "plain_http_endpoint" in [item.code for item in analysis.caveats]
     assert "http" in analysis.schemes and "https" not in analysis.schemes
     # The policy decides, so the requirement is named instead of a refusal.
-    assert analysis.required_grants == {"allow_insecure_http": True}
+    # Open egress comes with every lx source, because the media URL it returns
+    # cannot be allowlisted from the script text; see the analyzer's grants.
+    assert analysis.required_grants == {"allow_insecure_http": True, "allow_any_host": True}
 
 
 def test_an_address_literal_becomes_a_grant():
@@ -55,7 +58,7 @@ def test_an_address_literal_becomes_a_grant():
 
     assert analysis.verdict == "installable" and analysis.blocked_reasons == ()
     assert analysis.ip_hosts == ("103.79.184.97",)
-    assert analysis.required_grants == {"allow_ip_hosts": True}
+    assert analysis.required_grants == {"allow_ip_hosts": True, "allow_any_host": True}
 
 
 def test_a_method_the_broker_cannot_perform_is_refused():
