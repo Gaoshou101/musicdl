@@ -202,3 +202,22 @@ def test_cleanup_state_is_request_local(monkeypatch):
     codes=[s.response.error.code for s in steps]
     assert codes.count("cleanup_failed") == 1
     assert codes.count("invalid_output") == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX fork")
+def test_a_forked_grandchild_that_holds_the_pipes_is_denied_as_timeout():
+    """Why the hostile fork modes may report ``timeout`` instead of ``plugin_failed``.
+
+    ``os.fork`` leaves a child holding the host's stdout/stderr, so the supervisor's
+    readers never see EOF even after the host itself exits 0. The attack is still
+    denied and the process group is still reaped; only the code differs, which is
+    what the integration suite's allowance for those two modes rests on.
+    """
+    code = ("import os, time\n"
+            "if os.fork() == 0:\n"
+            "    time.sleep(5)\n"
+            "    os._exit(0)\n"
+            "raise SystemExit(0)\n")
+    step = run_supervisor(code, timeout_ms=300)
+    assert step.response and step.response.ok is False
+    assert step.response.error.code == "timeout"
