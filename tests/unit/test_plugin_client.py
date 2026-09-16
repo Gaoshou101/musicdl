@@ -30,6 +30,20 @@ def response(request_id, *, result=None, error=None, operation="search"):
         error=error))
 
 
+def test_a_source_keeps_the_bytes_it_was_stored_with(tmp_path):
+    """CRLF in a stored script must survive the read that hashes it.
+
+    ``os.open`` hands back a text-mode descriptor on Windows, which rewrites
+    CRLF to LF as the client reads the source.  A script checked out or copied
+    with CRLF endings then reads shorter than its own ``st_size``, so the client
+    reports ``source_invalid`` and the plugin can never run on that host.
+    """
+    source = "def handle(request):\r\n    return {'items': []}\r\n"
+    plugin = stored(tmp_path, source=source)
+
+    assert PluginClient._source(plugin) == source
+
+
 def make_client(tmp_path, steps, broker=None):
     def handler(request):
         value = steps.pop(0)

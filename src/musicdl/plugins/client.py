@@ -118,6 +118,10 @@ class PluginClient:
             flags = os.O_RDONLY
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
+            # Windows hands back a text-mode descriptor unless O_BINARY is set,
+            # which rewrites CRLF to LF while reading.  The source is hashed
+            # afterwards, so a translated read fails as source_invalid.
+            flags |= getattr(os, "O_BINARY", 0)
             fd = os.open(os.fspath(stored.path), flags)
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_SOURCE_BYTES:
