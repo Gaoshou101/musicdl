@@ -1,6 +1,6 @@
 """Release gates; default publish mode treats NOT_RUN as failure."""
 from __future__ import annotations
-import argparse, subprocess, sys, urllib.request, urllib.parse
+import argparse, shutil, subprocess, sys, urllib.request, urllib.parse
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 COMPOSE=ROOT/'compose.prod.yaml'; NGINX=ROOT/'deploy/nginx/musicdl.conf'; CADDY=ROOT/'deploy/caddy/Caddyfile'
@@ -29,9 +29,17 @@ def media():
  r=subprocess.run([str(py),'-m','pytest','-q','-W','error',*tests],cwd=ROOT,capture_output=True); return report('media-integrity','PASS' if r.returncode==0 else 'FAIL',f'pytest media tests exit {r.returncode}')
 def plugin_contract(t):
  s=t.split('  plugin-runner:',1)[1].split('\n\nvolumes:',1)[0]; req=['user: "10001:10001"','read_only: true','cap_drop: [ALL]','no-new-privileges:true','limits:','cpus:','memory:','networks: [plugin-control]']; forbidden=['docker.sock','telegram','session','api_key','redis','secret','config']; return all(x in s for x in req) and not any(x in s.lower() for x in forbidden)
+PLUGIN_SUITE=ROOT/'tests/integration/test_plugin_runtime.py'
 def plugin():
  t=COMPOSE.read_text(); ok=plugin_contract(t)
- return report('plugin-security','NOT_RUN' if ok else 'FAIL','Phase 6 runtime is absent; static boundary '+('valid but hostile test unavailable' if ok else 'violated'))
+ if not ok:return report('plugin-security','FAIL','plugin-runner static boundary violated in compose.prod.yaml')
+ if not PLUGIN_SUITE.exists():return report('plugin-security','FAIL','mandatory hostile runtime suite is absent')
+ if not shutil.which('docker'):return report('plugin-security','NOT_RUN','static boundary valid; no docker CLI on this host, so the mandatory hostile runtime suite cannot run here (last full run: .planning/phases/06-restricted-plugin-runtime/SUMMARY.md)')
+ r=subprocess.run([str(_python()),'-m','pytest','-q','-rs','-p','no:cacheprovider',str(PLUGIN_SUITE)],cwd=ROOT,capture_output=True,text=True)
+ out=(r.stdout or '')+(r.stderr or '')
+ if r.returncode!=0:return report('plugin-security','FAIL',f'hostile runtime suite exit {r.returncode}')
+ if 'skipped' in out:return report('plugin-security','NOT_RUN','hostile runtime suite skipped because Docker Engine is unavailable')
+ return report('plugin-security','PASS','hostile runtime suite passed with no skips')
 def admin():
  tests=sorted(str(p) for p in (ROOT/'tests/unit').glob('test_admin_*.py'))
  if not tests:return report('admin-auth','NOT_RUN','admin tests are not merged into this Worktree')
