@@ -280,7 +280,7 @@ def test_message_worker_failure_uses_the_configured_retry_window(monkeypatch):
     assert run(worker.run_once())==0 and redis.acks==[]
     assert redis.expiries==[(worker._retry_key(worker.stream,"1-0"),7200)]
 
-KIND="未知/Artist/Song - Artist.mp3"
+KIND="欧美/Artist/Song - Artist.mp3"
 
 def job_payload(**extra):
     payload={"request_id":"r","from_user":"u","corp_id":"c","query":"q","generation":0,
@@ -508,3 +508,46 @@ def test_health_and_refresh_are_claimed_as_their_own_fenced_effects(monkeypatch)
     assert effect_result(st,"1-0","refresh")=={"candidates":1,"ok":True,"version":"v3"}
     assert st.script.hashes["{tenant}:effect:1-0:health"]["effect"]=="health"
     assert st.script.hashes["{tenant}:effect:1-0:refresh"]["effect"]=="refresh"
+
+
+def reserved_download(monkeypatch,tmp_path,*,advisor=None,payload=None,state=None):
+    """Run one job and report the reserved path and the language the engine saw."""
+    st=state if state is not None else State(); seen={}
+    async def download(candidate,sources,root,**kwargs):
+        seen["target"]=dict(st.script.hashes.get("{tenant}:artifact:1-0") or {}).get("target_relative_path")
+        seen["language"]=kwargs.get("language")
+        return ok_download()
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
+    worker=JobWorker(Redis(),WeCom(),{},str(tmp_path),state=st,refresh=lambda *a:None,
+                     language_advisor=advisor)
+    run(worker.handle_job(payload if payload is not None else job_payload(),job_id="1-0"))
+    return seen
+
+def test_the_candidate_metadata_decides_the_category_directory(monkeypatch,tmp_path):
+    payload=job_payload(candidate=Candidate(source_id="src",source_version="1",item_id="id",
+                                            title="七里香",artist="周杰伦",format="mp3").model_dump(mode="json"))
+    seen=reserved_download(monkeypatch,tmp_path,payload=payload)
+    assert seen["target"]=="华语/周杰伦/七里香 - 周杰伦.mp3" and seen["language"]=="华语"
+
+def test_language_advice_overrides_the_deterministic_category(monkeypatch,tmp_path):
+    async def advisor(candidate): return "日韩"
+    seen=reserved_download(monkeypatch,tmp_path,advisor=advisor)
+    assert seen["target"]=="日韩/Artist/Song - Artist.mp3" and seen["language"]=="日韩"
+
+@pytest.mark.parametrize("advice",[None,"boom","junk"])
+def test_unusable_language_advice_keeps_the_deterministic_category(monkeypatch,tmp_path,advice):
+    async def advisor(candidate):
+        if advice=="boom": raise RuntimeError("provider down")
+        return advice
+    seen=reserved_download(monkeypatch,tmp_path,advisor=None if advice is None else advisor)
+    assert seen["target"]=="欧美/Artist/Song - Artist.mp3" and seen["language"]=="欧美"
+
+def test_a_prepared_reservation_pins_the_category_directory(monkeypatch,tmp_path):
+    st=State()
+    st.script.hashes["{tenant}:artifact:1-0"]={"job_id":"1-0","candidate_id":"id",
+        "temporary_relative_path":".musicdl-staging/a.3.part","target_relative_path":"未知/Artist/Song - Artist.mp3",
+        "allocation_slot":"1","extension":".mp3","media_type":"audio/mpeg","owner":"earlier",
+        "fence":"1","state":"prepared"}
+    async def advisor(candidate): return "华语"
+    seen=reserved_download(monkeypatch,tmp_path,advisor=advisor,state=st)
+    assert seen["target"]=="未知/Artist/Song - Artist.mp3" and seen["language"]=="未知"

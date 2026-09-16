@@ -105,9 +105,16 @@ user to choose from. It never downloads a replacement automatically.
 Publication stays inside the Phase 4 path: the worker reserves a destination suffix
 through the artifact ledger, streams while hashing, verifies the signature, extension,
 and media type, and renames the temporary file into place before the artifact is
-recorded as published. Language directories normalize to `华语`, `欧美`, `日韩`, or
-`未知`, so a missing or unrecognized language is archived under `未知`. The job is
-acknowledged (XACK) only after the recorded effect for that stage has completed.
+recorded as published. The category directory is decided before the reservation
+from script evidence in the candidate metadata: kana or hangul gives `日韩`, han
+characters give `华语`, and Latin letters give `欧美`, with the title outranking the
+rest of the metadata. Anything else, including a candidate whose metadata carries
+no recognizable script, stays `未知`; only those four values are ever written, and
+a directory already fixed by a prepared reservation is reused instead of being
+recomputed. With `MUSICDL_AI__ENABLED=true` the advisory classifier may override
+the verdict with one of the four values, and a disabled, failing, or unusable
+advisor leaves the deterministic verdict in place. The job is acknowledged (XACK)
+only after the recorded effect for that stage has completed.
 
 ## Configuration
 

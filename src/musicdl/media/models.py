@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterable, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, get_args
 
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
@@ -18,6 +18,7 @@ _DOWNLOAD_CODES = frozenset({
     "media_timeout", "media_redirect_denied", "media_response_invalid",
 })
 Language = Literal["华语", "欧美", "日韩", "未知"]
+LANGUAGES: frozenset[str] = frozenset(get_args(Language))
 
 
 @dataclass
