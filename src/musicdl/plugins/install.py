@@ -21,6 +21,11 @@ from .store import PluginStore, StoredPlugin
 
 LANGUAGES = ("javascript", "python")
 DEFAULT_OPERATIONS = ("search",)
+# An lx custom source answers `musicUrl`, which is this project's `resolve`.  A
+# search action is optional and only some sources declare one, so both are
+# published: a source that cannot search then fails honestly at search time
+# instead of being installed as a source nothing can ever be downloaded from.
+LX_DEFAULT_OPERATIONS = ("search", "resolve")
 GRANT_FLAGS = ("allow_insecure_http", "allow_ip_hosts", "allow_any_host")
 
 
@@ -34,9 +39,9 @@ def _hosts(value: Any) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _operations(value: Any) -> tuple[Any, ...]:
+def _operations(value: Any, default: tuple[Any, ...] = DEFAULT_OPERATIONS) -> tuple[Any, ...]:
     if value is None:
-        return DEFAULT_OPERATIONS
+        return default
     if isinstance(value, str) or not isinstance(value, Sequence) or not value:
         raise ValueError("operations must be a non-empty list")
     return tuple(value)
@@ -76,8 +81,9 @@ def _missing_grants(required: Mapping[str, Any], granted: Mapping[str, Any]) -> 
 
 def _store(store: PluginStore, *, plugin_id: str, script: str, request: Mapping[str, Any],
            language: str, allowed_hosts: tuple[str, ...], version: str,
-           granted: Mapping[str, Any]) -> StoredPlugin:
-    operations = _operations(request.get("operations"))
+           granted: Mapping[str, Any],
+           default_operations: tuple[Any, ...] = DEFAULT_OPERATIONS) -> StoredPlugin:
+    operations = _operations(request.get("operations"), default_operations)
     return store.install(plugin_id=plugin_id, version=version, language=language,
                          operations=operations, allowed_hosts=allowed_hosts,
                          allowed_ports=granted.get("allowed_ports") or (443,),
@@ -127,4 +133,5 @@ def install_lx_source(store: PluginStore, *, plugin_id: str, script: str,
         raise ValueError("lx source needs an explicit operator grant: " + ", ".join(missing))
     version = request.get("version") or analysis.version or "1"
     return _store(store, plugin_id=plugin_id, script=script, request=request, language="javascript",
-                  allowed_hosts=analysis.allowed_hosts, version=str(version), granted=granted)
+                  allowed_hosts=analysis.allowed_hosts, version=str(version), granted=granted,
+                  default_operations=LX_DEFAULT_OPERATIONS)

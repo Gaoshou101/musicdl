@@ -37,7 +37,14 @@ def build_host_command(invocation: PluginInvocation) -> HostCommand:
     import json
     from pathlib import Path
     template = (Path(__file__).with_name("deno_host.js")).read_text(encoding="utf-8")
-    payload = "const invocation=JSON.parse(" + json.dumps(invocation.model_dump_json()) + ");\n" + template
+    # An lx custom source reads `globalThis.lx` before its top-level IIFE runs
+    # and answers through `on(EVENT_NAMES.request, ...)`, which the host alone
+    # does not provide.  The adapter installs that runtime and a global
+    # `handle`; the host itself stays unchanged, and a source that declares its
+    # own `handle` still shadows the adapter.
+    adapter = (Path(__file__).with_name("lx_shim.js")).read_text(encoding="utf-8")
+    payload = ("const invocation=JSON.parse(" + json.dumps(invocation.model_dump_json()) + ");\n"
+               + adapter + "\n" + template)
     deno = "/usr/bin/deno" if os.name == "posix" else (shutil.which("deno") or "deno")
     # The host environment is deliberately emptied, but Deno refuses to start
     # without a resolvable cache directory: on Windows it looks the directory up

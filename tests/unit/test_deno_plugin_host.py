@@ -96,3 +96,21 @@ def test_deno_hostile_runtime_is_sanitized(source):
  step=asyncio.run(Supervisor(build_host_command).execute(_invocation(source)))
  assert step.response.error.code == "plugin_error"
  assert "example.invalid" not in step.response.error.message and "passwd" not in step.response.error.message
+
+def test_deno_console_output_leaves_the_wire_clean():
+ # stdout carries exactly one JSON step, so a plugin that logs must not be able
+ # to prepend a line to it.  Real lx sources log at load time.
+ if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
+ from musicdl_plugin_runner.supervisor import Supervisor
+ source="console.log('loaded'); console.error('noise'); function handle(r){ console.log('during', {a:1}); return {hits: []}}"
+ step=asyncio.run(Supervisor(build_host_command).execute(_invocation(source)))
+ assert step.response.ok and step.response.result == {"hits": []}
+
+def test_deno_console_flood_stays_within_the_error_stream_limit():
+ # The supervisor reads at most 16 KiB of stderr and fails the step past that,
+ # so the console sink has to drop output rather than forward all of it.
+ if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
+ from musicdl_plugin_runner.supervisor import Supervisor
+ source="for(let i=0;i<20000;i++) console.log('0123456789'.repeat(8)); function handle(r){ return {hits: []}}"
+ step=asyncio.run(Supervisor(build_host_command).execute(_invocation(source)))
+ assert step.response.ok and step.response.result == {"hits": []}

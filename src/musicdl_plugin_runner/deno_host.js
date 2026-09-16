@@ -1,5 +1,19 @@
 function freeze(value) { if(value && typeof value === "object" && !Object.isFrozen(value)) { for(const child of Object.values(value)) freeze(child); Object.freeze(value); } return value; }
 const request=freeze(invocation.request), source=invocation.source;
+let consoleBudget=8192;
+const consoleWrite=(...args)=>{
+  if(consoleBudget<=0) return;
+  let text="";
+  try { text=args.map(value=>typeof value==="string"?value:(()=>{try{return JSON.stringify(value)}catch(_){return String(value)}})()).join(" "); } catch (_) { return; }
+  if(!text) return;
+  const bytes=new TextEncoder().encode(text.slice(0,1024)+"\n").slice(0,Math.min(consoleBudget,1040));
+  consoleBudget-=bytes.length;
+  try { Deno.stderr.writeSync(bytes); } catch (_) {}
+};
+globalThis.console=Object.freeze({log:consoleWrite,info:consoleWrite,debug:consoleWrite,warn:consoleWrite,
+  error:consoleWrite,trace:consoleWrite,dir:consoleWrite,table:consoleWrite,group:consoleWrite,
+  groupCollapsed:consoleWrite,timeLog:consoleWrite,count:consoleWrite,assert:consoleWrite,
+  groupEnd:()=>{},time:()=>{},timeEnd:()=>{},countReset:()=>{},clear:()=>{}});
 function stepFrom(value) {
   if (value && typeof value === "object" && Object.keys(value).length === 1 && Object.prototype.hasOwnProperty.call(value, "action")) {
     const a=value.action;
@@ -28,7 +42,7 @@ function stepFrom(value) {
 Object.defineProperty(globalThis,"Worker",{value:undefined,writable:false,configurable:false});
 Object.defineProperty(globalThis,"process",{value:undefined,writable:false,configurable:false});
 try {
-  const fn=new Function("request", `"use strict"; const Worker=undefined; const process=undefined; ${source}\n; return typeof handle === "function" ? handle(request) : undefined;`);
+  const fn=new Function("musicdlRequest", `"use strict"; const Worker=undefined; const process=undefined; ${source}\n; return typeof handle === "function" ? handle(musicdlRequest) : undefined;`);
   const result=await fn(request);
   if(result===undefined) throw new Error("missing handle");
   await Deno.stdout.write(new TextEncoder().encode(JSON.stringify(stepFrom(result))));
