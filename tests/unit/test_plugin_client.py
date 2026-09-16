@@ -7,8 +7,8 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from musicdl.contracts.plugin import (HttpAction, HttpObservation, PluginError, PluginManifest,
-                                      PluginRequest, PluginResponse, PluginStep)
+from musicdl.contracts.plugin import (MAX_HTTP_ACTIONS, HttpAction, HttpObservation, PluginError,
+                                      PluginManifest, PluginRequest, PluginResponse, PluginStep)
 from musicdl.plugins.broker import ActionDenied
 from musicdl.plugins.client import PluginClient
 from musicdl.plugins.store import StoredPlugin
@@ -66,12 +66,13 @@ def test_direct_response_and_source_is_sent(tmp_path):
     asyncio.run(run())
 
 
-def test_four_actions_accumulate_and_fifth_is_rejected(tmp_path):
+def test_actions_accumulate_up_to_the_contract_limit_and_the_next_is_rejected(tmp_path):
     request_id = uuid4()
     steps = []
-    for i in range(4):
+    for i in range(MAX_HTTP_ACTIONS):
         steps.append(PluginStep(action=HttpAction(action_id=f"a{i}", method="GET", url="https://api.example.com/x")))
-    steps.append(PluginStep(action=HttpAction(action_id="a4", method="GET", url="https://api.example.com/x")))
+    steps.append(PluginStep(action=HttpAction(action_id="overflow", method="GET", url="https://api.example.com/x")))
+    steps.append(response(request_id, result={"items": []}))
     class Broker:
         def fetch(self, action, allowed, *, timeout=None):
             return HttpObservation(action_id=action.action_id, status_code=200, body="")
@@ -332,7 +333,7 @@ def test_resolve_rejects_candidate_identity_mismatch(tmp_path):
         },
         {
             "candidate_id": "item-1",
-            "url": "http://media.example.test/song.mp3",
+            "url": "https://media.example.test/song.mp3#fragment",
             "extension": "mp3",
             "media_type": "audio/mpeg",
         },

@@ -1,4 +1,4 @@
-"""Main-process HTTPS streaming for resolved plugin media."""
+"""Main-process policy-checked streaming for resolved plugin media."""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ import socket
 import ssl
 import time
 from collections.abc import Callable, Iterable
-from urllib.parse import SplitResult
-
 from musicdl.contracts.plugin import RESOLVED_MEDIA_TYPES, ResolvedMedia
-from musicdl.plugins.broker import ActionDenied, _parse_https_url, _resolve_global_addresses
+from musicdl.plugins.broker import (
+    ActionDenied, EgressPolicy, EgressTarget, PluginManifest, _parse_action_url,
+    _resolve_global_addresses, coerce_egress_policy,
+)
 
 from .models import MAX_MEDIA_BYTES, DownloadMetadata, MediaError, _CloseOnce
 
@@ -31,11 +32,18 @@ def _remaining(clock: Callable[[], float], deadline: float) -> float:
     return value
 
 
-def _normalize_media_url(url: str) -> tuple[SplitResult, str, str]:
+def _normalized_target(media: ResolvedMedia, policy: EgressPolicy | PluginManifest | Iterable[str]) -> EgressTarget:
+    """Resolve one media URL against a policy, naming the offending layer.
+
+    The URL shape is refused as ``media_url_denied`` and a destination the
+    policy does not reach as ``media_host_denied``, so an operator can tell a
+    malformed plugin answer from a missing grant.
+    """
     try:
-        return _parse_https_url(url)
+        return _parse_action_url(media.url, coerce_egress_policy(policy))
     except ActionDenied as exc:
-        raise MediaTransportError("media_url_denied") from exc
+        raise MediaTransportError(
+            "media_host_denied" if exc.code == "host_denied" else "media_url_denied") from exc
 
 
 def _close_sync(value: object) -> None:
@@ -190,7 +198,7 @@ class SecureMediaTransport:
         self,
         media: ResolvedMedia,
         *,
-        allowed_hosts: Iterable[str],
+        policy: EgressPolicy | PluginManifest | Iterable[str],
         timeout_ms: int | None = None,
     ) -> DownloadMetadata:
         if timeout_ms is None:
@@ -198,19 +206,15 @@ class SecureMediaTransport:
         if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
             raise MediaTransportError("media_timeout")
         deadline = self.clock() + timeout_ms / 1000
-        parsed, approved, target = _normalize_media_url(media.url)
-        try:
-            allowed = {_normalize_host(value) for value in allowed_hosts}
-        except (TypeError, ValueError, UnicodeError) as exc:
-            raise MediaTransportError("media_host_denied") from exc
-        if approved not in allowed:
-            raise MediaTransportError("media_host_denied")
+        target = _normalized_target(media, policy)
+        approved, port = target.host, target.port
 
         raw = wrapped = response = None
         close_once: _CloseOnce | None = None
         try:
             try:
-                candidates = await self._run(lambda: _resolve_global_addresses(self.resolver, approved, 443), deadline)
+                candidates = await self._run(
+                    lambda: _resolve_global_addresses(self.resolver, approved, port), deadline)
             except ActionDenied as exc:
                 code = "media_address_denied" if exc.code == "address_denied" else "media_dns_failed"
                 raise MediaTransportError(code) from exc
@@ -234,21 +238,26 @@ class SecureMediaTransport:
                     raw = None
             if raw is None:
                 raise MediaTransportError("media_connect_failed")
-            try:
-                wrapped = await self._run_acquire(lambda: self.tls_wrap(raw, approved), deadline)
-            except MediaError:
-                raise
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                raise MediaTransportError("media_tls_failed") from exc
+            if target.secure:
+                try:
+                    wrapped = await self._run_acquire(lambda: self.tls_wrap(raw, approved), deadline)
+                except MediaError:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise MediaTransportError("media_tls_failed") from exc
+            else:
+                # Plain HTTP is a per-source operator grant. The socket still
+                # goes to the pinned address of one policy-approved host.
+                wrapped = raw
 
             def send_request() -> None:
                 remaining = _remaining(self.clock, deadline)
                 setter = getattr(wrapped, "settimeout", None)
                 if setter is not None:
                     setter(max(0.001, remaining))
-                request = (f"GET {target} HTTP/1.1\r\nHost: {approved}\r\n"
+                request = (f"GET {target.target} HTTP/1.1\r\nHost: {target.authority}\r\n"
                            "Accept: application/octet-stream\r\n"
                            "Accept-Encoding: identity\r\n"
                            "Connection: close\r\n\r\n").encode("ascii")
@@ -373,10 +382,3 @@ class SecureMediaTransport:
                 await closer.close()
             except BaseException:
                 pass
-
-
-def _normalize_host(value: str) -> str:
-    try:
-        return value.rstrip(".").encode("idna").decode("ascii").lower()
-    except (AttributeError, UnicodeError) as exc:
-        raise ValueError("invalid host") from exc

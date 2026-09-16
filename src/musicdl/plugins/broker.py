@@ -1,16 +1,21 @@
-"""Main-owned, DNS-pinned HTTPS transport for plugin HTTP actions."""
+"""Main-owned, DNS-pinned HTTP transport for plugin HTTP actions."""
 
 from __future__ import annotations
 
+import base64
 import http.client
 import ipaddress
 import socket
 import ssl
 import time
+from dataclasses import dataclass
 from urllib.parse import SplitResult, urlsplit
 from typing import Callable, Iterable
 
-from musicdl.contracts.plugin import MAX_ACTION_BODY_BYTES, HttpAction, HttpObservation
+from musicdl.contracts.plugin import (
+    DEFAULT_EGRESS_PORT, EgressPolicy, HttpAction, HttpObservation, MAX_ACTION_BODY_BYTES,
+    PluginManifest, literal_address,
+)
 
 
 class ActionDenied(Exception):
@@ -26,8 +31,50 @@ def _hostname(host: str) -> str:
         raise ActionDenied("url_denied", "invalid hostname")
 
 
-def _parse_https_url(url: str) -> tuple[SplitResult, str, str]:
-    """Validate a no-credential, implicit-port HTTPS URL and return its target."""
+@dataclass(frozen=True)
+class EgressTarget:
+    """One validated request target, already normalized for the socket."""
+
+    parsed: SplitResult
+    host: str
+    target: str
+    port: int
+    secure: bool
+
+    @property
+    def authority(self) -> str:
+        """The authority to put on the wire, with a non-default port spelled out."""
+        default = DEFAULT_EGRESS_PORT if self.secure else 80
+        return self.host if self.port == default else f"{self.host}:{self.port}"
+
+
+def coerce_egress_policy(value: EgressPolicy | PluginManifest | Iterable[str]) -> EgressPolicy:
+    """Accept a policy, a manifest, or a bare list of exact hosts.
+
+    The bare list is the strict shorthand the pre-policy callers used: implicit
+    HTTPS on port 443 and nothing else.
+    """
+    if isinstance(value, EgressPolicy):
+        return value
+    if isinstance(value, PluginManifest):
+        return value.egress
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        raise ActionDenied("host_denied", "an egress policy is required")
+    try:
+        hosts = tuple(sorted({_hostname(item) for item in value}))
+    except ActionDenied:
+        raise
+    except (TypeError, AttributeError) as exc:
+        raise ActionDenied("host_denied", "an egress policy is required") from exc
+    return EgressPolicy(allowed_hosts=hosts)
+
+
+def _parse_action_url(url: str, policy: EgressPolicy) -> EgressTarget:
+    """Validate one action URL against a policy and return its target.
+
+    Every refusal names the policy field that would have to change, so an
+    operator reading a denial knows which opt-in the source is missing.
+    """
     if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in url):
         raise ActionDenied("url_denied", "URL contains whitespace or controls")
     try:
@@ -36,16 +83,40 @@ def _parse_https_url(url: str) -> tuple[SplitResult, str, str]:
         port = parsed.port
     except (TypeError, ValueError, UnicodeError):
         raise ActionDenied("url_denied", "malformed URL")
-    if (parsed.scheme != "https" or not host or parsed.username is not None or
-            parsed.password is not None or parsed.fragment or port is not None):
-        raise ActionDenied("url_denied", "only implicit-port HTTPS URLs are allowed")
+    if (parsed.scheme not in ("http", "https") or not host or parsed.username is not None or
+            parsed.password is not None or parsed.fragment):
+        raise ActionDenied("url_denied", "only absolute http or https URLs are allowed")
+    secure = parsed.scheme == "https"
+    if not secure and not policy.allow_insecure_http:
+        raise ActionDenied("scheme_denied", "plain HTTP is not allowlisted for this source")
+    effective_port = port if port is not None else (DEFAULT_EGRESS_PORT if secure else 80)
+    # The scheme's own default port comes with the scheme grant; an explicit
+    # port is a destination of its own and has to be listed.
+    if port is not None and effective_port not in policy.allowed_ports:
+        raise ActionDenied("port_denied", "port is not allowlisted for this source")
     approved = _hostname(host)
+    if literal_address(approved) is not None and not policy.allow_ip_hosts:
+        raise ActionDenied("host_denied", "IP literals are not allowlisted for this source")
+    if not policy.permits(approved):
+        raise ActionDenied("host_denied", "host is not allowlisted")
     target = parsed.path or "/"
     if parsed.query:
         target += "?" + parsed.query
     if not target.isascii() or any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in target):
         raise ActionDenied("url_denied", "request target contains non-ASCII, whitespace, or controls")
-    return parsed, approved, target
+    return EgressTarget(parsed=parsed, host=approved, target=target, port=effective_port, secure=secure)
+
+
+def _request_bytes(action: HttpAction, target: EgressTarget) -> bytes:
+    """Serialize one action; the plugin supplies data, never framing."""
+    lines = [f"{action.method} {target.target} HTTP/1.1", f"Host: {target.authority}", "Connection: close"]
+    if "accept" not in {name.lower() for name in action.headers}:
+        lines.append("Accept: application/json")
+    body = base64.b64decode(action.body) if action.body else b""
+    if body:
+        lines.append(f"Content-Length: {len(body)}")
+    lines.extend(f"{name}: {item}" for name, item in action.headers.items())
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + body
 
 
 def _resolve_global_addresses(resolver: Callable, host: str, port: int) -> list[tuple[int, tuple]]:
@@ -94,18 +165,16 @@ class HttpsActionBroker:
     def _connect(address, timeout):
         return socket.create_connection(address, timeout=timeout)
 
-    def fetch(self, action: HttpAction, allowed_hosts: Iterable[str], *, timeout: float | None = None) -> HttpObservation:
+    def fetch(self, action: HttpAction, policy: EgressPolicy | PluginManifest | Iterable[str], *,
+              timeout: float | None = None) -> HttpObservation:
         request_timeout = self.timeout if timeout is None else min(self.timeout, max(0.001, timeout))
         deadline = time.monotonic() + request_timeout
-        parsed, approved, target = _parse_https_url(action.url)
-        allowed = {_hostname(item) for item in allowed_hosts}
-        if approved not in allowed:
-            raise ActionDenied("host_denied", "host is not allowlisted")
+        target = _parse_action_url(action.url, coerce_egress_policy(policy))
 
         try:
             # A synchronous resolver cannot be interrupted; callers still enforce
             # the outer deadline and this check bounds connect/read work.
-            candidates = _resolve_global_addresses(self.resolver, approved, 443)
+            candidates = _resolve_global_addresses(self.resolver, target.host, target.port)
             if time.monotonic() >= deadline:
                 raise ActionDenied("timeout", "action timed out")
         except ActionDenied:
@@ -126,10 +195,15 @@ class HttpsActionBroker:
                     raw = None
             if raw is None:
                 raise ActionDenied("connect_error", "connection failed")
-            try:
-                wrapped = self.ssl_context.wrap_socket(raw, server_hostname=approved)
-            except Exception as exc:
-                raise ActionDenied("tls_error", "TLS negotiation failed") from exc
+            if target.secure:
+                try:
+                    wrapped = self.ssl_context.wrap_socket(raw, server_hostname=target.host)
+                except Exception as exc:
+                    raise ActionDenied("tls_error", "TLS negotiation failed") from exc
+            else:
+                # Plain HTTP is an explicit per-source opt-in; it still reaches
+                # only the resolved, policy-approved address of one exact host.
+                wrapped = raw
             def apply_deadline_timeout() -> None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -139,8 +213,7 @@ class HttpsActionBroker:
                 except OSError as exc:
                     raise ActionDenied("connect_error", "connection failed") from exc
             apply_deadline_timeout()
-            wrapped.sendall((f"GET {target} HTTP/1.1\r\nHost: {approved}\r\n"
-                             "Accept: application/json\r\nConnection: close\r\n\r\n").encode("ascii"))
+            wrapped.sendall(_request_bytes(action, target))
             apply_deadline_timeout()
             response = http.client.HTTPResponse(wrapped)
             response.begin()
@@ -168,7 +241,6 @@ class HttpsActionBroker:
             apply_deadline_timeout()
             if len(body) > MAX_ACTION_BODY_BYTES:
                 raise ActionDenied("body_too_large", "response body exceeds 1 MiB")
-            import base64
             return HttpObservation(action_id=action.action_id, status_code=response.status,
                                    headers=selected, body=base64.b64encode(body).decode("ascii"))
         except ActionDenied:

@@ -13,10 +13,10 @@ def test_deno_source_disables_process_escape():
  assert 'Object.defineProperty(globalThis,"process",{value:undefined,writable:false,configurable:false})' in text
  assert 'const process=undefined;' in text
 def test_deno_command_exact():
- source="function handle(r){return {hits:[]}}"
- inv=PluginInvocation(manifest=PluginManifest(plugin_id="p",version="1",language="javascript",operations=("search",),sha256=hashlib.sha256(source.encode()).hexdigest()),source=source,request=PluginRequest(protocol="musicdl.plugin/v1",request_id=uuid4(),operation="search"))
- c=build_host_command(inv)
- assert c.argv[1:]==["run","--quiet","--no-config","--no-lock","--no-npm","--cached-only","--v8-flags=--max-old-space-size=128","-"] and c.env=={"DENO_NO_PROMPT":"1"}
+    source="function handle(r){return {hits:[]}}"
+    inv=PluginInvocation(manifest=PluginManifest(plugin_id="p",version="1",language="javascript",operations=("search",),sha256=hashlib.sha256(source.encode()).hexdigest()),source=source,request=PluginRequest(protocol="musicdl.plugin/v1",request_id=uuid4(),operation="search"))
+    c=build_host_command(inv)
+    assert c.argv[1:]==["run","--quiet","--no-config","--no-lock","--no-npm","--cached-only","--v8-flags=--max-old-space-size=128","-"] and c.env=={"DENO_NO_PROMPT":"1"}
 def _invocation(source):
  return PluginInvocation(manifest=PluginManifest(plugin_id="p",version="1",language="javascript",operations=("search",),sha256=hashlib.sha256(source.encode()).hexdigest()),source=source,request=PluginRequest(protocol="musicdl.plugin/v1",request_id=uuid4(),operation="search"))
 
@@ -41,11 +41,30 @@ def test_deno_action_runtime_when_available():
  assert step.action and step.action.action_id == "a1"
 
 @pytest.mark.parametrize("value", [
- "{action:{action_id:'a1',method:'POST',url:'https://example.com'}}",
+ # The host mirrors the contract's shape rules.  Policy -- which hosts, which
+ # schemes, which ports -- belongs to the broker, so these are well formed here
+ # and refused later if the manifest does not allow them.
+ "{action:{action_id:'a1',method:'POST',url:'https://example.com',body:'e30='}}",
  "{action:{action_id:'a1',method:'GET',url:'http://example.com'}}",
  "{action:{action_id:'a1',method:'GET',url:'https://example.com:444'}}",
+ "{action:{action_id:'a1',method:'POST',url:'https://example.com'}}",
+ "{action:{action_id:'a1',method:'POST',url:'https://example.com',headers:{'X-Token':'t'},body:'e30='}}",
+])
+def test_deno_wellformed_action_is_accepted(value):
+ if not shutil.which("deno"): pytest.skip("Deno executable unavailable")
+ from musicdl_plugin_runner.supervisor import Supervisor
+ step=asyncio.run(Supervisor(build_host_command).execute(_invocation(f"function handle(r){{return {value}}}")))
+ assert step.action is not None and step.action.action_id == "a1"
+
+
+@pytest.mark.parametrize("value", [
  "{action:{action_id:'a1',method:'GET',url:'https://u:p@example.com'}}",
  "{action:{action_id:'a1',method:'GET',url:'https://example.com',extra:1}}",
+ "{action:{action_id:'a1',method:'GET',url:'https://example.com',body:'e30='}}",
+ "{action:{action_id:'a1',method:'DELETE',url:'https://example.com'}}",
+ "{action:{action_id:'a1',method:'GET',url:'https://example.com',headers:['X-Token']}}",
+ "{action:{action_id:'a1',method:'GET',url:'https://example.com',headers:{'X-Token':'a\\nb'}}}",
+ "{action:{action_id:'a1',method:'GET',url:'https://example.com',headers:{'Bad Header':'x'}}}",
 ])
 def test_deno_malformed_action_is_plugin_error(value):
  if not shutil.which("deno"): pytest.skip("Deno executable unavailable")

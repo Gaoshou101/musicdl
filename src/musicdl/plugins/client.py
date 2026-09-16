@@ -216,7 +216,7 @@ class PluginClient:
                     raise RuntimeError("runner_timeout")
                 try:
                     observation = await asyncio.to_thread(
-                        self.broker.fetch, action, stored.manifest.allowed_hosts, timeout=remaining)
+                        self.broker.fetch, action, stored.manifest.egress, timeout=remaining)
                 except ActionDenied as exc:
                     raise RuntimeError("runner_timeout" if exc.code == "timeout" else "action_denied") from exc
                 except Exception as exc:

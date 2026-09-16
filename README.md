@@ -29,8 +29,9 @@ JavaScript environment. Python plugins run in a one-shot subprocess with restric
 builtins, seccomp, resource limits, and no inherited environment. JavaScript plugins
 run in Deno with all permissions denied. Plugins cannot read host/container files,
 spawn processes, open sockets, or use the Docker socket. Network access is represented
-by HTTPS actions handled by the main service's exact-host broker; the runner itself
-has no egress.
+by HTTP actions handled by the main service's broker; the runner itself has no egress.
+The broker applies the source's egress policy, and the policy narrows back to
+`https` on port 443 to an exact host list unless the manifest explicitly grants more.
 
 A manifest names the language, operations, SHA-256 source digest, and exact allowed
 hosts, for example:
@@ -41,12 +42,29 @@ hosts, for example:
  "sha256":"<64 lowercase hex characters>"}
 ```
 
+A manifest may also carry four per-source grants, each of which is an operator
+decision rather than something a script can assert about itself:
+
+- `allowed_ports` lists explicitly stated ports; the default port of an allowed
+  scheme comes with that scheme.
+- `allow_insecure_http` permits `http` in addition to `https`.
+- `allow_ip_hosts` permits an address literal in place of a DNS name.
+- `allow_any_host` drops the host allowlist for that one source.
+
+`allow_any_host` is the widest and the least protective: a source that needs it
+can be pointed at any host the deployment can reach, so it is only reasonable for a
+script whose endpoints cannot be derived by reading it, and the analysis requires an
+explicit grant for it. `POST /admin/sources` reports every granted widening back in
+its `plugin.egress`, so an operator can see exactly what is in force.
+
 The supported entry point is a `handle(request)` function. A plugin may return a
-JSON-compatible result or one HTTPS `GET` action at a time; the main action loop
-supplies bounded observations. Source is limited to 128 KiB, payload/result to 64 KiB,
-invocations to 6 MiB, and at most four HTTP actions/observations. Jobs are limited to
-30 seconds wall time, 5 seconds CPU, 256 MiB Python address space (128 MiB Deno heap),
-1 MiB file size, 32 file descriptors, 64 KiB stdout, and 16 KiB stderr.
+JSON-compatible result or one HTTP `GET`/`POST` action at a time; the main action loop
+supplies bounded observations. An action may name headers and, for `POST`, a base64
+body, but never the request line, `Host`, or any framing header. Source is limited to
+256 KiB, payload/result to 64 KiB, invocations to 16 MiB, and at most eight HTTP
+actions/observations. Jobs are limited to 30 seconds wall time, 5 seconds CPU,
+256 MiB Python address space (128 MiB Deno heap), 1 MiB file size, 32 file
+descriptors, 64 KiB stdout, and 16 KiB stderr.
 
 A plugin reports search results, and for a confirmed candidate it answers `resolve`
 with a media descriptor instead of returning bytes. The manifest may still name a
@@ -61,18 +79,19 @@ when Docker Engine is unavailable.
 
 ## Plugin download boundary
 
-A `resolve` result is a five-field descriptor: the selected `candidate_id`, an
-implicit-port `https` `url`, an `extension`, a `media_type`, and an optional
+A `resolve` result is a five-field descriptor: the selected `candidate_id`, an absolute
+`http` or `https` `url`, an `extension`, a `media_type`, and an optional
 `declared_size`. The descriptor must match the media type implied by its extension and
-stay bound to the `item_id` of the candidate the user confirmed; credentials, an
-explicit port, a fragment, or a mismatched pair is rejected. Media bytes never travel
-through plugin stdout.
+stay bound to the `item_id` of the candidate the user confirmed; credentials, a
+fragment, an out-of-range port, or a mismatched pair is rejected. Media bytes never
+travel through plugin stdout.
 
 The main process owns the transfer. `SecureMediaTransport` normalizes the host through
-IDNA, matches it against the manifest's exact `allowed_hosts`, resolves all A/AAAA
+IDNA, applies the manifest's whole egress policy to the URL, resolves all A/AAAA
 answers itself, rejects every non-global address, then connects to the pinned numeric
 address while keeping the approved hostname for TLS SNI, certificate verification, and
-the `Host` header. It sends no ambient credentials, ignores proxy settings, never
+the `Host` header. A plain-HTTP URL is sent unnegotiated, and only when that source
+carries the grant. It sends no ambient credentials, ignores proxy settings, never
 follows redirects, bounds the response, and closes the socket.
 `PluginSource.download()` composes that typed `resolve` with that transport, so a
 plugin-backed download never calls the manifest's compatibility `download` operation.

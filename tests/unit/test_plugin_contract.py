@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from musicdl.contracts.plugin import (
     ArtifactResult,
+    EgressPolicy,
     PluginRequest,
     PluginResponse,
     HttpAction,
@@ -15,6 +16,8 @@ from musicdl.contracts.plugin import (
     PluginInvocation,
     PluginManifest,
     PluginStep,
+    MAX_HTTP_ACTIONS,
+    MAX_SOURCE_BYTES,
     PROTOCOL,
 )
 
@@ -143,7 +146,7 @@ def test_restricted_plugin_invocation_rejects_source_digest_operation_and_action
     with pytest.raises(ValidationError):
         _invocation(source="bad\x00source")
     with pytest.raises(ValidationError):
-        _invocation(source="x" * (128 * 1024 + 1))
+        _invocation(source="x" * (MAX_SOURCE_BYTES + 1))
     with pytest.raises(ValidationError):
         _invocation(manifest=_manifest(sha256="b" * 64))
     with pytest.raises(ValidationError):
@@ -152,18 +155,86 @@ def test_restricted_plugin_invocation_rejects_source_digest_operation_and_action
     observation = HttpObservation(action_id="a1", status_code=200, body=base64.b64encode(b"ok").decode())
     assert _invocation(actions=(action,), observations=(observation,)).actions[0] == action
     with pytest.raises(ValidationError):
-        HttpAction(action_id="a1", method="POST", url="https://api.example.com/search")
+        HttpAction(action_id="a1", method="PUT", url="https://api.example.com/search")
     with pytest.raises(ValidationError):
         HttpObservation(action_id="a1", status_code=200, body=base64.b64encode(b"x" * (1024 * 1024 + 1)).decode())
-    actions = tuple(HttpAction(action_id=f"a{i}", method="GET", url="https://api.example.com/search") for i in range(5))
+    actions = tuple(HttpAction(action_id=f"a{i}", method="GET", url="https://api.example.com/search") for i in range(MAX_HTTP_ACTIONS + 1))
     with pytest.raises(ValidationError):
         _invocation(actions=actions)
     with pytest.raises(ValidationError):
         _invocation(actions=(action,), observations=(HttpObservation(action_id="missing", status_code=200),))
-    four_actions = tuple(HttpAction(action_id=f"b{i}", method="GET", url="https://api.example.com/search") for i in range(4))
-    five_observations = tuple(HttpObservation(action_id="b0", status_code=200) for _ in range(5))
+    full_actions = tuple(HttpAction(action_id=f"b{i}", method="GET", url="https://api.example.com/search") for i in range(MAX_HTTP_ACTIONS))
+    assert len(_invocation(actions=full_actions).actions) == MAX_HTTP_ACTIONS
+    excessive_observations = tuple(HttpObservation(action_id="b0", status_code=200) for _ in range(MAX_HTTP_ACTIONS + 1))
     with pytest.raises(ValidationError):
-        _invocation(actions=four_actions, observations=five_observations)
+        _invocation(actions=full_actions, observations=excessive_observations)
+
+
+def test_the_strict_egress_policy_is_the_default():
+    egress = _manifest().egress
+
+    assert egress == EgressPolicy(allowed_hosts=("api.example.com",))
+    assert egress.permits("api.example.com") and not egress.permits("other.example")
+    assert egress.allowed_ports == (443,) and egress.allow_insecure_http is False
+
+
+def test_every_widening_is_a_separate_manifest_decision():
+    assert _manifest(allow_any_host=True).egress.permits("other.example")
+    assert _manifest(allowed_hosts=("103.79.184.97",), allow_ip_hosts=True).egress.permits("103.79.184.97")
+    assert _manifest(allow_insecure_http=True).egress.allow_insecure_http is True
+    assert _manifest(allowed_ports=(443, 8928)).egress.allowed_ports == (443, 8928)
+    # An address literal is refused until the manifest says otherwise.
+    with pytest.raises(ValidationError):
+        _manifest(allowed_hosts=("103.79.184.97",))
+    for ports in ((0,), (65536,), (443, 443), ()):
+        with pytest.raises(ValidationError):
+            _manifest(allowed_ports=ports)
+
+
+def test_an_action_url_is_checked_for_shape_not_for_policy():
+    # The broker owns the policy, so the contract only rejects what could not be
+    # a request at all.
+    assert HttpAction(action_id="a1", method="GET", url="http://api.example.com:8928/x").url.endswith("/x")
+    for url in ("ftp://api.example.com/x", "https://u:p@api.example.com/x", "https://api.example.com/x#f"):
+        with pytest.raises(ValidationError):
+            HttpAction(action_id="a1", method="GET", url=url)
+
+
+@pytest.mark.parametrize("headers", [
+    {"Host": "other.example"},
+    {"Content-Length": "5"},
+    {"Transfer-Encoding": "chunked"},
+    {"Connection": "keep-alive"},
+    {"Bad Header": "x"},
+    {"X-Token": "a\r\nInjected: 1"},
+    {"X-Token": "a" * 1025},
+    {"X-Token": "协议"},
+    {"X-1": "a", "x-1": "b"},
+])
+def test_unsafe_request_headers_are_rejected(headers):
+    with pytest.raises(ValidationError):
+        HttpAction(action_id="a1", method="POST", url="https://api.example.com/x", headers=headers)
+
+
+def test_a_post_body_is_bounded_and_never_rides_on_get():
+    body = base64.b64encode(b'{"kw":"x"}').decode()
+    assert HttpAction(action_id="a1", method="POST", url="https://api.example.com/x", body=body).body == body
+    with pytest.raises(ValidationError):
+        HttpAction(action_id="a1", method="GET", url="https://api.example.com/x", body=body)
+    with pytest.raises(ValidationError):
+        HttpAction(action_id="a1", method="POST", url="https://api.example.com/x", body="not base64!")
+    with pytest.raises(ValidationError):
+        HttpAction(action_id="a1", method="POST", url="https://api.example.com/x",
+                   body=base64.b64encode(b"x" * (64 * 1024 + 1)).decode())
+
+
+def test_a_widened_policy_survives_a_round_trip_through_the_manifest():
+    manifest = _manifest(allowed_hosts=("api.example.com", "103.79.184.97"), allow_any_host=True,
+                         allow_insecure_http=True, allow_ip_hosts=True, allowed_ports=(443, 8928))
+
+    restored = PluginManifest.model_validate(manifest.model_dump(mode="json"))
+
+    assert restored.egress == manifest.egress
 
 
 def test_plugin_step_requires_exactly_one_response_or_action():
@@ -220,14 +291,13 @@ def test_resolved_media_rejects_unknown_fields(field):
 @pytest.mark.parametrize(
     "url",
     (
-        "http://media.example.test/song.mp3",
         "ftp://media.example.test/song.mp3",
         "//media.example.test/song.mp3",
         "https://user:password@media.example.test/song.mp3",
         "https://user@media.example.test/song.mp3",
         "https://media.example.test/song.mp3#fragment",
-        "https://media.example.test:443/song.mp3",
-        "https://media.example.test:8443/song.mp3",
+        "https://media.example.test:0/song.mp3",
+        "https://media.example.test:70000/song.mp3",
         "https://media.example.test/song.mp3\n",
         "https://media.example.test/song.mp3\t",
         "https://media.example.test/song.mp3\x00",
@@ -237,6 +307,23 @@ def test_resolved_media_rejects_unknown_fields(field):
 def test_resolved_media_rejects_unsafe_urls(url):
     with pytest.raises(ValidationError):
         _resolved_media(url=url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://media.example.test/song.mp3",
+        "https://media.example.test:443/song.mp3",
+        "https://media.example.test:8443/song.mp3",
+        "http://103.79.184.97/song.mp3",
+    ),
+)
+def test_resolved_media_accepts_urls_the_egress_policy_decides_on(url):
+    # Which destinations are reachable is the manifest's egress policy, enforced
+    # by the media transport.  The descriptor itself only has to be a
+    # well-formed absolute URL, so these parse and are refused later, with the
+    # grant the operator would have to give named in the refusal.
+    assert _resolved_media(url=url).url == url
 
 
 @pytest.mark.parametrize(

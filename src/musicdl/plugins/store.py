@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable
 
 from musicdl.contracts import MAX_SOURCE_BYTES, PluginLanguage, PluginManifest
-from musicdl.contracts.plugin import Operation
+from musicdl.contracts.plugin import DEFAULT_EGRESS_PORT, Operation
 
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -134,6 +134,10 @@ class PluginStore:
         language: PluginLanguage,
         operations: Iterable[Operation],
         allowed_hosts: Iterable[str],
+        allowed_ports: Iterable[int] = (DEFAULT_EGRESS_PORT,),
+        allow_insecure_http: bool = False,
+        allow_ip_hosts: bool = False,
+        allow_any_host: bool = False,
         source: str,
     ) -> StoredPlugin:
         self._validate_id(plugin_id)
@@ -147,6 +151,10 @@ class PluginStore:
             language=language,
             operations=tuple(operations),
             allowed_hosts=tuple(allowed_hosts),
+            allowed_ports=tuple(allowed_ports),
+            allow_insecure_http=allow_insecure_http,
+            allow_ip_hosts=allow_ip_hosts,
+            allow_any_host=allow_any_host,
             sha256=digest,
         )
         suffix = ".py" if language == "python" else ".js"

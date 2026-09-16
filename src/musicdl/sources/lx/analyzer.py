@@ -1,12 +1,16 @@
 """Static capability analysis for lx-music custom source scripts.
 
-The plugin egress contract served by ``musicdl.plugins.broker`` is exact: HTTPS
-GET requests to named DNS hosts on port 443, filtered by a per-source allowlist
-taken from the plugin manifest.  A custom source may therefore only be installed
-once this analysis shows that the endpoints the script declares fit that
-contract, because the broker denies every host the analysis failed to derive.  A
-miss is fail-closed, so the point of this module is to make the *reason* for each
-refusal traceable to the script text instead of to a guess.
+The broker enforces a per-source egress policy.  Its strict default is HTTPS to
+named DNS hosts on port 443, and every widening -- plain HTTP, an address
+literal, a non-standard port, or "any host at all" -- is a separate operator
+decision recorded on the manifest.
+
+This module decides which of those decisions a script *needs*, and refuses only
+what no policy could make work.  The split matters: "the script builds an
+``http://`` URL" is a policy question the operator can answer, while "the script
+calls ``method: 'PUT'``" is not, because the broker performs GET and POST only.
+A refusal always names the text that produced it, and a requirement always names
+the opt-in that satisfies it, so an install either succeeds or explains itself.
 
 Nothing here executes the script.
 """
@@ -20,6 +24,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from musicdl.contracts import MAX_SOURCE_BYTES
+from musicdl.contracts.plugin import (
+    DEFAULT_EGRESS_PORT, SUPPORTED_HTTP_METHODS, literal_address,
+)
 
 Verdict = Literal["installable", "blocked"]
 
@@ -33,9 +40,13 @@ _HOSTLIKE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9
 _DYNAMIC_HOST_CHARS = frozenset("${}+~,|^=%?*!")
 _METADATA_FIELDS = frozenset({"name", "version", "author", "license", "homepage", "description"})
 
-# The broker implements exactly one method, so anything else is unsupported by
-# construction rather than by policy.
-_SUPPORTED_METHODS = frozenset({"get"})
+# The broker implements GET and POST.  A ``method`` property holding any *other*
+# registered HTTP verb is a refusal, because no policy setting can satisfy it.
+# A name outside the registry is not an HTTP verb at all -- sources spell their
+# own helpers ``CGIGETVKEY`` -- so it is not treated as one.
+_SUPPORTED_METHODS = frozenset(name.lower() for name in SUPPORTED_HTTP_METHODS)
+_UNSUPPORTED_HTTP_METHODS = frozenset({"put", "delete", "patch", "head", "options", "trace", "connect"})
+_AUTHORITY_PREFIX = re.compile(r"^[A-Za-z0-9.:\-\[\]%~]*")
 
 
 @dataclass(frozen=True)
@@ -66,8 +77,23 @@ class LxAnalysis:
     schemes: tuple[str, ...] = ()
     methods: tuple[str, ...] = ()
     dynamic_endpoints: tuple[str, ...] = ()
+    ip_hosts: tuple[str, ...] = ()
+    ports: tuple[int, ...] = ()
+    insecure_http: bool = False
+    open_egress: bool = False
+    opaque: bool = False
     blockers: tuple[LxFinding, ...] = ()
     caveats: tuple[LxFinding, ...] = ()
+
+    @property
+    def lx_shaped(self) -> bool:
+        """Whether this is an lx custom source, readable or not.
+
+        An escaped string table hides the ``globalThis.lx`` reference itself, so
+        an unreadable script is routed as a candidate lx source rather than as
+        an unrelated module.  ``opaque`` marks exactly that case.
+        """
+        return self.uses_lx_global or bool(self.events) or self.opaque
 
     @property
     def verdict(self) -> Verdict:
@@ -93,6 +119,32 @@ class LxAnalysis:
         """
         return tuple(sorted(set(self.endpoints) | set(self.referenced_hosts)))
 
+    @property
+    def allowed_ports(self) -> tuple[int, ...]:
+        """The ports the manifest must list for this script to reach anything."""
+        return tuple(sorted({DEFAULT_EGRESS_PORT, *self.ports}))
+
+    @property
+    def required_grants(self) -> dict[str, Any]:
+        """The manifest opt-ins this script needs, and nothing it does not.
+
+        The portal must echo these back before the install succeeds, so a
+        widened policy is always one deliberate operator decision per source
+        rather than a side effect of importing a file.
+        """
+        grants: dict[str, Any] = {}
+        if self.insecure_http:
+            grants["allow_insecure_http"] = True
+        if self.ip_hosts:
+            grants["allow_ip_hosts"] = True
+        if self.open_egress:
+            # Endpoints this analysis cannot derive are endpoints the strict
+            # allowlist cannot cover, so the only alternative is refusal.
+            grants["allow_any_host"] = True
+        if self.ports:
+            grants["allowed_ports"] = list(self.allowed_ports)
+        return grants
+
     def summary(self) -> dict[str, Any]:
         return {"name": self.name, "version": self.version, "author": self.author,
                 "license": self.license, "homepage": self.homepage,
@@ -102,6 +154,10 @@ class LxAnalysis:
                 "referenced_hosts": list(self.referenced_hosts),
                 "allowed_hosts": list(self.allowed_hosts), "schemes": list(self.schemes),
                 "methods": list(self.methods), "dynamic_endpoints": list(self.dynamic_endpoints),
+                "ip_hosts": list(self.ip_hosts), "allowed_ports": list(self.allowed_ports),
+                "insecure_http": self.insecure_http, "open_egress": self.open_egress,
+                "opaque": self.opaque,
+                "required_grants": self.required_grants,
                 "blockers": [{"code": item.code, "detail": item.detail} for item in self.blockers],
                 "caveats": [{"code": item.code, "detail": item.detail} for item in self.caveats]}
 
@@ -197,22 +253,32 @@ def _template_hole_end(source: str, index: int) -> int:
     return index
 
 
-def _host_from_url(rest: str) -> tuple[str, bool]:
-    """Return ``(host, dynamic)`` for the authority part of an absolute URL."""
-    authority = re.split(r"[/?#]", rest, maxsplit=1)[0].split("@")[-1]
-    if ":" in authority:
-        authority = authority.split(":", 1)[0]
-    dynamic = not authority or any(char in authority for char in _DYNAMIC_HOST_CHARS)
-    return authority.lower(), dynamic
+def _host_and_port(rest: str) -> tuple[str, str, bool]:
+    """Return ``(host, port, dynamic)`` for the authority of an absolute URL.
+
+    A URL inside prose runs straight on into the next word -- one analysed
+    source writes ``//去http://api-v2.yuafeng.cn注册`` -- so the authority ends
+    at the first character a host cannot contain.
+    """
+    raw = re.split(r"[/?#]", rest, maxsplit=1)[0].split("@")[-1]
+    authority = _AUTHORITY_PREFIX.match(raw).group(0)
+    if authority.startswith("["):
+        host, _, remainder = authority.partition("]")
+        host, port = host + "]", remainder[1:] if remainder.startswith(":") else ""
+    else:
+        host, _, port = authority.rpartition(":")
+        if not host:
+            host, port = authority, ""
+    dynamic = not host or any(char in host for char in _DYNAMIC_HOST_CHARS)
+    return host.lower(), port, dynamic
 
 
 def _classify_host(host: str) -> LxFinding | None:
-    try:
-        ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        pass
-    else:
-        return LxFinding("ip_literal_host", f"endpoint {host!r} is an IP literal with no DNS name to pin")
+    """Return the refusal a named host deserves, or ``None`` when it is usable.
+
+    An address literal is deliberately absent: it is an exact target the policy
+    can allow, so ``allow_ip_hosts`` answers for it rather than a refusal.
+    """
     try:
         ascii_host = host.encode("idna").decode("ascii")
     except UnicodeError:
@@ -236,12 +302,19 @@ def analyze_source(source: str, *, path: str | None = None) -> LxAnalysis:
     endpoints: set[str] = set()
     dynamic: set[str] = set()
     schemes: set[str] = set()
+    ports: set[int] = set()
+    dynamic_ports: set[str] = set()
     for match in _URL.finditer(code):
         schemes.add(match.group("scheme").lower())
-        host, is_dynamic = _host_from_url(match.group("rest"))
+        host, port, is_dynamic = _host_and_port(match.group("rest"))
         if is_dynamic:
             dynamic.add(match.group(0))
             continue
+        if port:
+            if port.isdigit() and 0 < int(port) <= 65535:
+                ports.add(int(port))
+            else:
+                dynamic_ports.add(port)
         endpoints.add(host)
 
     referenced = {value.strip().lower() for value in string_literals(code)
@@ -255,21 +328,39 @@ def analyze_source(source: str, *, path: str | None = None) -> LxAnalysis:
     if len(source_bytes) > MAX_SOURCE_BYTES:
         blockers.append(LxFinding("source_too_large",
                                   f"{len(source_bytes)} bytes exceeds the {MAX_SOURCE_BYTES} byte plugin limit"))
-    if not uses_lx_global and not events:
+    obfuscated = bool(_ESCAPED.search(code))
+    if not uses_lx_global and not events and not obfuscated:
         blockers.append(LxFinding("unsupported_shape",
                                   "script neither reads globalThis.lx nor registers an lx event handler"))
-    if _ESCAPED.search(code):
-        blockers.append(LxFinding("obfuscated_strings",
-                                  "string table is stored as escaped code points, so no endpoint can be derived"))
-    if "http" in schemes:
-        blockers.append(LxFinding("plain_http", "script builds plain http:// URLs, which the broker refuses"))
+    if obfuscated:
+        # Escaped code points hide every endpoint.  That is no longer a refusal,
+        # because the policy can carry the one grant that makes it work; it is
+        # the reason the grant is required.
+        caveats.append(LxFinding("opaque_script",
+                                 "string table is stored as escaped code points, so no endpoint can be derived"))
+    insecure_http = "http" in schemes
+    if insecure_http:
+        caveats.append(LxFinding("plain_http_endpoint",
+                                 "script builds plain http:// URLs and needs the allow_insecure_http grant"))
     for host in sorted(endpoints):
+        if literal_address(host.strip("[]")) is not None:
+            continue
         finding = _classify_host(host)
         if finding is not None:
             blockers.append(finding)
-    for method in sorted(methods - _SUPPORTED_METHODS):
+    ip_hosts = tuple(sorted(host for host in endpoints if literal_address(host.strip("[]")) is not None))
+    if ip_hosts:
+        caveats.append(LxFinding("ip_literal_endpoint",
+                                 "script names addresses rather than names and needs the allow_ip_hosts grant"))
+    for method in sorted(methods & _UNSUPPORTED_HTTP_METHODS):
         blockers.append(LxFinding("unsupported_method",
-                                  f"script selects method {method.upper()!r}; the broker only performs GET"))
+                                  f"script selects method {method.upper()!r}; the broker performs GET and POST"))
+    if ports:
+        caveats.append(LxFinding("explicit_port",
+                                 f"script names port(s) {sorted(ports)} and needs them on allowed_ports"))
+    for value in sorted(dynamic_ports):
+        caveats.append(LxFinding("dynamic_port",
+                                 f"port {value!r} is not a fixed number this analysis can allowlist"))
     for value in sorted(dynamic):
         # Not a refusal: the broker only ever reaches hosts on the derived
         # allowlist, so an unlisted host fails closed at request time.
@@ -278,8 +369,10 @@ def analyze_source(source: str, *, path: str | None = None) -> LxAnalysis:
     if not endpoints and referenced:
         caveats.append(LxFinding("literal_hosts_only",
                                  "every endpoint comes from bare domain literals rather than absolute URLs"))
-    if not endpoints and not referenced:
-        blockers.append(LxFinding("no_endpoints", "script declares no endpoint this analysis can derive"))
+    open_egress = obfuscated or (not endpoints and not referenced)
+    if not endpoints and not referenced and not obfuscated:
+        caveats.append(LxFinding("undecidable_endpoints",
+                                 "script declares no endpoint this analysis can derive and needs the allow_any_host grant"))
 
     return LxAnalysis(
         sha256=hashlib.sha256(source_bytes).hexdigest(), size_bytes=len(source_bytes), path=path,
@@ -289,6 +382,8 @@ def analyze_source(source: str, *, path: str | None = None) -> LxAnalysis:
         events=tuple(sorted(events)), endpoints=tuple(sorted(endpoints)),
         referenced_hosts=tuple(sorted(referenced)), schemes=tuple(sorted(schemes)),
         methods=tuple(sorted(methods)), dynamic_endpoints=tuple(sorted(dynamic)),
+        ip_hosts=ip_hosts, ports=tuple(sorted(ports)), insecure_http=insecure_http,
+        open_egress=open_egress, opaque=obfuscated,
         blockers=tuple(blockers), caveats=tuple(caveats))
 
 
