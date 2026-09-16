@@ -40,7 +40,7 @@
 
 ## Phase 3 — Telegram user-account connector gate
 
-**Status:** Code and controlled tests completed on 2026-09-12; commits `bd91dc4` and `3185d82`. Live Telegram account login, target Bot behavior, proxy path, and service limits remain deployment-environment validation gates and are not claimed as observed. **Open gap:** the connector and its Bot adapters are not registered into the application runtime, so an enabled Telegram deployment reports unhealthy by design, and no configuration surface exists for a Bot username or command template. Summary: `.planning/phases/03-telegram-connector/SUMMARY.md`.
+**Status:** Code and controlled tests completed on 2026-09-12; commits `bd91dc4` and `3185d82`. The connector and its Bot adapters are now registered into the application runtime, and the Bot definitions are owned by the administration portal (PR #25: `44e9428`, `562b483`, `77baba9`, merged as `aece024`), so an enabled Telegram deployment builds one search source per enabled definition and the portal reports its real dependency health instead of treating an enabled deployment as permanently unhealthy. **Remaining:** live Telegram account login, target Bot behavior, proxy path, and service limits are still deployment-environment validation gates and are not claimed as observed; and the shipped response decoder covers only the contract where a Bot answers a search command by sending the audio file, so a Bot that replies with a text list needs its own decoder. Summary: `.planning/phases/03-telegram-connector/SUMMARY.md`.
 
 **Goal:** 完成 Telegram 用户账号首次登录、2FA/失效处理、session 受限持久化，以及公共/自定义音乐 Bot 适配器。
 
@@ -88,7 +88,7 @@
 
 ## Phase 7 — Administration and production Compose
 
-**Status:** Administration portal delivered (`6c36a88`), mounted into the application in PR #18, and made restart-persistent for FR-008 in PR #21 (`08f92aa`); the release gate suite was made honest and executable in PR #19 and PR #20, and CI was added in PR #23 (`5f3f11d`). **Not closed:** the real WeCom callback gate and the Compose backup/recovery drill still require a human-run deployment, and a custom Telegram Bot cannot yet be maintained through the portal because no Bot definition (username/command template) configuration surface exists.
+**Status:** Administration portal delivered (`6c36a88`), mounted into the application in PR #18, and made restart-persistent for FR-008 in PR #21 (`08f92aa`); the release gate suite was made honest and executable in PR #19 and PR #20, and CI was added in PR #23 (`5f3f11d`). **Not closed:** the real WeCom callback gate and the Compose backup/recovery drill still require a human-run deployment, while a custom Telegram Bot is now maintainable through the portal, because PR #25 (`44e9428`) added the Bot definition surface (a required `username` and an optional `command_template`) with `POST /admin/bots`, `PATCH /admin/bots/{id}`, and `DELETE /admin/bots/{id}`.
 
 **Goal:** 提供管理后台、默认凭据迁移提示、来源/Bot 管理、健康度和日志查看，并完成双容器 Compose 发布基线。
 
