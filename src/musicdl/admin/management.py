@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from copy import deepcopy
 from typing import Any
 
@@ -7,8 +8,8 @@ from musicdl.telegram.bots import MAX_BOT_TIMEOUT, validate_bot_username, valida
 
 
 class SourceManager:
-    _DEFAULTS = {"enabled": True, "priority": 0, "timeout": 10.0}
-    _FIELDS = ("enabled", "priority", "timeout")
+    _DEFAULTS = {"enabled": True, "priority": 0, "timeout": 10.0, "name": None}
+    _FIELDS = ("enabled", "priority", "timeout", "name")
 
     def __init__(self, sources=(), *, on_change=None):
         self._sources = {}
@@ -31,6 +32,17 @@ class SourceManager:
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0.1 <= value <= 300:
                 raise ValueError("invalid timeout")
             return float(value)
+        if name == "name":
+            # An empty name clears the label; a null one never reaches here
+            # because ``update`` treats null as "keep the stored value".
+            if value is None or value == "":
+                return None
+            if not isinstance(value, str):
+                raise ValueError("invalid name")
+            cleaned = unicodedata.normalize("NFKC", value).strip()
+            if not cleaned or len(cleaned) > 120 or not all(char.isprintable() for char in cleaned):
+                raise ValueError("invalid name")
+            return cleaned
         raise ValueError("invalid source configuration")
 
     @classmethod
@@ -117,8 +129,11 @@ class BotManager(SourceManager):
     adapter can build. That is the whole point of validating here.
     """
 
-    _DEFAULTS = {**SourceManager._DEFAULTS, "username": None, "command_template": None}
-    _FIELDS = (*SourceManager._FIELDS, "username", "command_template")
+    # A bot carries no display label: ``name`` labels an audio source, so the
+    # bot definition keeps the three shared controls plus its own two fields.
+    _DEFAULTS = {"enabled": True, "priority": 0, "timeout": 10.0,
+                 "username": None, "command_template": None}
+    _FIELDS = ("enabled", "priority", "timeout", "username", "command_template")
 
     @classmethod
     def _coerce(cls, name: str, value: Any) -> Any:

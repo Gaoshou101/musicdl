@@ -205,6 +205,41 @@ def test_build_runtime_maps_only_search_and_resolve_plugins_into_download_source
     assert sources["resolver"].transport is runtime.transport
 
 
+def _source_definition(source_id, **overrides):
+    """One definition as the administration portal stores it."""
+    entry = {"id": source_id, "enabled": True, "priority": 0, "timeout": 10.0, "name": None}
+    entry.update(overrides)
+    return entry
+
+
+def test_a_stored_definition_outranks_the_volume_it_was_published_from(runtime_fakes):
+    _Store.plugins = (_Plugin("first"), _Plugin("second"))
+
+    runtime = runtime_fakes._build_runtime(_settings(), sources=(
+        _source_definition("first", enabled=False), _source_definition("second", priority=7)))
+
+    entries = runtime.registry.enabled()
+    assert [entry.source_id for entry in entries] == ["second"]
+    assert entries[0].priority == 7
+
+
+def test_a_definition_without_installed_code_registers_nothing(runtime_fakes):
+    _Store.plugins = (_Plugin("installed"),)
+
+    runtime = runtime_fakes._build_runtime(_settings(), sources=(
+        _source_definition("installed"), _source_definition("removed")))
+
+    assert [entry.source_id for entry in runtime.registry.enabled()] == ["installed"]
+
+
+def test_a_disabled_definition_keeps_its_script_out_of_the_download_sources(runtime_fakes):
+    _Store.plugins = (_Plugin("resolver", operations=("search", "resolve")),)
+
+    runtime = runtime_fakes._build_runtime(_settings(), sources=(_source_definition("resolver", enabled=False),))
+
+    assert runtime.registry.enabled() == ()
+
+
 def test_build_runtime_shares_one_transport_and_client_across_every_source(runtime_fakes):
     first = _Plugin("first", operations=("search", "resolve"))
     second = _Plugin("second", operations=("search", "resolve"))

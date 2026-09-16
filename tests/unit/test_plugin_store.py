@@ -143,3 +143,38 @@ def test_enabled_state_is_independent_per_version(tmp_path):
     registry = json.loads((tmp_path / "plugins" / "registry.json").read_text())
     assert registry["demo"][one.manifest.sha256]["enabled"] is False
     assert registry["demo"][two.manifest.sha256]["enabled"] is True
+
+
+def test_remove_drops_the_registry_entry_and_the_stored_bytes(tmp_path):
+    store = PluginStore(tmp_path)
+    stored = install(store)
+
+    assert store.remove("demo") == (stored.manifest.sha256,)
+    assert store.enabled() == ()
+    assert not stored.path.exists()
+    with pytest.raises(KeyError):
+        store.load("demo", stored.manifest.sha256)
+    with pytest.raises(KeyError):
+        store.remove("demo")
+
+
+def test_remove_one_version_leaves_the_other_installed(tmp_path):
+    store = PluginStore(tmp_path)
+    one = install(store, version="1")
+    two = install(store, version="2", source="print('two')\n")
+
+    assert store.remove("demo", one.manifest.sha256) == (one.manifest.sha256,)
+    assert not one.path.exists()
+    assert two.path.exists()
+    assert [item.manifest.version for item in store.enabled()] == ["2"]
+    with pytest.raises(KeyError):
+        store.remove("demo", one.manifest.sha256)
+
+
+def test_remove_rejects_an_invalid_digest_or_id(tmp_path):
+    store = PluginStore(tmp_path)
+    install(store)
+    with pytest.raises(ValueError, match="digest"):
+        store.remove("demo", "not-a-digest")
+    with pytest.raises(ValueError, match="invalid plugin id"):
+        store.remove("../escape")

@@ -302,3 +302,58 @@ class PluginStore:
             raise KeyError((plugin_id, sha256)) from exc
         self._write_registry(registry)
         return self.load(plugin_id, sha256)
+
+    def remove(self, plugin_id: str, sha256: str | None = None) -> tuple[str, ...]:
+        """Drop one plugin, or every version of it, from storage.
+
+        The store is write-once by design, so removal is the only way an
+        operator can take a script back out of the volume the runner reads.
+        Registry entries are dropped before their files, because a crash
+        between the two leaves an unused file rather than a registry entry that
+        names source code that is already gone.
+        """
+        self._validate_id(plugin_id)
+        if sha256 is not None and not _DIGEST.fullmatch(sha256):
+            raise ValueError("invalid plugin digest")
+        registry = self._read_registry()
+        versions = registry.get(plugin_id)
+        if not versions:
+            raise KeyError(plugin_id)
+        if sha256 is not None and sha256 not in versions:
+            raise KeyError((plugin_id, sha256))
+        removed = tuple(sorted(versions if sha256 is None else (sha256,)))
+        for digest in removed:
+            versions.pop(digest)
+        if not versions:
+            registry.pop(plugin_id, None)
+        self._write_registry(registry)
+        for digest in removed:
+            self._discard_source(plugin_id, digest)
+        return removed
+
+    def _discard_source(self, plugin_id: str, sha256: str) -> None:
+        """Delete the stored bytes for one version, never following a symlink."""
+        if os.name != "nt":
+            try:
+                parent_fd, child_fd = self._open_plugin_dir_posix(plugin_id, create=False)
+            except (FileNotFoundError, NotADirectoryError):
+                return
+            try:
+                for suffix in (".py", ".js"):
+                    try:
+                        os.unlink(f"{sha256}{suffix}", dir_fd=child_fd)
+                    except FileNotFoundError:
+                        continue
+            finally:
+                os.close(child_fd)
+                os.close(parent_fd)
+            return
+        directory = self._plugins / plugin_id
+        for suffix in (".py", ".js"):
+            target = directory / f"{sha256}{suffix}"
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                target.unlink()

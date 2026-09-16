@@ -5,7 +5,9 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from html import escape
+from typing import Any, Callable
 
+from musicdl.plugins.install import install_source
 from .auth import AdminAuth, RateLimiter
 from .health import EventLogStore, HealthAggregator
 from .management import BotManager, SourceManager
@@ -14,10 +16,52 @@ from .management import BotManager, SourceManager
 def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager | None = None,
                         health: HealthAggregator | None = None, events: EventLogStore | None = None,
                         limiter: RateLimiter | None = None, bots: SourceManager | None = None,
-                        audit: EventLogStore | None = None) -> APIRouter:
+                        audit: EventLogStore | None = None,
+                        plugins: Callable[[], Any] | None = None) -> APIRouter:
     auth, sources, health, events, limiter = auth or AdminAuth(), sources or SourceManager(), health or HealthAggregator({}), events or EventLogStore(), limiter or RateLimiter()
     bots, audit = bots or BotManager(), audit or EventLogStore()
     router = APIRouter(prefix="/admin")
+
+    def plugin_store():
+        """The plugin storage this portal may install into; absent means no code."""
+        store = open_store()
+        if store is None:
+            raise HTTPException(503, "plugin storage is unavailable")
+        return store
+
+    def open_store():
+        """Open the plugin storage, or report its absence instead of raising.
+
+        A read of ``/admin/sources`` must not fail because the volume that
+        holds installed code is missing or unreadable: the portal still knows
+        every source definition it owns, and the installed script is shown as
+        absent.
+        """
+        if plugins is None:
+            return None
+        try:
+            return plugins()
+        except (OSError, ValueError):
+            return None
+
+    def installed(store) -> dict[str, dict]:
+        """Map source id to the script the store currently serves for it."""
+        index: dict[str, dict] = {}
+        if store is None:
+            return index
+        try:
+            stored = store.enabled()
+        except (OSError, ValueError):
+            return index
+        for item in stored:
+            manifest = item.manifest
+            index.setdefault(manifest.plugin_id, {"sha256": manifest.sha256,
+                                                  "version": manifest.version,
+                                                  "language": manifest.language})
+        return index
+
+    def with_plugin(index: dict[str, dict], item: dict) -> dict:
+        return dict(item, plugin=index.get(item["id"]))
 
     def require(request: Request):
         session = request.cookies.get("admin_session")
@@ -66,17 +110,75 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     @router.get("/sources")
     async def list_sources(request: Request):
         require(request)
-        return {"items": sources.list()}
+        index = installed(open_store())
+        return {"items": [with_plugin(index, item) for item in sources.list()]}
+
+    @router.post("/sources")
+    async def create_source(body: dict, request: Request):
+        mutate(request)
+        store = plugin_store()
+        try:
+            stored = install_source(store, body)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except OSError:
+            raise HTTPException(500, "plugin storage is unavailable") from None
+        # One source id serves one script. Installing a second version retires
+        # the first, because two enabled versions of one id is a registry the
+        # runtime refuses to assemble at all.
+        replaced = []
+        try:
+            for item in store.enabled():
+                manifest = item.manifest
+                if manifest.plugin_id == stored.manifest.plugin_id and manifest.sha256 != stored.manifest.sha256:
+                    store.set_enabled(manifest.plugin_id, manifest.sha256, False)
+                    replaced.append(manifest.sha256)
+        except (OSError, ValueError):
+            raise HTTPException(500, "plugin replacement failed") from None
+        source_id = stored.manifest.plugin_id
+        changes = {key: body[key] for key in ("name", "enabled", "priority", "timeout") if key in body}
+        try:
+            if source_id in {item["id"] for item in sources.list()}:
+                row = sources.update(source_id, **changes)
+            else:
+                row = sources.register({"id": source_id, **changes}, persist=True)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        audit.append({"action": "create_source", "source_id": source_id, "status": "success",
+                      "sha256": stored.manifest.sha256, "replaced": sorted(replaced)})
+        return dict(row, plugin={"sha256": stored.manifest.sha256, "version": stored.manifest.version,
+                                 "language": stored.manifest.language})
 
     @router.patch("/sources/{source_id}")
     async def update_source(source_id: str, body: dict, request: Request):
         mutate(request)
         try:
-            result = sources.update(source_id, enabled=body.get("enabled"), priority=body.get("priority"), timeout=body.get("timeout")); audit.append({"action": "update_source", "source_id": source_id, "status": "success"}); return result
+            result = sources.update(source_id, enabled=body.get("enabled"), priority=body.get("priority"), timeout=body.get("timeout"), name=body.get("name")); audit.append({"action": "update_source", "source_id": source_id, "status": "success"}); return result
         except KeyError:
             raise HTTPException(404, "source not found") from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+
+    @router.delete("/sources/{source_id}")
+    async def delete_source(source_id: str, request: Request):
+        mutate(request)
+        if source_id not in {item["id"] for item in sources.list()}:
+            raise HTTPException(404, "source not found")
+        store = open_store()
+        uninstalled: list[str] = []
+        if store is not None:
+            try:
+                uninstalled = sorted(store.remove(source_id))
+            except KeyError:
+                pass
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
+            except OSError:
+                raise HTTPException(500, "plugin storage is unavailable") from None
+        removed = sources.remove(source_id)
+        audit.append({"action": "delete_source", "source_id": source_id, "status": "success",
+                      "versions": uninstalled})
+        return {**removed, "uninstalled": uninstalled}
 
     @router.get("/bots")
     async def list_bots(request: Request):

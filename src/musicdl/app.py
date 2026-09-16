@@ -48,6 +48,7 @@ class _AdminState:
 
     def __init__(self, settings: AppSettings, app: FastAPI) -> None:
         self.store = AdminStateStore(settings.admin.state_path)
+        self.plugin_settings = settings.plugin
         self.auth = AdminAuth(on_change=self.persist)
         self.sources = SourceManager(on_change=self.persist)
         self.bots = BotManager(on_change=self.persist)
@@ -59,8 +60,18 @@ class _AdminState:
         self.load()
         app.include_router(create_admin_router(auth=self.auth, sources=self.sources, bots=self.bots,
                                                health=self.health, events=self.events,
-                                               audit=self.audit, limiter=self.limiter))
+                                               audit=self.audit, limiter=self.limiter,
+                                               plugins=self.plugin_store))
         app.add_middleware(CSRFMiddleware, auth=self.auth)
+
+    def plugin_store(self) -> PluginStore:
+        """Storage handed to the portal on demand.
+
+        Built per request rather than at start-up because constructing it
+        creates the plugin directory, and a deployment that never installs a
+        source should not need that volume to exist.
+        """
+        return PluginStore(self.plugin_settings.app_data_root)
 
     def load(self) -> None:
         """Adopt whatever the last run persisted; a first run has no file."""
@@ -177,8 +188,16 @@ def _telegram_sources(telegram_settings, bots, *, known_ids=frozenset(), factory
     return connector, definitions
 
 
-def _build_runtime(settings: AppSettings, clock=None, *, bots=(), telegram_client_factory=None):
-    """Build one runtime. ``bots`` are the Bot definitions the portal owns."""
+def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
+                   telegram_client_factory=None):
+    """Build one runtime.
+
+    ``bots`` and ``sources`` are the definitions the portal owns.  A stored
+    source definition outranks the volume's own enable flag and priority,
+    because the portal is the operator's control plane and a toggle that the
+    runtime ignored would be a lie.  A definition without installed code
+    registers nothing: an id nobody can search is not a source.
+    """
     worker_settings = settings.worker
     store = PluginStore(settings.plugin.app_data_root)
     stored = tuple(store.enabled())
@@ -186,6 +205,8 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), telegram_clien
     ids = [p.manifest.plugin_id for p in search_plugins]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate_source_id")
+    overrides = {item["id"]: item for item in sources
+                 if isinstance(item, dict) and isinstance(item.get("id"), str)}
     if Redis is None:  # pragma: no cover
         raise RuntimeError("redis dependency is unavailable")
     redis = Redis.from_url(settings.redis.url.get_secret_value(), decode_responses=False,
@@ -198,14 +219,17 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), telegram_clien
     plugin_client = PluginClient(str(settings.plugin.service_url), broker=HttpsActionBroker())
     transport = SecureMediaTransport()
     entries = []
-    sources: dict[str, PluginSource] = {}
+    resolvers: dict[str, PluginSource] = {}
     for p in search_plugins:
+        definition = overrides.get(p.manifest.plugin_id, {})
         source = PluginSource(p, plugin_client, transport,
                               resolve_stream_timeout_ms=math.ceil(worker_settings.resolve_stream_timeout * 1000),
                               health_timeout_ms=math.ceil(worker_settings.health_timeout * 1000))
-        entries.append(SourceEntry(p.manifest.plugin_id, p.manifest.version, source))
+        entries.append(SourceEntry(p.manifest.plugin_id, p.manifest.version, source,
+                                   enabled=definition.get("enabled", True),
+                                   priority=definition.get("priority", 0)))
         if "resolve" in p.manifest.operations:
-            sources[p.manifest.plugin_id] = source
+            resolvers[p.manifest.plugin_id] = source
     plugin_registry = SourceRegistry(entries)
     search_timeout = worker_settings.search_timeout
     ai_client = OpenAICompatibleClient(settings.ai)
@@ -238,7 +262,7 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), telegram_clien
     message_worker = MessageWorker(redis, registry, wecom, state=state, ai_ranker=ranker,
                                    search_timeout=search_timeout,
                                    selection_ttl=settings.wecom.selection_ttl)
-    job_worker = JobWorker(redis, wecom, sources=sources, media_root=settings.media.root, state=state,
+    job_worker = JobWorker(redis, wecom, sources=resolvers, media_root=settings.media.root, state=state,
                            refresh=refresh, job_timeout=worker_settings.job_timeout,
                            language_advisor=language_advisor,
                            resolve_stream_timeout=worker_settings.resolve_stream_timeout,
@@ -277,8 +301,10 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 app.state.wecom_service = WeComService(settings.wecom, state, clock or time.time)
             else:
                 definitions = tuple(admin.bots.list()) if admin is not None else ()
+                source_definitions = tuple(admin.sources.list()) if admin is not None else ()
                 factory = runtime_factory or (
-                    lambda current: _build_runtime(current, clock, bots=definitions))
+                    lambda current: _build_runtime(current, clock, bots=definitions,
+                                                   sources=source_definitions))
                 runtime = factory(settings)
                 if inspect.isawaitable(runtime):
                     runtime = await runtime
