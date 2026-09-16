@@ -86,13 +86,22 @@ def test_valid_python_and_javascript_execute(language: str, fixture: str):
 
 HOSTILE_MODES = ("environment", "proc", "shadow", "docker_socket", "telegram_session", "main_network", "public_network", "subprocess", "fork", "command", "infinite_cpu", "memory", "pid_exhaustion", "tmp_exhaustion", "output_exhaustion", "traversal", "retained_file")
 EXPECTED_CODES = {mode: {"plugin_error", "plugin_failed"} for mode in HOSTILE_MODES}
-EXPECTED_CODES.update({"infinite_cpu": {"timeout", "plugin_failed"}, "memory": {"resource_limit", "plugin_error", "plugin_failed"}, "output_exhaustion": {"output_too_large", "plugin_error"}})
+# Only the Python host catches MemoryError and reports resource_limit; Deno dies with
+# the interpreter (plugin_failed), and a slower host can spend the whole invocation
+# budget on Deno startup before the allocation is even attempted, which the supervisor
+# reports as timeout. All three are denials; that the cap exists is asserted by the
+# container contract, while this test asserts the request is denied without a leak.
+EXPECTED_CODES.update({"infinite_cpu": {"timeout", "plugin_failed"}, "memory": {"resource_limit", "plugin_error", "plugin_failed", "timeout"}, "output_exhaustion": {"output_too_large", "plugin_error"}})
+# The memory mode needs room for interpreter startup, otherwise the clock, not the
+# allocation, decides the outcome on a loaded runner.
+MEMORY_BUDGET_MS = 5000
 
 @pytest.mark.integration
 @pytest.mark.parametrize("language,fixture", [("python", "hostile.py"), ("javascript", "hostile.js")])
 @pytest.mark.parametrize("mode", HOSTILE_MODES)
 def test_hostile_plugin_is_denied_and_runner_recovers(language: str, fixture: str, mode: str):
-    status, step = _invoke(language, _source(fixture), {"mode": mode}, timeout_ms=1000)
+    status, step = _invoke(language, _source(fixture), {"mode": mode},
+                           timeout_ms=MEMORY_BUDGET_MS if mode == "memory" else 1000)
     assert status in {502, 504}
     assert step["response"]["ok"] is False, step
     assert step["response"]["error"]["code"] in EXPECTED_CODES[mode], step

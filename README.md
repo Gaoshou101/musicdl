@@ -156,6 +156,22 @@ docker compose logs --tail=100 musicdl plugin-runner
 
 Only `musicdl` publishes a loopback port. `plugin-runner` is attached only to the internal `plugin-control` network; the main service is attached to both the default and plugin-control networks. Plugin execution is enabled only through the restricted runner and main-owned HTTPS action broker described above.
 
+## Release gates
+
+`scripts/release/run_gates.py` decides the release gates. `--gate all` is the
+default and treats NOT_RUN as failure, so a gate that cannot run is never
+reported as passed; `--dry-run` prints the same table without failing on the
+gates that need this deployment, and `--self-test` first tampers with the
+Compose, Telegram, proxy, and plugin boundaries and then prints the table.
+
+The callback gate needs a real WeCom application behind public HTTPS
+(`--wecom-url` with `--wecom-expected`) and the recovery gate needs the
+deployment Redis (`--redis-url` with `--confirm-isolated`), so both stay
+human-run. CI (`.github/workflows/ci.yml`) runs the test suite and
+`--self-test --dry-run` on every push and pull request; the plugin-security gate
+runs for real there because hosted runners provide a Docker Engine, and it
+reports NOT_RUN rather than PASS on a host that has none.
+
 ## Verification
 
 Run the strict local test suite with:
