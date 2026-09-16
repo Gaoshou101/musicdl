@@ -56,7 +56,15 @@ def test_manager_rejects_coercible_values_and_bot_type_exists():
         try: SourceManager([item])
         except ValueError: pass
         else: raise AssertionError("coercible config accepted")
-    assert isinstance(BotManager([{"id":"b"}]), SourceManager)
+    assert isinstance(BotManager([{"id":"b", "username":"MusicBot"}]), SourceManager)
+    # A bot definition without an addressable username is not a definition.
+    for item in ({"id":"b"}, {"id":"b", "username":""}, {"id":"b", "username":"@MusicBot"},
+                 {"id":"b", "username":"MusicBot", "command_template":"no placeholder"},
+                 {"id":"b", "username":"MusicBot", "command_template":"{query} and {query}"},
+                 {"id":"b", "username":"MusicBot", "timeout":121}):
+        try: BotManager([item])
+        except ValueError: pass
+        else: raise AssertionError(f"invalid bot definition accepted: {item}")
 
 
 def test_http_change_credentials_revokes_old_session_and_requires_change():
@@ -75,7 +83,8 @@ def test_http_change_credentials_revokes_old_session_and_requires_change():
 
 
 def test_http_bound_csrf_updates_source_and_bot_and_audits_actions():
-    auth=AdminAuth(); audit=EventLogStore(); app=FastAPI(); app.include_router(create_admin_router(auth=auth, audit=audit, sources=SourceManager([{"id":"s"}]), bots=SourceManager([{"id":"b"}])))
+    from musicdl.admin.management import BotManager
+    auth=AdminAuth(); audit=EventLogStore(); app=FastAPI(); app.include_router(create_admin_router(auth=auth, audit=audit, sources=SourceManager([{"id":"s"}]), bots=BotManager([{"id":"b", "username":"MusicBot"}])))
     async def run():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test") as c:
             l=await c.post("/admin/login",json={"username":"admin","password":"password"}); csrf=l.json()["csrf_token"]

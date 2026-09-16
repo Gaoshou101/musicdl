@@ -3,20 +3,41 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from musicdl.telegram.bots import MAX_BOT_TIMEOUT, validate_bot_username, validate_command_template
+
 
 class SourceManager:
+    _DEFAULTS = {"enabled": True, "priority": 0, "timeout": 10.0}
+    _FIELDS = ("enabled", "priority", "timeout")
+
     def __init__(self, sources=(), *, on_change=None):
         self._sources = {}
         self._on_change = on_change
         for item in sources:
             self.register(item)
 
-    @staticmethod
-    def _validated(item) -> dict:
+    @classmethod
+    def _coerce(cls, name: str, value: Any) -> Any:
+        """Validate and normalize one editable field."""
+        if name == "enabled":
+            if not isinstance(value, bool):
+                raise ValueError("enabled must be boolean")
+            return value
+        if name == "priority":
+            if not isinstance(value, int) or isinstance(value, bool) or not -1000 <= value <= 1000:
+                raise ValueError("invalid priority")
+            return value
+        if name == "timeout":
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0.1 <= value <= 300:
+                raise ValueError("invalid timeout")
+            return float(value)
+        raise ValueError("invalid source configuration")
+
+    @classmethod
+    def _validated(cls, item) -> dict:
         if not isinstance(item, dict) or not isinstance(item.get("id"), str): raise ValueError("invalid id")
-        enabled, priority, timeout = item.get("enabled", True), item.get("priority", 0), item.get("timeout", 10.0)
-        if not isinstance(enabled, bool) or not isinstance(priority, int) or isinstance(priority, bool) or not -1000 <= priority <= 1000 or not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0.1 <= timeout <= 300: raise ValueError("invalid source configuration")
-        return {"id": item["id"], "enabled": enabled, "priority": priority, "timeout": float(timeout)}
+        return {"id": item["id"],
+                **{name: cls._coerce(name, item.get(name, cls._DEFAULTS[name])) for name in cls._FIELDS}}
 
     def register(self, item, *, persist: bool = False) -> dict:
         """Add one bounded entry; an existing id stays a hard error.
@@ -33,23 +54,18 @@ class SourceManager:
     def list(self) -> list[dict]:
         return sorted((deepcopy(item) for item in self._sources.values()), key=lambda x: (x["priority"], x["id"]))
 
-    def update(self, source_id: str, *, enabled: bool | None = None, priority: int | None = None, timeout: float | None = None) -> dict:
+    def update(self, source_id: str, **changes) -> dict:
+        """Apply the provided fields; an omitted or null field keeps its value."""
         if source_id not in self._sources:
             raise KeyError(source_id)
         item = self._sources[source_id]
         previous = deepcopy(item)
-        if enabled is not None:
-            if not isinstance(enabled, bool):
-                raise ValueError("enabled must be boolean")
-            item["enabled"] = enabled
-        if priority is not None:
-            if not isinstance(priority, int) or isinstance(priority, bool) or not -1000 <= priority <= 1000:
-                raise ValueError("invalid priority")
-            item["priority"] = priority
-        if timeout is not None and (not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0.1 <= timeout <= 300):
-            raise ValueError("invalid timeout")
-        if timeout is not None:
-            item["timeout"] = float(timeout)
+        for name, value in changes.items():
+            if name not in self._FIELDS:
+                raise ValueError("invalid source configuration")
+            if value is None:
+                continue
+            item[name] = self._coerce(name, value)
         if item != previous:
             try:
                 self._notify()
@@ -57,6 +73,18 @@ class SourceManager:
                 self._sources[source_id] = previous
                 raise
         return deepcopy(item)
+
+    def remove(self, source_id: str) -> dict:
+        """Delete one entry; an unknown id stays a hard error."""
+        if source_id not in self._sources:
+            raise KeyError(source_id)
+        removed = self._sources.pop(source_id)
+        try:
+            self._notify()
+        except BaseException:
+            self._sources[source_id] = removed
+            raise
+        return deepcopy(removed)
 
     def snapshot(self) -> list[dict]:
         return [deepcopy(item) for item in self._sources.values()]
@@ -77,4 +105,32 @@ class SourceManager:
 
 
 class BotManager(SourceManager):
-    """Configuration manager with the same bounded controls for registered bots."""
+    """Registered Telegram bots: the bounded controls plus a Bot definition.
+
+    A definition is what the runtime needs to build a search source: the
+    Telegram username and, for a custom bot, the single-placeholder command
+    template. A definition without a username is rejected, because a bot the
+    runtime cannot address is not a bot.
+
+    The timeout is capped by the Telegram adapter's own limit rather than the
+    generic source limit, so every definition the portal accepts is one the
+    adapter can build. That is the whole point of validating here.
+    """
+
+    _DEFAULTS = {**SourceManager._DEFAULTS, "username": None, "command_template": None}
+    _FIELDS = (*SourceManager._FIELDS, "username", "command_template")
+
+    @classmethod
+    def _coerce(cls, name: str, value: Any) -> Any:
+        if name == "timeout":
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not 0.1 <= value <= MAX_BOT_TIMEOUT):
+                raise ValueError("invalid timeout")
+            return float(value)
+        if name == "username":
+            return validate_bot_username(value)
+        if name == "command_template":
+            # An empty template selects the built-in public ``/search {query}``
+            # contract, which is how an operator switches a custom bot back.
+            return None if value is None or value == "" else validate_command_template(value)
+        return super()._coerce(name, value)

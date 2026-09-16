@@ -126,12 +126,14 @@ def test_source_edits_survive_a_restart_and_beat_the_runtime(tmp_path):
 def test_bot_edits_survive_a_restart(tmp_path):
     async def scenario():
         first = create_app(persisted(tmp_path))
-        first.state.admin.bots.register({"id": "custom"}, persist=True)
+        first.state.admin.bots.register(
+            {"id": "custom", "username": "MusicBot", "command_template": "/get {query}"}, persist=True)
         first.state.admin.bots.update("custom", enabled=False, timeout=4.0)
         second = create_app(persisted(tmp_path))
         return second.state.admin.bots.list()
 
-    assert run(scenario()) == [{"id": "custom", "enabled": False, "priority": 0, "timeout": 4.0}]
+    assert run(scenario()) == [{"id": "custom", "enabled": False, "priority": 0, "timeout": 4.0,
+                                "username": "MusicBot", "command_template": "/get {query}"}]
 
 
 def test_runtime_sources_are_not_written_to_disk(tmp_path):

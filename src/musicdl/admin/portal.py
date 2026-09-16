@@ -8,7 +8,7 @@ from html import escape
 
 from .auth import AdminAuth, RateLimiter
 from .health import EventLogStore, HealthAggregator
-from .management import SourceManager
+from .management import BotManager, SourceManager
 
 
 def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager | None = None,
@@ -16,7 +16,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                         limiter: RateLimiter | None = None, bots: SourceManager | None = None,
                         audit: EventLogStore | None = None) -> APIRouter:
     auth, sources, health, events, limiter = auth or AdminAuth(), sources or SourceManager(), health or HealthAggregator({}), events or EventLogStore(), limiter or RateLimiter()
-    bots, audit = bots or SourceManager(), audit or EventLogStore()
+    bots, audit = bots or BotManager(), audit or EventLogStore()
     router = APIRouter(prefix="/admin")
 
     def require(request: Request):
@@ -82,13 +82,33 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     async def list_bots(request: Request):
         require(request); return {"items": bots.list()}
 
+    @router.post("/bots")
+    async def create_bot(body: dict, request: Request):
+        mutate(request)
+        try:
+            created = bots.register(body, persist=True)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        audit.append({"action": "create_bot", "bot_id": created["id"], "status": "success"})
+        return created
+
     @router.patch("/bots/{bot_id}")
     async def update_bot(bot_id: str, body: dict, request: Request):
         mutate(request)
-        try: result = bots.update(bot_id, enabled=body.get("enabled"), priority=body.get("priority"), timeout=body.get("timeout"))
+        try: result = bots.update(bot_id, enabled=body.get("enabled"), priority=body.get("priority"), timeout=body.get("timeout"), username=body.get("username"), command_template=body.get("command_template"))
         except KeyError: raise HTTPException(404, "bot not found") from None
         except ValueError as exc: raise HTTPException(422, str(exc)) from None
         audit.append({"action": "update_bot", "bot_id": bot_id, "status": "success"}); return result
+
+    @router.delete("/bots/{bot_id}")
+    async def delete_bot(bot_id: str, request: Request):
+        mutate(request)
+        try:
+            removed = bots.remove(bot_id)
+        except KeyError:
+            raise HTTPException(404, "bot not found") from None
+        audit.append({"action": "delete_bot", "bot_id": bot_id, "status": "success"})
+        return removed
 
     @router.get("/health")
     async def health_report(request: Request):
@@ -113,7 +133,9 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         require(request)
         warning = "<p>SECURITY WARNING: credential change required (强制修改)。</p>" if auth.session_must_change(request.cookies.get("admin_session")) else ""
         source_ids = ''.join(f"<li>{escape(item['id'])}</li>" for item in sources.list())
-        bot_ids = ''.join(f"<li>{escape(item['id'])}</li>" for item in bots.list())
+        bot_ids = ''.join(
+            f"<li>{escape(item['id'])}{'' if item.get('username') is None else ' (' + escape(item['username']) + ')'}</li>"
+            for item in bots.list())
         report = await health.check()
         health_html = " ".join(f"<span>{escape(str(k))}: {escape(str(v))}</span>" for k,v in report["checks"].items())
         event_page = events.page(offset=0, limit=1); audit_page = audit.page(offset=0, limit=1)
