@@ -12,6 +12,27 @@ from typing import Any
 from musicdl.sources.models import Candidate, normalize_text
 
 
+MAX_BOT_TIMEOUT = 120.0
+MAX_BOT_RESULTS = 100
+_BOT_USERNAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{4,31}")
+
+
+def validate_bot_username(value: Any) -> str:
+    """Return a valid Bot username; the leading ``@`` is not accepted."""
+    if not isinstance(value, str) or not _BOT_USERNAME.fullmatch(value):
+        raise ValueError("invalid_bot_username")
+    return value
+
+
+def validate_command_template(value: Any) -> str:
+    """Return a command template carrying exactly one ``{query}`` placeholder."""
+    if (not isinstance(value, str) or value.count("{query}") != 1
+            or re.sub(r"\{query\}", "", value).find("{") >= 0
+            or "}" in re.sub(r"\{query\}", "", value)):
+        raise ValueError("invalid_command_template")
+    return value
+
+
 @dataclass(frozen=True)
 class TelegramMediaRecord:
     """Normalized media payload returned by a Telegram bot gateway."""
@@ -69,15 +90,14 @@ BotRequester = Callable[[str, str, float], Awaitable[Sequence[TelegramMediaRecor
 class _TelegramBot:
     def __init__(self, bot_username: str, requester: BotRequester, *, source_id: str, source_version: str,
                  command_template: str, timeout: float = 10.0, max_results: int = 100):
-        if not isinstance(bot_username, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", bot_username):
-            raise ValueError("invalid_bot_username")
+        validate_bot_username(bot_username)
         if not callable(requester):
             raise ValueError("invalid_bot_requester")
-        if not isinstance(command_template, str) or command_template.count("{query}") != 1 or re.sub(r"\{query\}", "", command_template).find("{") >= 0 or "}" in re.sub(r"\{query\}", "", command_template):
-            raise ValueError("invalid_command_template")
-        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or not 0 < timeout <= 120:
+        validate_command_template(command_template)
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+                or not math.isfinite(timeout) or not 0 < timeout <= MAX_BOT_TIMEOUT):
             raise ValueError("invalid_timeout")
-        if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= 100:
+        if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= MAX_BOT_RESULTS:
             raise ValueError("invalid_max_results")
         try:
             if not isinstance(source_id, str) or not normalize_text(source_id) or len(normalize_text(source_id)) > 64:
