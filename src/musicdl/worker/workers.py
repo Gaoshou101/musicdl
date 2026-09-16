@@ -12,7 +12,8 @@ from typing import Any, Callable
 from musicdl.ai.models import AIRankResult
 from musicdl.config import REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS
 from musicdl.media.fallback import download_with_fallback
-from musicdl.media.models import ArtifactRecord, FallbackResult, MediaError
+from musicdl.media.language import classify_language
+from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, MediaError
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult, search_sources
 from musicdl.wecom.commands import CommandKind, ParsedCommand, parse_command
@@ -25,6 +26,14 @@ from .selection import bind_user_selection, get_user_selection, get_selection_fo
 TERMINAL_FAILURE_TEXT = "处理失败，请稍后重试。"
 EFFECT_REPLAY_LIMIT = 100
 _MEDIA_TYPES = {"mp3": "audio/mpeg", "flac": "audio/flac", "m4a": "audio/mp4", "ogg": "audio/ogg"}
+
+
+def _recorded_language(record: ArtifactRecord | None) -> str | None:
+    """The category directory a prepared reservation already fixed."""
+    head = str(getattr(record, "target_relative_path", "") or "").split("/", 1)[0]
+    return head if head in LANGUAGES else None
+
+
 _NOTICE_CODES = {
     "success_notice": "success_notice_uncertain",
     "selection_prompt": "prompt_uncertain",
@@ -348,7 +357,8 @@ class MessageWorker(_StreamWorker):
 
 class JobWorker(_StreamWorker):
     def __init__(self, redis: Any, wecom: Any, sources: dict, media_root: str, *, state: RedisStateStore | None = None,
-                 refresh: Callable | None = None, group: str = "musicdl-workers", consumer: str | None = None,
+                 refresh: Callable | None = None, language_advisor: Callable | None = None,
+                 group: str = "musicdl-workers", consumer: str | None = None,
                  job_ttl: int = 86400, pending_idle_ms: int = 30001, max_attempts: int = 3,
                  job_timeout: float = 10.0, resolve_stream_timeout: float | None = None,
                  refresh_timeout: float | None = None, health_timeout: float = 10.0,
@@ -356,7 +366,7 @@ class JobWorker(_StreamWorker):
                  redis_overhead_seconds: float = REDIS_OVERHEAD_SECONDS,
                  wecom_notice_timeout: float = WECOM_NOTICE_TIMEOUT_SECONDS):
         self.redis, self.wecom, self.sources, self.media_root = redis, wecom, sources, media_root
-        self.state, self.refresh = state or RedisStateStore(redis), refresh
+        self.state, self.refresh, self.language_advisor = state or RedisStateStore(redis), refresh, language_advisor
         if not isinstance(selection_ttl, int) or isinstance(selection_ttl, bool) or not 60 <= selection_ttl <= 86400:
             raise ValueError("invalid selection ttl")
         self.selection_ttl = selection_ttl
@@ -477,8 +487,31 @@ class JobWorker(_StreamWorker):
     def _lease_ms(self, deadline: float) -> int:
         return self._guard("", "download", "", deadline).lease_ms()
 
+    async def _download_language(self, job_id: str, candidate: Candidate) -> str:
+        """Resolve the category directory this job publishes under.
+
+        A reservation already prepared for the job pins the directory, because
+        its artifact path was fixed then. Otherwise the deterministic
+        classification stands unless the advisory classifier answers with one
+        of the four accepted values; a missing, failing, or unusable advisor
+        can only leave that deterministic answer in place.
+        """
+        pinned = _recorded_language(await self.state.get_artifact(job_id))
+        if pinned is not None:
+            return pinned
+        baseline = classify_language(candidate.title, candidate.artist, candidate.album)
+        if self.language_advisor is None:
+            return baseline
+        try:
+            advised = await _call(self.language_advisor, candidate)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return baseline
+        return advised if advised in LANGUAGES else baseline
+
     async def _reserve(self, job_id: str, candidate: Candidate, owner: str, lease: EffectLease,
-                       deadline: float) -> ArtifactRecord | None:
+                       deadline: float, language: str) -> ArtifactRecord | None:
         """Persist the deterministic artifact reservation before any source call.
 
         A candidate without a usable extension has no deterministic target, so it keeps the
@@ -489,7 +522,7 @@ class JobWorker(_StreamWorker):
         if not extension:
             return None
         try:
-            base = validated_destination(root, None, candidate.artist, candidate.title, extension)
+            base = validated_destination(root, language, candidate.artist, candidate.title, extension)
         except MediaError:
             return None
         base_relative = base.resolve(strict=False).relative_to(root).as_posix()
@@ -521,7 +554,9 @@ class JobWorker(_StreamWorker):
                 return FallbackResult(download=None,
                                       download_error=_effect_code(record, "download_failed"))
             return await self._replay_download(job_id, payload, candidate, owner, deadline)
-        reservation = await self._reserve(job_id, candidate, owner, lease, deadline)
+        language = await self._download_language(job_id, candidate)
+        reservation = await self._reserve(job_id, candidate, owner, lease, deadline, language)
+        language = _recorded_language(reservation) or language
         reserved = {} if reservation is None else {
             "reservation": reservation, "artifact_store": self.state, "owner": owner, "fence": lease.fence}
         await guard.external(lease)
@@ -531,7 +566,7 @@ class JobWorker(_StreamWorker):
                 request_id=str(payload["request_id"]), query=str(payload.get("query") or candidate.title),
                 refresh=self._guarded_refresh(job_id, owner, deadline),
                 resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
-                health_timeout=self.health_timeout, **reserved)
+                health_timeout=self.health_timeout, language=language, **reserved)
         except asyncio.CancelledError:
             await guard.uncertain_quietly(lease, "download_cancelled")
             raise
@@ -567,7 +602,7 @@ class JobWorker(_StreamWorker):
             refresh=self._guarded_refresh(job_id, owner, deadline),
             resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
             health_timeout=self.health_timeout, reservation=record, artifact_store=self.state,
-            owner=owner, fence=record.fence)
+            owner=owner, fence=record.fence, language=_recorded_language(record))
         if result.download is None:
             raise EffectUncertain(result.download_error or "artifact_uncertain")
         return result

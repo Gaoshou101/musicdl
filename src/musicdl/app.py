@@ -18,11 +18,12 @@ from .sources import SourceEntry, SourceRegistry, search_sources
 from .worker.workers import MessageWorker, JobWorker
 from .wecom.client import WeComClient
 from .ai.client import OpenAICompatibleClient
-from .ai.service import advise_ranking
+from .ai.service import advise_language, advise_ranking
 from .admin import (AdminAuth, AdminStateStore, AuditLogStore, BotManager, EventLogStore,
                     HealthAggregator, RateLimiter, SourceManager)
 from .admin.csrf import CSRFMiddleware
 from .admin.portal import create_admin_router
+from .media import classify_language
 
 try:
     from redis.asyncio import Redis
@@ -157,6 +158,13 @@ def _build_runtime(settings: AppSettings, clock=None):
     async def ranker(result, query):
         return await advise_ranking(result, query, settings.ai, client=ai_client)
 
+    async def language_advisor(candidate):
+        """Advisory classification on top of the deterministic verdict."""
+        advice = await advise_language(candidate,
+                                       classify_language(candidate.title, candidate.artist, candidate.album),
+                                       settings.ai, client=ai_client)
+        return advice.language
+
     async def refresh(query: str, failed_source_ids=frozenset()):
         excluded = set(failed_source_ids or ())
         return await search_sources(SourceRegistry(e for e in entries if e.source_id not in excluded),
@@ -167,6 +175,7 @@ def _build_runtime(settings: AppSettings, clock=None):
                                    selection_ttl=settings.wecom.selection_ttl)
     job_worker = JobWorker(redis, wecom, sources=sources, media_root=settings.media.root, state=state,
                            refresh=refresh, job_timeout=worker_settings.job_timeout,
+                           language_advisor=language_advisor,
                            resolve_stream_timeout=worker_settings.resolve_stream_timeout,
                            refresh_timeout=worker_settings.search_timeout,
                            health_timeout=worker_settings.health_timeout,

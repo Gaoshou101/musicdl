@@ -43,7 +43,8 @@ MEDIA_URL = f"https://{MEDIA_HOST}/song.mp3"
 ALLOWED_HOSTS = (MEDIA_HOST,)
 RESOLVED_ADDRESS = "93.184.216.34"
 CORP_ID, FROM_USER, REQUEST_ID, QUERY = "corp-vertical", "user-vertical", "req-vertical", "Song"
-EXPECTED_RELATIVE = Path("未知") / "Artist" / "Song - Artist.mp3"
+# The reserved path is fixed by the deterministic classifier, not by the caller.
+EXPECTED_RELATIVE = Path("欧美") / "Artist" / "Song - Artist.mp3"
 
 
 class FakeSocket:
