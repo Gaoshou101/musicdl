@@ -24,6 +24,10 @@ from .admin import (AdminAuth, AdminStateStore, AuditLogStore, BotManager, Event
 from .admin.csrf import CSRFMiddleware
 from .admin.portal import create_admin_router
 from .media import classify_language
+from .telegram.bots import CustomTelegramBot, PublicTelegramBot
+from .telegram.connector import TelegramConnector, telethon_client_factory
+from .telegram.decoder import decode_media_message
+from .telegram.models import TelegramStatus
 
 try:
     from redis.asyncio import Redis
@@ -101,29 +105,80 @@ def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
         return bool(await state.ping())
 
     async def telegram() -> bool:
-        # The connector is not wired into the runtime yet, so an enabled
-        # Telegram deployment is genuinely unhealthy while a disabled one has
-        # nothing for this deployment to check.
-        return not settings.telegram.enabled
+        # An enabled Telegram deployment is healthy only when a connector is
+        # wired, at least one Bot definition is registered, and the account
+        # session is authorized. A disabled deployment has nothing to check.
+        configured = getattr(settings, "telegram", None)
+        if not getattr(configured, "enabled", False):
+            return True
+        runtime = getattr(app.state, "runtime", None)
+        connector = getattr(runtime, "telegram", None)
+        if connector is None or not getattr(runtime, "telegram_sources", 0):
+            return False
+        result = await connector.restore(getattr(configured, "profile", "default"))
+        return result.status is TelegramStatus.READY
 
     return {"readyz": readyz, "redis": redis, "telegram": telegram}
 
 
 class _Runtime:
     def __init__(self, *, redis, state, service, wecom, plugin_client, transport, registry,
-                 message_worker, job_worker):
+                 message_worker, job_worker, telegram=None, plugin_registry=None, telegram_sources=0):
         self.redis, self.state, self.service = redis, state, service
         self.wecom, self.plugin_client, self.registry = wecom, plugin_client, registry
         self.transport = transport
         self.message_worker, self.job_worker = message_worker, job_worker
+        self.telegram, self.telegram_sources = telegram, telegram_sources
+        # Only plugin sources are published to the portal. A Telegram bot is
+        # configured as a bot, so a second copy under "sources" would be a
+        # toggle an operator could flip without any effect.
+        self.plugin_registry = plugin_registry if plugin_registry is not None else registry
 
     async def aclose(self) -> None:
+        if self.telegram is not None:
+            await self.telegram.disconnect()
         await _maybe_close(self.transport)
         await _maybe_close(self.plugin_client)
         await _maybe_close(self.redis)
 
 
-def _build_runtime(settings: AppSettings, clock=None):
+def _telegram_sources(telegram_settings, bots, *, known_ids=frozenset(), factory=None):
+    """Build the connector and one search adapter per enabled Bot definition.
+
+    The definitions are owned by the administration portal, so an enabled
+    Telegram deployment with nothing defined registers nothing and the admin
+    health probe reports it unhealthy instead of healthy-but-idle. The bot's
+    username doubles as its source version, which is what the WeCom prompt shows
+    as the version-identifying field and what separates two bots that return the
+    same recording.
+    """
+    api_hash = telegram_settings.api_hash
+    secret = api_hash.get_secret_value() if hasattr(api_hash, "get_secret_value") else api_hash
+    connector = TelegramConnector(
+        telegram_settings.session_root, telegram_settings.api_id, secret,
+        factory or telethon_client_factory(telegram_settings.api_id, secret,
+                                           getattr(telegram_settings, "proxy", None)))
+    requester = connector.bot_requester(telegram_settings.profile, decode_media_message)
+    known, definitions = set(known_ids), []
+    for definition in bots:
+        if not definition.get("enabled", True):
+            continue
+        source_id, username = definition["id"], definition["username"]
+        if source_id in known:
+            raise ValueError("duplicate_source_id")
+        known.add(source_id)
+        template = definition.get("command_template")
+        builder = CustomTelegramBot if template else PublicTelegramBot
+        extra = {"command_template": template} if template else {}
+        adapter = builder(username, requester, source_id=source_id, source_version=username,
+                          timeout=definition["timeout"], **extra)
+        definitions.append(SourceEntry(source_id, username, adapter,
+                                       priority=definition.get("priority", 0)))
+    return connector, definitions
+
+
+def _build_runtime(settings: AppSettings, clock=None, *, bots=(), telegram_client_factory=None):
+    """Build one runtime. ``bots`` are the Bot definitions the portal owns."""
     worker_settings = settings.worker
     store = PluginStore(settings.plugin.app_data_root)
     stored = tuple(store.enabled())
@@ -151,9 +206,19 @@ def _build_runtime(settings: AppSettings, clock=None):
         entries.append(SourceEntry(p.manifest.plugin_id, p.manifest.version, source))
         if "resolve" in p.manifest.operations:
             sources[p.manifest.plugin_id] = source
-    registry = SourceRegistry(entries)
+    plugin_registry = SourceRegistry(entries)
     search_timeout = worker_settings.search_timeout
     ai_client = OpenAICompatibleClient(settings.ai)
+    telegram = None
+    telegram_sources = 0
+    telegram_settings = getattr(settings, "telegram", None)
+    if getattr(telegram_settings, "enabled", False):
+        telegram, definitions = _telegram_sources(
+            telegram_settings, bots, known_ids={entry.source_id for entry in entries},
+            factory=telegram_client_factory)
+        entries.extend(definitions)
+        telegram_sources = len(definitions)
+    registry = SourceRegistry(entries)
 
     async def ranker(result, query):
         return await advise_ranking(result, query, settings.ai, client=ai_client)
@@ -186,7 +251,9 @@ def _build_runtime(settings: AppSettings, clock=None):
                            selection_ttl=settings.wecom.selection_ttl)
     return _Runtime(redis=redis, state=state, service=service, wecom=wecom,
                     plugin_client=plugin_client, transport=transport, registry=registry,
-                    message_worker=message_worker, job_worker=job_worker)
+                    message_worker=message_worker, job_worker=job_worker,
+                    telegram=telegram, plugin_registry=plugin_registry,
+                    telegram_sources=telegram_sources)
 
 
 def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any], Any] | None = None,
@@ -209,7 +276,9 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 app.state.wecom_state = state
                 app.state.wecom_service = WeComService(settings.wecom, state, clock or time.time)
             else:
-                factory = runtime_factory or (lambda current: _build_runtime(current, clock))
+                definitions = tuple(admin.bots.list()) if admin is not None else ()
+                factory = runtime_factory or (
+                    lambda current: _build_runtime(current, clock, bots=definitions))
                 runtime = factory(settings)
                 if inspect.isawaitable(runtime):
                     runtime = await runtime
@@ -221,7 +290,8 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 app.state.message_worker = runtime.message_worker
                 app.state.job_worker = runtime.job_worker
                 if admin is not None:
-                    admin.publish_sources(getattr(runtime, "registry", None))
+                    admin.publish_sources(getattr(runtime, "plugin_registry", None)
+                                          or getattr(runtime, "registry", None))
                 async def observe(worker):
                     await worker.run_forever()
 

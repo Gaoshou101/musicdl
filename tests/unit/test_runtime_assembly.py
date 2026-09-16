@@ -254,3 +254,151 @@ def test_runtime_close_closes_transport_then_plugin_client_then_redis(runtime_fa
     asyncio.run(runtime.aclose())
 
     assert events == ["transport", "plugin", "redis"]
+
+
+def _telegram_settings(tmp_path, **overrides):
+    values = dict(enabled=True, api_id=7, api_hash=_Secret("api-hash"), profile="default",
+                  session_root=str(tmp_path / "sessions"), proxy=None)
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _bot(bot_id="tg", username="MusicBot", **overrides):
+    """One definition as the administration portal stores it."""
+    entry = {"id": bot_id, "enabled": True, "priority": 0, "timeout": 10.0,
+             "username": username, "command_template": None}
+    entry.update(overrides)
+    return entry
+
+
+def test_a_disabled_telegram_deployment_wires_nothing(runtime_fakes, tmp_path):
+    settings = _settings()
+    settings.telegram = _telegram_settings(tmp_path, enabled=False)
+    _Store.plugins = (_Plugin("searcher"),)
+
+    runtime = runtime_fakes._build_runtime(settings, bots=(_bot(),))
+
+    assert runtime.telegram is None and runtime.telegram_sources == 0
+    assert [entry.source_id for entry in runtime.registry.enabled()] == ["searcher"]
+
+
+def test_enabled_telegram_registers_one_source_per_enabled_definition(runtime_fakes, tmp_path):
+    settings = _settings()
+    settings.telegram = _telegram_settings(tmp_path)
+    _Store.plugins = (_Plugin("searcher"),)
+    definitions = (_bot("public", "MusicBot", priority=3),
+                   _bot("custom", "MyBot", command_template="/get {query}", timeout=4.0),
+                   _bot("off", "OffBot", enabled=False))
+
+    runtime = runtime_fakes._build_runtime(settings, bots=definitions)
+
+    entries = {entry.source_id: entry for entry in runtime.registry.enabled()}
+    assert sorted(entries) == ["custom", "public", "searcher"]
+    assert runtime.telegram_sources == 2
+    assert runtime.telegram.root == (tmp_path / "sessions").resolve()
+
+    public = entries["public"]
+    assert (public.version, public.priority) == ("MusicBot", 3)
+    assert public.source.command_template == "/search {query}"
+    assert (public.source.bot_username, public.source.source_id) == ("MusicBot", "public")
+    assert public.source.timeout == 10.0
+
+    custom = entries["custom"]
+    assert custom.source.command_template == "/get {query}" and custom.source.timeout == 4.0
+    # One connector serves every definition, so the bridges are the same object.
+    assert public.source.requester is custom.source.requester
+
+
+def test_the_portal_does_not_get_a_second_toggle_for_a_telegram_bot(runtime_fakes, tmp_path):
+    """A published bot would be a source entry an operator could flip for nothing."""
+    settings = _settings()
+    settings.telegram = _telegram_settings(tmp_path)
+    _Store.plugins = (_Plugin("searcher"),)
+
+    runtime = runtime_fakes._build_runtime(settings, bots=(_bot("tg"),))
+
+    assert [entry.source_id for entry in runtime.plugin_registry.enabled()] == ["searcher"]
+    assert [entry.source_id for entry in runtime.registry.enabled()] == ["searcher", "tg"]
+
+
+def test_enabled_telegram_without_a_definition_registers_nothing(runtime_fakes, tmp_path):
+    settings = _settings()
+    settings.telegram = _telegram_settings(tmp_path)
+
+    runtime = runtime_fakes._build_runtime(settings)
+
+    assert runtime.telegram is not None and runtime.telegram_sources == 0
+
+
+def test_a_bot_id_that_collides_with_a_plugin_id_is_rejected(runtime_fakes, tmp_path):
+    settings = _settings()
+    settings.telegram = _telegram_settings(tmp_path)
+    _Store.plugins = (_Plugin("same"),)
+
+    with pytest.raises(ValueError, match="duplicate_source_id"):
+        runtime_fakes._build_runtime(settings, bots=(_bot("same"),))
+
+
+def test_runtime_close_disconnects_the_telegram_connector_first(runtime_fakes, tmp_path):
+    settings = _settings()
+    settings.telegram = _telegram_settings(tmp_path)
+    runtime = runtime_fakes._build_runtime(settings, bots=(_bot(),))
+    events = []
+
+    async def disconnect():
+        events.append("telegram")
+
+    runtime.telegram.disconnect = disconnect
+    runtime.transport.aclose = lambda: events.append("transport")
+    runtime.plugin_client.aclose = lambda: events.append("plugin")
+    runtime.redis.aclose = lambda: events.append("redis")
+
+    asyncio.run(runtime.aclose())
+
+    assert events == ["telegram", "transport", "plugin", "redis"]
+
+
+class _RestoringConnector:
+    def __init__(self, status):
+        self.status, self.profiles = status, []
+
+    async def restore(self, profile):
+        from musicdl.telegram.models import TelegramResult
+        self.profiles.append(profile)
+        return TelegramResult(self.status)
+
+
+def _probe_state(runtime):
+    return SimpleNamespace(state=SimpleNamespace(runtime=runtime))
+
+
+async def _check_telegram(probes):
+    """``_admin_probes`` hands back a mapping of probe name to coroutine factory."""
+    return await probes["telegram"]()
+
+
+def test_the_telegram_probe_reports_every_state_honestly(runtime_fakes, tmp_path):
+    from musicdl.telegram.models import TelegramStatus
+    probes = runtime_fakes._admin_probes
+    enabled = _settings()
+    enabled.telegram = _telegram_settings(tmp_path)
+    disabled = _settings()
+    disabled.telegram = _telegram_settings(tmp_path, enabled=False)
+
+    # A disabled deployment has nothing to check.
+    offline = _probe_state(SimpleNamespace(telegram=None))
+    assert asyncio.run(_check_telegram(probes(disabled, offline))) is True
+    # Enabled but never wired, or wired with nothing defined: unhealthy, not fine.
+    assert asyncio.run(_check_telegram(probes(enabled, offline))) is False
+    defined = _probe_state(SimpleNamespace(telegram=_RestoringConnector(TelegramStatus.READY),
+                                           telegram_sources=0))
+    assert asyncio.run(_check_telegram(probes(enabled, defined))) is False
+
+    for status, expected in ((TelegramStatus.READY, True),
+                             (TelegramStatus.INVALID_SESSION, False),
+                             (TelegramStatus.RATE_LIMITED, False),
+                             (TelegramStatus.CODE_REQUIRED, False)):
+        connector = _RestoringConnector(status)
+        state = _probe_state(SimpleNamespace(telegram=connector, telegram_sources=1))
+        assert asyncio.run(_check_telegram(probes(enabled, state))) is expected
+        assert connector.profiles == ["default"]

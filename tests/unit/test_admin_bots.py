@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import SecretStr
 
 from musicdl.admin.auth import AdminAuth
 from musicdl.admin.management import BotManager
 from musicdl.admin.portal import create_admin_router
+from musicdl.app import create_app
+from musicdl.config import AppSettings, WeComSettings
 
 
 def build_app(manager: BotManager | None = None) -> FastAPI:
@@ -155,3 +159,42 @@ def test_a_failed_persist_rolls_the_change_back():
     with pytest.raises(OSError):
         manager.update("keep", username="OtherBot")
     assert manager.list()[0]["username"] == "MusicBot"
+
+
+def _wecom_settings(tmp_path) -> AppSettings:
+    """The application only assembles a runtime when WeCom is enabled."""
+    settings = AppSettings(wecom=WeComSettings(
+        enabled=True, corp_id="corp", agent_id=7, token=SecretStr("token"),
+        secret=SecretStr("secret"),
+        encoding_aes_key=SecretStr(base64.b64encode(b"k" * 32).decode().rstrip("=")),
+        allowed_users=["user"]))
+    # Assigned after construction to bypass the POSIX-only path validator.
+    settings.admin.state_path = str(tmp_path / "admin-state.json")
+    return settings
+
+
+async def _enter(app: FastAPI) -> None:
+    async with app.router.lifespan_context(app):
+        return None
+
+
+def test_the_runtime_receives_the_definitions_the_portal_owns(tmp_path, monkeypatch):
+    """Startup is the link: the portal owns definitions, the runtime consumes them."""
+    import musicdl.app as app_module
+
+    captured: dict = {}
+
+    def spy(settings, clock=None, **options):
+        captured.update(options)
+        raise RuntimeError("stop after capture")
+
+    app = create_app(_wecom_settings(tmp_path))
+    app.state.admin.bots.register(
+        {"id": "custom", "username": "MyBot", "command_template": "/get {query}"}, persist=True)
+    monkeypatch.setattr(app_module, "_build_runtime", spy)
+
+    with pytest.raises(RuntimeError, match="stop after capture"):
+        asyncio.run(_enter(app))
+
+    assert captured["bots"] == ({"id": "custom", "enabled": True, "priority": 0, "timeout": 10.0,
+                                 "username": "MyBot", "command_template": "/get {query}"},)
