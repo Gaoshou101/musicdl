@@ -52,13 +52,66 @@ def test_an_lx_source_cannot_widen_the_allowlist_past_its_own_text(tmp_path):
 
 def test_a_blocked_lx_source_is_refused_with_the_reason_and_stores_nothing(tmp_path):
     store = PluginStore(tmp_path)
-    blocked = LX_SOURCE.replace("https://music.example.com", "http://music.example.com")
+    # A real HTTP verb the broker cannot perform is not a policy question, so no
+    # grant can rescue it.
+    blocked = LX_SOURCE.replace("method: 'GET'", "method: 'PUT'")
 
     with pytest.raises(ValueError) as failure:
         install_source(store, {"id": "xinghai", "script": blocked})
 
-    assert "plain_http" in str(failure.value)
+    assert "unsupported_method" in str(failure.value)
     assert store.enabled() == ()
+
+
+WIDENED_SOURCE = """/*
+ * @name Widened Source
+ */
+const { EVENT_NAMES, request, on } = globalThis.lx;
+const API = 'http://103.79.184.97:8928/api';
+on(EVENT_NAMES.request, ({ info }) => request(`${API}/search?q=${info.keyword}`, { method: 'POST' }));
+"""
+
+
+def test_a_widened_lx_source_installs_only_once_the_operator_grants_it(tmp_path):
+    store = PluginStore(tmp_path)
+    definition = {"id": "widened", "script": WIDENED_SOURCE}
+
+    with pytest.raises(ValueError) as failure:
+        install_source(store, dict(definition))
+
+    # Nothing is widened silently: the refusal names the grants to add.
+    assert "allow_insecure_http" in str(failure.value) and "allow_ip_hosts" in str(failure.value)
+    assert "allowed_ports" in str(failure.value) and store.enabled() == ()
+
+    stored = install_source(store, dict(definition, allow_insecure_http=True, allow_ip_hosts=True,
+                                        allowed_ports=[443, 8928]))
+
+    egress = stored.manifest.egress
+    assert egress.allowed_hosts == ("103.79.184.97",)
+    assert egress.allowed_ports == (443, 8928)
+    assert egress.allow_insecure_http is True and egress.allow_ip_hosts is True
+    # A grant nobody asked for is never granted on the source's behalf.
+    assert egress.allow_any_host is False
+
+
+def test_a_grant_nobody_asked_for_is_still_the_operators_choice(tmp_path):
+    stored = install_source(PluginStore(tmp_path), {"id": "xinghai", "script": LX_SOURCE,
+                                                    "allow_any_host": True})
+
+    assert stored.manifest.egress.allow_any_host is True
+    assert stored.manifest.allowed_hosts == ("music.example.com",)
+
+
+def test_an_opaque_source_needs_open_egress_and_says_so(tmp_path):
+    store = PluginStore(tmp_path)
+    opaque = LX_SOURCE.replace("'https://music.example.com/api'", "'\\x6d\\x75\\x73\\x69\\x63\\x2e\\x63\\x6f\\x6d'")
+
+    with pytest.raises(ValueError, match="allow_any_host"):
+        install_source(store, {"id": "opaque", "script": opaque})
+
+    stored = install_source(store, {"id": "opaque", "script": opaque, "allow_any_host": True})
+
+    assert stored.manifest.egress.allow_any_host is True
 
 
 def test_a_missing_script_or_id_is_refused(tmp_path):

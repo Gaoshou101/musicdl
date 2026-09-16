@@ -52,8 +52,8 @@ class FakeTransport:
         self.metadata = metadata
         self.calls = []
 
-    async def open(self, media, *, allowed_hosts, timeout_ms=None):
-        self.calls.append((media, tuple(allowed_hosts), timeout_ms))
+    async def open(self, media, *, policy, timeout_ms=None):
+        self.calls.append((media, policy, timeout_ms))
         return self.metadata
 
 
@@ -116,8 +116,11 @@ def test_download_resolves_then_streams_under_one_decreasing_deadline(tmp_path):
     assert asyncio.run(source.download(selected())) is metadata
     assert client.operations == []
     assert len(client.resolve_timeouts) == 1 and len(transport.calls) == 1
-    resolved_media, allowed_hosts, stream_timeout = transport.calls[0]
-    assert resolved_media == descriptor() and allowed_hosts == ("cdn.example",)
+    resolved_media, policy, stream_timeout = transport.calls[0]
+    # The transport receives the manifest's whole egress policy, not just its
+    # host list, so the port and scheme grants travel with the download.
+    assert resolved_media == descriptor() and policy == p.manifest.egress
+    assert policy.allowed_hosts == ("cdn.example",)
     assert 0 < stream_timeout <= client.resolve_timeouts[0] <= 15000
 
 

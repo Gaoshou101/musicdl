@@ -4,7 +4,7 @@ import socket
 
 import pytest
 
-from musicdl.contracts.plugin import HttpAction
+from musicdl.contracts.plugin import EgressPolicy, HttpAction
 from musicdl.plugins.broker import ActionDenied, HttpsActionBroker
 
 
@@ -39,20 +39,21 @@ class FakeTLS:
         return sock
 
 
-def action(url, *, bypass_contract=False):
+def action(url, *, bypass_contract=False, method="GET", headers=None, body=""):
     if bypass_contract:
-        return HttpAction.model_construct(action_id="a1", method="GET", url=url)
-    return HttpAction(action_id="a1", method="GET", url=url)
+        return HttpAction.model_construct(action_id="a1", method=method, url=url,
+                                          headers=headers or {}, body=body)
+    return HttpAction(action_id="a1", method=method, url=url, headers=headers or {}, body=body)
 
 
-def broker(raw=b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\nhello"):
+def broker(raw=b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\nhello", address="93.184.216.34"):
     sock = FakeSocket(raw)
     tls = FakeTLS(sock)
     seen = {}
 
     def resolve(host, port):
         seen["resolve"] = (host, port)
-        return [(socket.AF_INET, ("93.184.216.34", 443))]
+        return [(socket.AF_INET, (address, port))]
 
     def connect(address, timeout):
         seen["connect"] = (address, timeout)
@@ -90,14 +91,75 @@ def test_idna_host_is_normalized_for_allowlist_and_tls():
 
 @pytest.mark.parametrize("url", [
     "https://u:p@api.example.com/x",
-    "https://api.example.com:443/x",
-    "https://api.example.com:8443/x",
     "https://api.example.com/x#frag",
-    "http://api.example.com/x",
 ])
 def test_url_policy_rejects_unsafe_forms(url):
     b, *_ = broker()
     denied(b, url, code="url_denied")
+
+
+def test_an_explicit_default_port_is_the_same_target():
+    b, _, _, seen = broker()
+    b.fetch(action("https://api.example.com:443/x"), ("api.example.com",))
+    assert seen["resolve"] == ("api.example.com", 443)
+
+
+def test_a_port_outside_the_policy_is_refused_before_resolution():
+    b, _, _, seen = broker()
+    denied(b, "https://api.example.com:8443/x", code="port_denied")
+    assert seen == {}
+    b, sock, _, _ = broker()
+    policy = EgressPolicy(allowed_hosts=("api.example.com",), allowed_ports=(443, 8443))
+    b.fetch(action("https://api.example.com:8443/x"), policy)
+    assert b"GET /x HTTP/1.1\r\n" in sock.sent
+    assert b"Host: api.example.com:8443\r\n" in sock.sent
+
+
+def test_plain_http_needs_the_insecure_grant():
+    b, _, _, seen = broker()
+    denied(b, "http://api.example.com/x", code="scheme_denied")
+    assert seen == {}
+    b, sock, tls, seen = broker()
+    policy = EgressPolicy(allowed_hosts=("api.example.com",), allow_insecure_http=True,
+                          allowed_ports=(443, 80))
+    obs = b.fetch(action("http://api.example.com/x"), policy)
+    assert obs.status_code == 200
+    assert seen["resolve"] == ("api.example.com", 80)
+    assert seen["connect"][0] == ("93.184.216.34", 80)
+    # Plain HTTP never negotiates TLS, and the authority carries no default port.
+    assert tls.server_hostname is None
+    assert b"Host: api.example.com\r\n" in sock.sent
+
+
+def test_an_address_literal_needs_the_ip_grant():
+    b, _, _, seen = broker()
+    denied(b, "https://103.79.184.97/x", code="host_denied")
+    assert seen == {}
+    b, _, _, seen = broker(address="103.79.184.97")
+    policy = EgressPolicy(allowed_hosts=("103.79.184.97",), allow_ip_hosts=True)
+    assert b.fetch(action("https://103.79.184.97/x"), policy).status_code == 200
+    assert seen["resolve"] == ("103.79.184.97", 443)
+
+
+def test_the_any_host_grant_reaches_a_host_no_analysis_could_derive():
+    b, _, tls, seen = broker()
+    denied(b, "https://unknown.example/x", code="host_denied")
+    obs = b.fetch(action("https://unknown.example/x"), EgressPolicy(allow_any_host=True))
+    assert obs.status_code == 200 and tls.server_hostname == "unknown.example"
+    assert seen["resolve"][0] == "unknown.example"
+
+
+def test_post_carries_the_method_headers_and_body():
+    payload = base64.b64encode(b'{"id":"1"}')
+    b, sock, _, _ = broker()
+    b.fetch(action("https://api.example.com/x", method="POST",
+                   headers={"X-Token": "secret", "Content-Type": "application/json"},
+                   body=payload.decode()), ("api.example.com",))
+    assert sock.sent.startswith(b"POST /x HTTP/1.1\r\n")
+    assert b"X-Token: secret\r\n" in sock.sent
+    assert b"Content-Type: application/json\r\n" in sock.sent
+    assert b"Content-Length: 10\r\n" in sock.sent
+    assert sock.sent.endswith(b"\r\n\r\n" + b'{"id":"1"}')
 
 
 def test_exact_host_and_proxy_environment_are_ignored(monkeypatch):

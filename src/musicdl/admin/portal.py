@@ -55,10 +55,17 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             return index
         for item in stored:
             manifest = item.manifest
-            index.setdefault(manifest.plugin_id, {"sha256": manifest.sha256,
-                                                  "version": manifest.version,
-                                                  "language": manifest.language})
+            index.setdefault(manifest.plugin_id, plugin_descriptor(manifest))
         return index
+
+    def plugin_descriptor(manifest) -> dict:
+        """What the portal shows about one installed script.
+
+        The egress policy is part of it: an operator who widened a source has to
+        be able to read back exactly which widenings are in force.
+        """
+        return {"sha256": manifest.sha256, "version": manifest.version,
+                "language": manifest.language, "egress": manifest.egress.model_dump(mode="json")}
 
     def with_plugin(index: dict[str, dict], item: dict) -> dict:
         return dict(item, plugin=index.get(item["id"]))
@@ -147,7 +154,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         audit.append({"action": "create_source", "source_id": source_id, "status": "success",
                       "sha256": stored.manifest.sha256, "replaced": sorted(replaced)})
         return dict(row, plugin={"sha256": stored.manifest.sha256, "version": stored.manifest.version,
-                                 "language": stored.manifest.language})
+                                 "language": stored.manifest.language,
+                                 "egress": stored.manifest.egress.model_dump(mode="json")})
 
     @router.patch("/sources/{source_id}")
     async def update_source(source_id: str, body: dict, request: Request):

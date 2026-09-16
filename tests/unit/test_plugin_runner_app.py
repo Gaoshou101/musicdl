@@ -7,6 +7,7 @@ import httpx
 
 from musicdl_plugin_runner.app import app
 import musicdl_plugin_runner.app as runner_app
+from musicdl.contracts.plugin import MAX_INVOCATION_BYTES
 
 
 def request(method, path, **kwargs):
@@ -56,6 +57,6 @@ def test_endpoint_maps_success_busy_and_failure(monkeypatch):
 
 
 def test_oversized_stream_rejected():
-    source = "x" * (6 * 1024 * 1024)
+    source = "x" * MAX_INVOCATION_BYTES
     response = request("POST", "/v1/execute", content=json.dumps(body(source)))
     assert response.status_code == 413

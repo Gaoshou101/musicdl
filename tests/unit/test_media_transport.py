@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from musicdl.contracts.plugin import ResolvedMedia
+from musicdl.contracts.plugin import EgressPolicy, ResolvedMedia
 from musicdl.media.models import MediaError
 from musicdl.media.transport import SecureMediaTransport
 
@@ -71,7 +71,7 @@ def error_code(coro, code):
 
 def test_transport_pins_idna_host_and_streams_with_fixed_request():
     transport_instance, sock, tls, seen = transport()
-    metadata = asyncio.run(transport_instance.open(media(), allowed_hosts=("xn--tst-qla.example",)))
+    metadata = asyncio.run(transport_instance.open(media(), policy=("xn--tst-qla.example",)))
 
     async def read():
         return b"".join([chunk async for chunk in metadata.chunks])
@@ -93,7 +93,7 @@ def test_transport_pins_idna_host_and_streams_with_fixed_request():
 
 def test_transport_rejects_non_allowlisted_host_before_dns():
     transport_instance, _, _, _ = transport()
-    error_code(transport_instance.open(media(), allowed_hosts=("other.example",)), "media_host_denied")
+    error_code(transport_instance.open(media(), policy=("other.example",)), "media_host_denied")
 
 
 @pytest.mark.parametrize("ip", [
@@ -107,7 +107,7 @@ def test_transport_rejects_every_non_global_dns_answer(ip):
         resolver=lambda *_: [(family, (ip, 443))],
         connector=lambda *_: pytest.fail("must not connect"),
     )
-    error_code(transport_instance.open(media("https://api.example/song.mp3"), allowed_hosts=("api.example",)), "media_address_denied")
+    error_code(transport_instance.open(media("https://api.example/song.mp3"), policy=("api.example",)), "media_address_denied")
 
 
 def test_transport_rejects_mixed_global_and_private_answers():
@@ -118,13 +118,13 @@ def test_transport_rejects_mixed_global_and_private_answers():
         ],
         connector=lambda *_: pytest.fail("must not connect"),
     )
-    error_code(transport_instance.open(media("https://api.example/song.mp3"), allowed_hosts=("api.example",)), "media_address_denied")
+    error_code(transport_instance.open(media("https://api.example/song.mp3"), policy=("api.example",)), "media_address_denied")
 
 
 def test_transport_rejects_redirect_and_non_success():
     for status, code in [(301, "media_redirect_denied"), (404, "media_response_invalid")]:
         transport_instance, *_ = transport(f"HTTP/1.1 {status} Response\r\nContent-Type: audio/mpeg\r\n\r\n".encode())
-        error_code(transport_instance.open(media(), allowed_hosts=("xn--tst-qla.example",)), code)
+        error_code(transport_instance.open(media(), policy=("xn--tst-qla.example",)), code)
 
 
 def test_transport_rejects_header_limits_and_encoding():
@@ -137,23 +137,23 @@ def test_transport_rejects_header_limits_and_encoding():
     for header, code in cases:
         raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n" + header + b"\r\nID3payload"
         transport_instance, *_ = transport(raw)
-        error_code(transport_instance.open(media(), allowed_hosts=("xn--tst-qla.example",)), code)
+        error_code(transport_instance.open(media(), policy=("xn--tst-qla.example",)), code)
 
 
 def test_transport_rejects_content_type_and_size_mismatch():
     wrong_mime = b"HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: 10\r\n\r\nID3payload"
     instance, *_ = transport(wrong_mime)
-    error_code(instance.open(media(), allowed_hosts=("xn--tst-qla.example",)), "media_response_invalid")
+    error_code(instance.open(media(), policy=("xn--tst-qla.example",)), "media_response_invalid")
 
     wrong_size = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\nID3payload"
     instance, *_ = transport(wrong_size)
-    error_code(instance.open(media(size=10), allowed_hosts=("xn--tst-qla.example",)), "size_mismatch")
+    error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
 
 
 def test_transport_bounds_stream_and_closes_on_read_error():
     instance, sock, _, _ = transport(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\nID3payload")
     instance.max_bytes = 3
-    metadata = asyncio.run(instance.open(media(), allowed_hosts=("xn--tst-qla.example",)))
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
 
     async def read():
         return [chunk async for chunk in metadata.chunks]
@@ -211,7 +211,7 @@ def test_transport_maps_unexpected_boundary_errors_to_stable_codes(stage, expect
         response_factory=response,
     )
     with pytest.raises(MediaError) as caught:
-        asyncio.run(instance.open(media(), allowed_hosts=("xn--tst-qla.example",)))
+        asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
     assert caught.value.code == expected
     assert "secret" not in repr(caught.value)
 
@@ -233,7 +233,7 @@ def test_transport_runs_response_header_parsing_off_event_loop(monkeypatch):
         return original(response)
 
     monkeypatch.setattr(instance, "_response_headers", wrapped)
-    metadata = asyncio.run(instance.open(media(), allowed_hosts=("xn--tst-qla.example",)))
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
     asyncio.run(metadata.aclose())
     assert observed and observed[0] != main_thread
 
@@ -278,7 +278,7 @@ def test_transport_closes_handles_returned_after_open_cancellation(stage):
     )
 
     async def run():
-        task = asyncio.create_task(instance.open(media(), allowed_hosts=("xn--tst-qla.example",)))
+        task = asyncio.create_task(instance.open(media(), policy=("xn--tst-qla.example",)))
         for _ in range(100):
             if started.is_set():
                 break
@@ -295,3 +295,58 @@ def test_transport_closes_handles_returned_after_open_cancellation(stage):
         assert wrapped.closed
     if stage == "response":
         assert late_response.closed
+
+
+def test_transport_refuses_a_port_the_policy_does_not_allow():
+    instance, *_ = transport()
+    error_code(instance.open(media("https://api.example:8443/song.mp3"), policy=("api.example",)), "media_url_denied")
+
+
+def test_transport_reaches_the_socket_a_granted_port_names():
+    instance, sock, tls, seen = transport()
+    policy = EgressPolicy(allowed_hosts=("api.example",), allowed_ports=(443, 8443))
+    metadata = asyncio.run(instance.open(media("https://api.example:8443/song.mp3"), policy=policy))
+
+    asyncio.run(metadata.aclose())
+    assert seen["resolve"] == ("api.example", 8443)
+    assert tls.server_hostname == "api.example"
+    assert sock.sent.startswith(b"GET /song.mp3 HTTP/1.1\r\nHost: api.example:8443\r\n")
+
+
+def test_transport_allows_plain_http_only_with_the_grant():
+    instance, *_ = transport()
+    error_code(instance.open(media("http://api.example/song.mp3"), policy=("api.example",)), "media_url_denied")
+
+    instance, sock, tls, seen = transport()
+    policy = EgressPolicy(allowed_hosts=("api.example",), allow_insecure_http=True)
+    metadata = asyncio.run(instance.open(media("http://api.example/song.mp3"), policy=policy))
+
+    asyncio.run(metadata.aclose())
+    assert seen["resolve"] == ("api.example", 80)
+    assert tls.server_hostname is None
+    assert sock.sent.startswith(b"GET /song.mp3 HTTP/1.1\r\nHost: api.example\r\n")
+
+
+def test_transport_reaches_any_host_only_with_the_grant():
+    instance, *_ = transport()
+    error_code(instance.open(media("https://cdn.unknown.example/song.mp3"), policy=("api.example",)), "media_host_denied")
+
+    instance, sock, tls, seen = transport()
+    metadata = asyncio.run(instance.open(media("https://cdn.unknown.example/song.mp3"),
+                                         policy=EgressPolicy(allow_any_host=True)))
+
+    asyncio.run(metadata.aclose())
+    assert seen["resolve"] == ("cdn.unknown.example", 443)
+    assert tls.server_hostname == "cdn.unknown.example"
+
+
+def test_transport_refuses_an_ip_literal_without_the_grant():
+    instance, *_ = transport()
+    error_code(instance.open(media("https://103.79.184.97/song.mp3"), policy=("103.79.184.97",)), "media_host_denied")
+
+    instance, sock, tls, seen = transport()
+    policy = EgressPolicy(allowed_hosts=("103.79.184.97",), allow_ip_hosts=True)
+    metadata = asyncio.run(instance.open(media("https://103.79.184.97/song.mp3"), policy=policy))
+
+    asyncio.run(metadata.aclose())
+    assert seen["resolve"] == ("103.79.184.97", 443)

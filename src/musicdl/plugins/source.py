@@ -79,7 +79,7 @@ class PluginSource:
         media = await self.client.resolve(self.stored, candidate, timeout_ms=_remaining_ms(deadline))
         if media.candidate_id != candidate.item_id:
             raise RuntimeError("candidate_mismatch")
-        return await self.transport.open(media, allowed_hosts=self.stored.manifest.allowed_hosts,
+        return await self.transport.open(media, policy=self.stored.manifest.egress,
                                          timeout_ms=_remaining_ms(deadline))
 
     async def health(self) -> bool:

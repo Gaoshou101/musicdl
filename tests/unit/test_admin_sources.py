@@ -61,7 +61,10 @@ def test_creating_a_source_installs_the_script_and_reports_it(tmp_path):
     assert (body["id"], body["name"], body["enabled"], body["priority"], body["timeout"]) == \
         ("demo", "Demo", True, 0, 10.0)
     digest = hashlib.sha256(PYTHON_SOURCE.encode()).hexdigest()
-    assert body["plugin"] == {"sha256": digest, "version": "1", "language": "python"}
+    assert body["plugin"] == {"sha256": digest, "version": "1", "language": "python",
+                              "egress": {"allowed_hosts": ["music.example.com"], "allowed_ports": [443],
+                                         "allow_insecure_http": False, "allow_ip_hosts": False,
+                                         "allow_any_host": False}}
     assert listing.json()["items"][0]["plugin"]["sha256"] == digest
     assert [item.manifest.plugin_id for item in store.enabled()] == ["demo"]
 
@@ -90,13 +93,13 @@ def test_a_blocked_lx_source_is_refused_and_leaves_storage_untouched(tmp_path):
         async with client:
             csrf = await _login(client)
             refused = await client.post("/admin/sources", headers={"x-csrf-token": csrf},
-                                        json={"id": "xinghai", "script": LX_SOURCE.replace("https://", "http://")})
+                                        json={"id": "xinghai", "script": LX_SOURCE.replace("'GET'", "'PUT'")})
             listing = await client.get("/admin/sources")
         return refused, listing, store
 
     refused, listing, store = asyncio.run(run())
 
-    assert refused.status_code == 422 and "plain_http" in refused.json()["detail"]
+    assert refused.status_code == 422 and "unsupported_method" in refused.json()["detail"]
     assert store.enabled() == () and listing.json()["items"] == []
 
 
@@ -112,7 +115,10 @@ def test_an_lx_source_is_stored_with_its_own_language_version_and_allowlist(tmp_
     created, store = asyncio.run(run())
 
     assert created.json()["plugin"] == {"sha256": hashlib.sha256(LX_SOURCE.encode()).hexdigest(),
-                                        "version": "v3.2.11", "language": "javascript"}
+                                        "version": "v3.2.11", "language": "javascript",
+                                        "egress": {"allowed_hosts": ["music.example.com"],
+                                                   "allowed_ports": [443], "allow_insecure_http": False,
+                                                   "allow_ip_hosts": False, "allow_any_host": False}}
     stored = store.enabled()[0]
     assert stored.manifest.allowed_hosts == ("music.example.com",)
 

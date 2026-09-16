@@ -16,6 +16,9 @@ from musicdl.contracts.plugin import MAX_INVOCATION_BYTES, PluginInvocation, Plu
 MAX_STDOUT_BYTES = 64 * 1024
 MAX_STDERR_BYTES = 16 * 1024
 GRACE_SECONDS = 0.25
+# Relative on purpose: the host runs with cwd set to a per-invocation job
+# directory, so this names a directory inside it rather than a host path.
+DENO_CACHE_DIR = ".deno-cache"
 def _remove_job_dir(path: str) -> bool:
     try: shutil.rmtree(path)
     except (OSError, RuntimeError): return False
@@ -36,7 +39,15 @@ def build_host_command(invocation: PluginInvocation) -> HostCommand:
     template = (Path(__file__).with_name("deno_host.js")).read_text(encoding="utf-8")
     payload = "const invocation=JSON.parse(" + json.dumps(invocation.model_dump_json()) + ");\n" + template
     deno = "/usr/bin/deno" if os.name == "posix" else (shutil.which("deno") or "deno")
-    return HostCommand([deno, "run", "--quiet", "--no-config", "--no-lock", "--no-npm", "--cached-only", "--v8-flags=--max-old-space-size=128", "-"], {"DENO_NO_PROMPT": "1"}, payload.encode())
+    # The host environment is deliberately emptied, but Deno refuses to start
+    # without a resolvable cache directory: on Windows it looks the directory up
+    # through a shell folder API that an empty environment leaves unusable, and
+    # it exits 1 with "Could not resolve global Deno cache directory" before
+    # running any of the plugin.  A relative DENO_DIR lands inside the
+    # supervisor's own throwaway job directory, which the supervisor removes
+    # afterwards, so the host still inherits nothing from this process.
+    environment = {"DENO_NO_PROMPT": "1", "DENO_DIR": DENO_CACHE_DIR}
+    return HostCommand([deno, "run", "--quiet", "--no-config", "--no-lock", "--no-npm", "--cached-only", "--v8-flags=--max-old-space-size=128", "-"], environment, payload.encode())
 
 
 class Supervisor:
