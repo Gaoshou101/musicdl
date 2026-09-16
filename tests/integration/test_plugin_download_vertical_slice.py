@@ -539,7 +539,11 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
 
     # The search returned the deduplicated primary candidate and nothing was downloaded yet.
     assert bound["candidates"]["1"]["source_id"] == "primary"
-    assert runner.calls == [("primary", "search"), ("backup", "search"), ("primary", "resolve")]
+    # Both sources are searched concurrently, so the two searches may complete in either
+    # order; only the resolve is ordered after them because it belongs to the later job pass.
+    assert Counter(runner.calls) == Counter({("primary", "search"): 1, ("backup", "search"): 1,
+                                             ("primary", "resolve"): 1})
+    assert runner.calls[-1] == ("primary", "resolve")
     resolves = [item["request"] for item in runner.requests
                 if item["request"]["operation"] == "resolve"]
     assert len(resolves) == 1
