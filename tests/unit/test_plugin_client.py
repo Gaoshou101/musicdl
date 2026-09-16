@@ -141,8 +141,11 @@ def test_a_refused_action_becomes_a_failing_observation_the_source_can_see(tmp_p
     refused = carried["observations"][0]
     assert refused["action_id"] == "a0"
     assert refused["status_code"] == REFUSED_ACTION_STATUS
-    # Nothing about the policy travels with the refusal, so a source cannot use
-    # it to work out which host or scheme the operator allowed.
+    # One bit does travel with the refusal: a real response and a refusal are
+    # distinguishable, so a source can still probe which hosts it is allowed to
+    # reach by trying them.  What does not travel is the reason -- no code, no
+    # header, no body -- and a refusal is indistinguishable from a request that
+    # failed at DNS or connect time, so probing is noisy rather than exact.
     assert refused["headers"] == {} and refused["body"] == ""
     assert "secret" not in json.dumps(carried) and "host_denied" not in json.dumps(carried)
 
