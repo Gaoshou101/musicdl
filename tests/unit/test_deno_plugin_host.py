@@ -1,6 +1,6 @@
 import asyncio,hashlib,json,os,shutil,pytest
 from pathlib import Path
-from musicdl_plugin_runner.supervisor import build_host_command
+from musicdl_plugin_runner.supervisor import DENO_CACHE_DIR, build_host_command
 from musicdl.contracts.plugin import PluginInvocation,PluginManifest,PluginRequest
 import hashlib
 from uuid import uuid4
@@ -13,10 +13,13 @@ def test_deno_source_disables_process_escape():
  assert 'Object.defineProperty(globalThis,"process",{value:undefined,writable:false,configurable:false})' in text
  assert 'const process=undefined;' in text
 def test_deno_command_exact():
+    # Exactly two variables: Deno needs a cache directory to start at all, and
+    # nothing else may leak in from the service process.
     source="function handle(r){return {hits:[]}}"
     inv=PluginInvocation(manifest=PluginManifest(plugin_id="p",version="1",language="javascript",operations=("search",),sha256=hashlib.sha256(source.encode()).hexdigest()),source=source,request=PluginRequest(protocol="musicdl.plugin/v1",request_id=uuid4(),operation="search"))
     c=build_host_command(inv)
-    assert c.argv[1:]==["run","--quiet","--no-config","--no-lock","--no-npm","--cached-only","--v8-flags=--max-old-space-size=128","-"] and c.env=={"DENO_NO_PROMPT":"1"}
+    assert c.argv[1:]==["run","--quiet","--no-config","--no-lock","--no-npm","--cached-only","--v8-flags=--max-old-space-size=128","-"]
+    assert c.env=={"DENO_NO_PROMPT":"1","DENO_DIR":DENO_CACHE_DIR}
 def _invocation(source):
  return PluginInvocation(manifest=PluginManifest(plugin_id="p",version="1",language="javascript",operations=("search",),sha256=hashlib.sha256(source.encode()).hexdigest()),source=source,request=PluginRequest(protocol="musicdl.plugin/v1",request_id=uuid4(),operation="search"))
 
