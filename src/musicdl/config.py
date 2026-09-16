@@ -134,6 +134,20 @@ class AdminSettings(BaseModel):
     enabled: bool = True
     login_limit: int = Field(default=5, ge=1, le=1000)
     login_window_seconds: float = Field(default=60.0, gt=0, le=3600)
+    state_path: str | None = None
+
+    @field_validator("state_path")
+    @classmethod
+    def state_path_must_be_an_absolute_posix_file(cls, value: str | None):
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            return None
+        normalized = posixpath.normpath(trimmed)
+        if not normalized.startswith("/") or normalized == "/":
+            raise ValueError("admin state path must be an absolute POSIX file path")
+        return normalized
 
     @field_validator("login_limit", mode="before")
     @classmethod
