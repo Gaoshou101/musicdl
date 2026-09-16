@@ -47,3 +47,17 @@ def test_ci_reports_the_gates_a_hosted_runner_cannot_decide_instead_of_passing_t
     ran = " ".join(commands(single_job(data)))
     assert "--dry-run" in ran, "a gate that cannot run must stay NOT_RUN, not become a PASS"
     assert "--wecom-url" not in ran and "--redis-url" not in ran
+
+
+def test_ci_actions_are_new_enough_to_stop_targeting_node_20():
+    """Node 20 actions are deprecated on the runners, so pin the floor, not the tag."""
+    data, _ = workflow()
+    floor = {"actions/checkout": 5, "actions/setup-python": 6}
+    seen = {}
+    for step in single_job(data)["steps"]:
+        name, _, ref = str(step.get("uses", "")).partition("@")
+        if name in floor:
+            seen[name] = int(ref.lstrip("v").split(".")[0])
+    assert set(seen) == set(floor), "the workflow must keep using both actions"
+    for name, minimum in floor.items():
+        assert seen[name] >= minimum, f"{name}@{seen[name]} targets Node 20 and is deprecated"
