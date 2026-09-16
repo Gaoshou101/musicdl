@@ -43,7 +43,8 @@ A manifest contains:
 - `version`: 1-64 normalized printable characters.
 - `language`: exactly `python` or `javascript`.
 - `operations`: a non-empty subset of `capabilities`, `search`, `resolve`,
-  `download`, and `health`.
+  `download`, and `health`. `download` is a compatibility label only: the main
+  service never invokes it and expects `resolve` to return a media descriptor.
 - `allowed_hosts`: exact lowercase DNS hostnames; no wildcard, IP literal,
   scheme, port, credentials, or path.
 - `sha256`: lowercase digest of the UTF-8 source.
@@ -78,10 +79,36 @@ replays the plugin. Media bodies do not travel through plugin stdout; downloads
 remain main-owned and pass through the Phase 4 size, type, hash, and destination
 validation path.
 
+For a confirmed candidate the main service calls the typed `PluginClient.resolve()`
+operation, which returns one `ResolvedMedia` descriptor: the selected
+`candidate_id`, an implicit-port `https` `url`, an `extension`, a `media_type`,
+and an optional `declared_size`. The descriptor is rejected unless it is bound to
+the confirmed candidate's `item_id`, free of URL credentials, ports, and
+fragments, and consistent with the media type implied by its extension. The main
+process then streams the body itself through `SecureMediaTransport`, which
+normalizes the host through IDNA, matches it exactly against `allowed_hosts`,
+resolves all A/AAAA answers, rejects non-global addresses, connects to the pinned
+numeric address while preserving the approved hostname for TLS SNI, certificate
+verification, and the `Host` header, sends no ambient credentials, follows no
+redirects, ignores proxy settings, and closes the response. The streaming result
+keeps the Phase 4 bounds at 64 KiB per plugin response or result, 1 MiB per
+brokered observation, and 500 MiB per published file.
+
+The worker records the effect before it is acknowledged: media is validated and
+atomically published by the main process, and the Redis stream entry is
+acknowledged (XACK) only after the recorded effect for that stage has completed.
+Each side effect is fenced by a durable job-effect marker, so a replanned job
+does not repeat a download, refresh, health probe, rebind, or notice that
+already completed.
+
 Search results are validated as existing `Candidate` objects and must match the
 manifest plugin ID and version. A `PluginSource` adapter implements the Phase 2
 `MusicSource` protocol so enabled direct plugins participate in deterministic
-search and remain independently enableable.
+search and remain independently enableable. `PluginSource.download()` is the
+plugin-backed `DownloadSource`: it calls the typed `PluginClient.resolve()` for
+the selected candidate and streams the returned descriptor through the
+main-owned `SecureMediaTransport`, and it never calls the manifest's
+compatibility `download` operation.
 
 Contract failures use stable, non-sensitive codes such as `invalid_plugin`,
 `invalid_output`, `operation_not_allowed`, `timeout`, `resource_limit`, and

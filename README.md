@@ -2,7 +2,7 @@
 
 ## Current implementation
 
-The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and music-Bot adapter contracts, the Phase 4 injected download/media-safety engine, Phase 5 optional advisory ranking and language suggestions, and the Phase 6 restricted plugin runtime. AI is disabled by default and uses deterministic, redacted fallback behavior. Compatibility with a live provider remains deployment validation; no live provider call is claimed here. Concrete provider adapters and the management UI remain integration work or later phases.
+The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and music-Bot adapter contracts, the Phase 4 injected download/media-safety engine, Phase 5 optional advisory ranking and language suggestions, and the Phase 6 restricted plugin runtime with main-process streaming for plugin-resolved media. AI is disabled by default and uses deterministic, redacted fallback behavior. Compatibility with a live provider remains deployment validation; no live provider call is claimed here. Concrete provider adapters and the management UI remain integration work or later phases.
 
 `compose.yaml` defines only `musicdl` and `plugin-runner`; Redis remains an external service. Copy `.env.example` to `.env` and set `MUSICDL_REDIS__URL` before starting Compose. Never put credentials in the example file or source tree.
 
@@ -48,11 +48,66 @@ invocations to 6 MiB, and at most four HTTP actions/observations. Jobs are limit
 30 seconds wall time, 5 seconds CPU, 256 MiB Python address space (128 MiB Deno heap),
 1 MiB file size, 32 file descriptors, 64 KiB stdout, and 16 KiB stderr.
 
+A plugin reports search results, and for a confirmed candidate it answers `resolve`
+with a media descriptor instead of returning bytes. The manifest may still name a
+`download` operation for compatibility, but the main service never invokes it and
+always requires `resolve` for plugin media.
+
 Incompatibilities are intentional: plugins cannot import arbitrary packages, access
 environment variables or secrets, persist files, use arbitrary URLs/redirects/proxies,
 use credentials in URLs, or call the main service directly. Docker runtime checks are
 required for release; this Windows checkout can only report the static/unit evidence
 when Docker Engine is unavailable.
+
+## Plugin download boundary
+
+A `resolve` result is a five-field descriptor: the selected `candidate_id`, an
+implicit-port `https` `url`, an `extension`, a `media_type`, and an optional
+`declared_size`. The descriptor must match the media type implied by its extension and
+stay bound to the `item_id` of the candidate the user confirmed; credentials, an
+explicit port, a fragment, or a mismatched pair is rejected. Media bytes never travel
+through plugin stdout.
+
+The main process owns the transfer. `SecureMediaTransport` normalizes the host through
+IDNA, matches it against the manifest's exact `allowed_hosts`, resolves all A/AAAA
+answers itself, rejects every non-global address, then connects to the pinned numeric
+address while keeping the approved hostname for TLS SNI, certificate verification, and
+the `Host` header. It sends no ambient credentials, ignores proxy settings, never
+follows redirects, bounds the response, and closes the socket.
+`PluginSource.download()` composes that typed `resolve` with that transport, so a
+plugin-backed download never calls the manifest's compatibility `download` operation.
+
+Bounds are fixed: plugin responses and results are limited to 64 KiB, one brokered
+HTTP observation to 1 MiB, and a published media file to 500 MiB. The transport owns
+its response closer, which runs exactly once on success, failure, and cancellation.
+
+Worker budgets come from `AppSettings.worker`, and the settings validate their own
+inequalities at startup: resolve/stream, refresh/search, and health budgets must fit
+inside the job timeout with the configured slack still remaining, and the health
+timeout must not exceed the job timeout.
+
+Selection is generation-bound. A selection job carries the immutable candidate
+snapshot and generation captured when it was created, so a token issued for an older
+generation cannot select a refreshed candidate. Every side effect — the download, the
+failure refresh, the health probe, the rebind, and each WeCom notice — is guarded by
+its own fenced, durable job-effect marker, and a replanned or retried job never
+repeats a side effect that already completed.
+
+Notifications are separate effects: `success_notice`, `selection_prompt`, and
+`terminal_failure_notice`. An acknowledged notification replays durably from its
+record; an uncertain outcome is terminal and is never resent, so `prompt_uncertain`
+stays uncertain instead of prompting the user again.
+
+A failed download excludes exactly the failed source, health-checks that source once,
+persists the actual refreshed candidates, and sends one new `selection_prompt` for the
+user to choose from. It never downloads a replacement automatically.
+
+Publication stays inside the Phase 4 path: the worker reserves a destination suffix
+through the artifact ledger, streams while hashing, verifies the signature, extension,
+and media type, and renames the temporary file into place before the artifact is
+recorded as published. Language directories normalize to `华语`, `欧美`, `日韩`, or
+`未知`, so a missing or unrecognized language is archived under `未知`. The job is
+acknowledged (XACK) only after the recorded effect for that stage has completed.
 
 ## Configuration
 
