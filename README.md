@@ -2,7 +2,7 @@
 
 ## Current implementation
 
-The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and music-Bot adapter contracts, the Phase 4 injected download/media-safety engine, Phase 5 optional advisory ranking and language suggestions, and the Phase 6 restricted plugin runtime with main-process streaming for plugin-resolved media. AI is disabled by default and uses deterministic, redacted fallback behavior. Compatibility with a live provider remains deployment validation; no live provider call is claimed here. Concrete provider adapters and the management UI remain integration work or later phases.
+The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and music-Bot adapter contracts, the Phase 4 injected download/media-safety engine, Phase 5 optional advisory ranking and language suggestions, the Phase 6 restricted plugin runtime with main-process streaming for plugin-resolved media, and the injected administration portal. AI is disabled by default and uses deterministic, redacted fallback behavior. Compatibility with a live provider remains deployment validation; no live provider call is claimed here. Concrete provider adapters remain integration work or later phases; the administration portal is mounted at `/admin` by default and can be switched off with `MUSICDL_ADMIN__ENABLED=false`.
 
 `compose.yaml` defines only `musicdl` and `plugin-runner`; Redis remains an external service. Copy `.env.example` to `.env` and set `MUSICDL_REDIS__URL` before starting Compose. Never put credentials in the example file or source tree.
 
@@ -125,8 +125,13 @@ Copy `.env.example` to `.env` and replace only placeholders with deployment valu
 | `MUSICDL_TELEGRAM__API_HASH` | When enabled | Telegram application API hash; never commit it. |
 | `MUSICDL_TELEGRAM__PROFILE` | No | Restricted session profile name; defaults to `default`. |
 | `MUSICDL_PLUGIN__SERVICE_URL` | Compose-set | Internal plugin endpoint, `http://plugin-runner:8080`. |
+| `MUSICDL_ADMIN__ENABLED` | No | Mounts the `/admin` administration portal; defaults to `true`. |
+| `MUSICDL_ADMIN__LOGIN_LIMIT` | No | Failed admin logins allowed per window before lockout; defaults to `5`. |
+| `MUSICDL_ADMIN__LOGIN_WINDOW_SECONDS` | No | Length of the admin login rate-limit window in seconds; defaults to `60`. |
 
 The connector supports code login, 2FA, restart restoration, invalid-session and rate-limit states. `PublicTelegramBot` supplies the built-in `/search {query}` command contract, while `CustomTelegramBot` accepts a validated command template. Raw Bot responses are decoded at the connector boundary and normalized into the shared candidate model. Real account credentials, the chosen public Bot, and any custom Bot response decoder must be supplied and validated in the deployment environment.
+
+`/admin` serves the login page, the source and Bot controls, aggregated dependency health, and the event and audit logs. The session and CSRF cookies are marked `Secure`, so the panel must be reached over HTTPS through a TLS-terminating reverse proxy. Logins are rate limited, mutating routes require the double-submit CSRF token, and until the default `admin`/`password` credentials are changed every panel route except `/admin/` and `/admin/change-credentials` answers 403. The portal lists the sources the runtime registry assembled at startup; source and Bot edits live in process memory and do not yet survive a restart.
 
 ## Compose startup and health
 

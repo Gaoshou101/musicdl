@@ -19,6 +19,10 @@ from .worker.workers import MessageWorker, JobWorker
 from .wecom.client import WeComClient
 from .ai.client import OpenAICompatibleClient
 from .ai.service import advise_ranking
+from .admin import (AdminAuth, AuditLogStore, BotManager, EventLogStore, HealthAggregator,
+                    RateLimiter, SourceManager)
+from .admin.csrf import CSRFMiddleware
+from .admin.portal import create_admin_router
 
 try:
     from redis.asyncio import Redis
@@ -32,6 +36,57 @@ async def _maybe_close(value: Any) -> None:
         result = closer()
         if inspect.isawaitable(result):
             await result
+
+
+class _AdminState:
+    """Mutable administration state mounted once per application instance."""
+
+    def __init__(self, settings: AppSettings, app: FastAPI) -> None:
+        self.auth = AdminAuth()
+        self.sources = SourceManager()
+        self.bots = BotManager()
+        self.events = EventLogStore()
+        self.audit = AuditLogStore()
+        self.limiter = RateLimiter(limit=settings.admin.login_limit,
+                                   window_seconds=settings.admin.login_window_seconds)
+        self.health = HealthAggregator(_admin_probes(settings, app))
+        app.include_router(create_admin_router(auth=self.auth, sources=self.sources, bots=self.bots,
+                                               health=self.health, events=self.events,
+                                               audit=self.audit, limiter=self.limiter))
+        app.add_middleware(CSRFMiddleware, auth=self.auth)
+
+    def publish_sources(self, registry: Any) -> None:
+        """Expose the sources the runtime actually assembled."""
+        for entry in registry.enabled() if registry is not None else ():
+            try:
+                self.sources.register({"id": entry.source_id, "enabled": entry.enabled,
+                                       "priority": entry.priority})
+            except ValueError:
+                continue
+
+
+def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
+    """Dependency probes for the portal; an omitted key reports unavailable."""
+
+    async def readyz() -> bool:
+        tasks = getattr(app.state, "worker_tasks", None)
+        if tasks is None:
+            return True
+        return app.state.worker_error is None and not any(task.done() for task in tasks)
+
+    async def redis() -> bool:
+        state = getattr(app.state, "wecom_state", None)
+        if state is None:
+            raise RuntimeError("state unavailable")
+        return bool(await state.ping())
+
+    async def telegram() -> bool:
+        # The connector is not wired into the runtime yet, so an enabled
+        # Telegram deployment is genuinely unhealthy while a disabled one has
+        # nothing for this deployment to check.
+        return not settings.telegram.enabled
+
+    return {"readyz": readyz, "redis": redis, "telegram": telegram}
 
 
 class _Runtime:
@@ -137,6 +192,8 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 app.state.service = runtime.service
                 app.state.message_worker = runtime.message_worker
                 app.state.job_worker = runtime.job_worker
+                if admin is not None:
+                    admin.publish_sources(getattr(runtime, "registry", None))
                 async def observe(worker):
                     await worker.run_forever()
 
@@ -168,6 +225,8 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 await _maybe_close(redis)
 
     app = FastAPI(title="musicdl", docs_url=None, redoc_url=None, lifespan=lifespan)
+    admin = _AdminState(settings, app) if settings.admin.enabled else None
+    app.state.admin = admin
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
