@@ -29,6 +29,18 @@ class PasswordHasher:
         except (ValueError, TypeError):
             return False
 
+    def accepts(self, encoded: str) -> bool:
+        """Report whether an encoded hash has a usable shape, without a password."""
+        try:
+            algorithm, iterations, salt, digest = encoded.split("$")
+            if algorithm != self.algorithm or not 100_000 <= int(iterations) <= 1_000_000:
+                return False
+            base64.urlsafe_b64decode(salt)
+            base64.urlsafe_b64decode(digest)
+        except (AttributeError, ValueError, TypeError):
+            return False
+        return True
+
 
 @dataclass(frozen=True)
 class AuthResult:
@@ -38,8 +50,9 @@ class AuthResult:
 
 
 class AdminAuth:
-    def __init__(self, *, hasher: PasswordHasher | None = None):
+    def __init__(self, *, hasher: PasswordHasher | None = None, on_change=None):
         self.hasher = hasher or PasswordHasher()
+        self._on_change = on_change
         self._user_id = "admin"
         self._password_hash = self.hasher.hash("password")
         self._must_change = True
@@ -54,8 +67,34 @@ class AdminAuth:
     def change_credentials(self, user_id: str, username: str, password: str) -> None:
         if user_id != self._user_id or len(username.strip()) < 1 or len(password) < 8 or password == "password":
             raise ValueError("invalid credentials")
+        previous = (self._user_id, self._password_hash, self._must_change)
         self._user_id, self._password_hash, self._must_change = username.strip(), self.hasher.hash(password), False
+        try:
+            self._notify()
+        except BaseException:
+            self._user_id, self._password_hash, self._must_change = previous
+            raise
         self._sessions.clear(); self._csrf.clear()
+
+    def restore(self, payload) -> None:
+        """Adopt persisted credentials, ignoring anything malformed."""
+        if not isinstance(payload, dict):
+            return
+        user_id, encoded, must_change = payload.get("user_id"), payload.get("password_hash"), payload.get("must_change")
+        if not isinstance(user_id, str) or not user_id.strip():
+            return
+        if not isinstance(encoded, str) or not self.hasher.accepts(encoded):
+            return
+        if not isinstance(must_change, bool):
+            return
+        self._user_id, self._password_hash, self._must_change = user_id.strip(), encoded, must_change
+
+    def snapshot(self) -> dict:
+        return {"user_id": self._user_id, "password_hash": self._password_hash, "must_change": self._must_change}
+
+    def _notify(self) -> None:
+        if self._on_change is not None:
+            self._on_change()
 
     def issue_session(self) -> str:
         token = secrets.token_urlsafe(32)

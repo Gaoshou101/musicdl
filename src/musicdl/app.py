@@ -19,8 +19,8 @@ from .worker.workers import MessageWorker, JobWorker
 from .wecom.client import WeComClient
 from .ai.client import OpenAICompatibleClient
 from .ai.service import advise_ranking
-from .admin import (AdminAuth, AuditLogStore, BotManager, EventLogStore, HealthAggregator,
-                    RateLimiter, SourceManager)
+from .admin import (AdminAuth, AdminStateStore, AuditLogStore, BotManager, EventLogStore,
+                    HealthAggregator, RateLimiter, SourceManager)
 from .admin.csrf import CSRFMiddleware
 from .admin.portal import create_admin_router
 
@@ -42,21 +42,40 @@ class _AdminState:
     """Mutable administration state mounted once per application instance."""
 
     def __init__(self, settings: AppSettings, app: FastAPI) -> None:
-        self.auth = AdminAuth()
-        self.sources = SourceManager()
-        self.bots = BotManager()
+        self.store = AdminStateStore(settings.admin.state_path)
+        self.auth = AdminAuth(on_change=self.persist)
+        self.sources = SourceManager(on_change=self.persist)
+        self.bots = BotManager(on_change=self.persist)
         self.events = EventLogStore()
         self.audit = AuditLogStore()
         self.limiter = RateLimiter(limit=settings.admin.login_limit,
                                    window_seconds=settings.admin.login_window_seconds)
         self.health = HealthAggregator(_admin_probes(settings, app))
+        self.load()
         app.include_router(create_admin_router(auth=self.auth, sources=self.sources, bots=self.bots,
                                                health=self.health, events=self.events,
                                                audit=self.audit, limiter=self.limiter))
         app.add_middleware(CSRFMiddleware, auth=self.auth)
 
+    def load(self) -> None:
+        """Adopt whatever the last run persisted; a first run has no file."""
+        payload = self.store.load()
+        if not payload:
+            return
+        self.auth.restore(payload.get("credentials"))
+        self.sources.restore(payload.get("sources"))
+        self.bots.restore(payload.get("bots"))
+
+    def persist(self) -> None:
+        self.store.save(credentials=self.auth.snapshot(), sources=self.sources.snapshot(),
+                        bots=self.bots.snapshot())
+
     def publish_sources(self, registry: Any) -> None:
-        """Expose the sources the runtime actually assembled."""
+        """Expose the sources the runtime actually assembled.
+
+        An id the operator already changed survives the restart and keeps
+        precedence, so publishing never rewrites a stored choice.
+        """
         for entry in registry.enabled() if registry is not None else ():
             try:
                 self.sources.register({"id": entry.source_id, "enabled": entry.enabled,
