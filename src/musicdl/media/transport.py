@@ -18,10 +18,14 @@ from musicdl.plugins.broker import (
 )
 
 from .models import MAX_MEDIA_BYTES, DownloadMetadata, MediaError, _CloseOnce
+from .validation import detect_container
 
 MAX_RESPONSE_HEADER_COUNT = 64
 MAX_RESPONSE_HEADER_FIELD_BYTES = 8 * 1024
 MAX_RESPONSE_HEADERS_BYTES = 64 * 1024
+# Enough bytes for every signature `detect_container` knows, and small enough
+# that a body which is not what the label claimed costs nothing to classify.
+PREFIX_BYTES = 16
 
 
 class MediaTransportError(MediaError):
@@ -228,6 +232,17 @@ class SecureMediaTransport:
         except BaseException:
             pass
 
+    def _read_prefix(self, wrapped: object, response: http.client.HTTPResponse, deadline: float) -> bytes:
+        """Read just enough of a body to name the container it carries."""
+        remaining = _remaining(self.clock, deadline)
+        setter = getattr(wrapped, "settimeout", None)
+        if setter is not None:
+            setter(max(0.001, remaining))
+        value = response.read(PREFIX_BYTES)
+        if not isinstance(value, bytes):
+            raise MediaTransportError("media_response_invalid")
+        return value
+
     async def _fetch_hop(self, url: str, egress: EgressPolicy, deadline: float) -> _Hop:
         """Open one hop and read nothing past its status line and headers.
 
@@ -355,8 +370,21 @@ class SecureMediaTransport:
             if not 200 <= hop.status < 300:
                 raise MediaTransportError("media_response_invalid")
             expected_types = RESOLVED_MEDIA_TYPES[media.extension]
-            if hop.content_type is None or hop.content_type.split(";", 1)[0].strip().casefold() not in expected_types:
-                raise MediaTransportError("media_response_invalid")
+            declared_type = (hop.content_type.split(";", 1)[0].strip().casefold()
+                             if hop.content_type else None)
+            prefix = b""
+            if declared_type is None or declared_type not in expected_types:
+                # The label is evidence, not proof.  Measured 2026-09-17 on
+                # iot202.music.126.net: a real FLAC stream -- `fLaC` magic, a
+                # `.flac` path -- arrived as `Content-Type: audio/mpeg`, and
+                # trusting the label refused a song the bytes agreed with.
+                # When the label disagrees, the first bytes decide, through the
+                # same signature table `validate_media` re-checks the written
+                # file with, so this cannot admit anything the download path
+                # would have rejected anyway.
+                prefix = await self._run(lambda: self._read_prefix(wrapped, response, deadline), deadline)
+                if detect_container(prefix) != "." + media.extension:
+                    raise MediaTransportError("media_response_invalid")
             content_length = hop.content_length
             if content_length is not None and content_length > self.max_bytes:
                 raise MediaError("file_too_large")
@@ -374,6 +402,15 @@ class SecureMediaTransport:
                 nonlocal observed
                 primary: BaseException | None = None
                 try:
+                    # Bytes already read to classify the body are the head of
+                    # the download, not a second copy of it.
+                    if prefix:
+                        observed += len(prefix)
+                        if observed > self.max_bytes:
+                            raise MediaError("file_too_large")
+                        if media.declared_size is not None and observed > media.declared_size:
+                            raise MediaError("size_mismatch")
+                        yield prefix
                     while True:
                         def read_chunk() -> bytes:
                             remaining = _remaining(self.clock, deadline)

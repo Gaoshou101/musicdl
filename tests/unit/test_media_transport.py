@@ -310,6 +310,37 @@ def test_transport_accepts_the_vendor_alias_of_the_container_it_expected():
     assert metadata.extension == "flac" and metadata.media_type == "audio/flac"
 
 
+def test_transport_lets_the_bytes_override_a_wrong_content_type():
+    # Measured 2026-09-17 on iot202.music.126.net: the FLAC stream a resolved
+    # keyword points at arrives with `Content-Type: audio/mpeg`, and trusting
+    # the label refused a real song.  The bytes are `fLaC`, so they decide.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 8\r\n\r\nfLaClaC!"
+    instance, *_ = transport(raw)
+    flac = ResolvedMedia(candidate_id="1", url="https://täst.example/song.flac",
+                         extension="flac", media_type="audio/flac", declared_size=None)
+
+    metadata = asyncio.run(instance.open(flac, policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    # The bytes read to classify the body are the head of the download.
+    assert asyncio.run(read()) == b"fLaClaC!"
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_refuses_bytes_that_contradict_the_extension_too():
+    # The same override must not become a licence to accept anything: a body
+    # that names a different container than the resolved extension is still a
+    # refusal, and it is the refusal `validate_media` would have raised later.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\nID3payload"
+    instance, *_ = transport(raw)
+    flac = ResolvedMedia(candidate_id="1", url="https://täst.example/song.flac",
+                         extension="flac", media_type="audio/flac", declared_size=None)
+
+    error_code(instance.open(flac, policy=("xn--tst-qla.example",)), "media_response_invalid")
+
+
 def test_transport_bounds_stream_and_closes_on_read_error():
     instance, sock, _, _ = transport(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\nID3payload")
     instance.max_bytes = 3
