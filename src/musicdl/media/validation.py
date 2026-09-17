@@ -78,6 +78,18 @@ def _detected(header: bytes) -> tuple[str, str] | None:
     return None
 
 
+def detect_container(header: bytes) -> str | None:
+    """The container these bytes announce, as a leading-dot extension.
+
+    `validate_media` uses this on a finished download.  It is also what decides
+    when a response *label* disagrees with the response *body*: an upstream that
+    serves a real FLAC stream as `audio/mpeg` is common enough that the label
+    alone cannot settle which container arrived.
+    """
+    detected = _detected(header)
+    return detected[0] if detected is not None else None
+
+
 def _valid_id3(h: bytes) -> bool:
     if len(h) < 10 or h[:3] != b"ID3" or h[3] not in (2, 3, 4) or h[4] == 0xFF:
         return False

@@ -2,8 +2,9 @@ import hashlib
 
 import pytest
 
-from musicdl.plugins.install import install_source
+from musicdl.plugins.install import install_lx_source, install_source
 from musicdl.plugins.store import PluginStore
+from musicdl.sources.lx.analyzer import analyze_source
 
 
 PYTHON_SOURCE = "def handle(request):\n    return []\n"
@@ -36,7 +37,11 @@ def test_a_script_that_is_not_an_lx_source_must_declare_its_language(tmp_path):
 
 
 def test_an_lx_source_declares_its_own_language_version_and_allowlist(tmp_path):
-    stored = install_source(PluginStore(tmp_path), {"id": "xinghai", "script": LX_SOURCE})
+    # The language, the version, and the allowlist are the script's to declare;
+    # the one grant every lx source needs is still the operator's to give.
+    stored = install_source(PluginStore(tmp_path), {"id": "xinghai", "script": LX_SOURCE,
+                                                    "allow_any_host": True,
+                                                    "allow_insecure_http": True})
 
     manifest = stored.manifest
     assert manifest.language == "javascript" and manifest.version == "v3.2.11"
@@ -80,23 +85,26 @@ def test_a_widened_lx_source_installs_only_once_the_operator_grants_it(tmp_path)
         install_source(store, dict(definition))
 
     # Nothing is widened silently: the refusal names the grants to add.
+    assert "allow_any_host" in str(failure.value)
     assert "allow_insecure_http" in str(failure.value) and "allow_ip_hosts" in str(failure.value)
     assert "allowed_ports" in str(failure.value) and store.enabled() == ()
 
     stored = install_source(store, dict(definition, allow_insecure_http=True, allow_ip_hosts=True,
-                                        allowed_ports=[443, 8928]))
+                                        allowed_ports=[443, 8928], allow_any_host=True))
 
     egress = stored.manifest.egress
     assert egress.allowed_hosts == ("103.79.184.97",)
     assert egress.allowed_ports == (443, 8928)
     assert egress.allow_insecure_http is True and egress.allow_ip_hosts is True
-    # A grant nobody asked for is never granted on the source's behalf.
-    assert egress.allow_any_host is False
+    # Open egress is the one grant every lx source needs, because the media URL
+    # it resolves to is assembled while it runs.
+    assert egress.allow_any_host is True
 
 
 def test_a_grant_nobody_asked_for_is_still_the_operators_choice(tmp_path):
     stored = install_source(PluginStore(tmp_path), {"id": "xinghai", "script": LX_SOURCE,
-                                                    "allow_any_host": True})
+                                                    "allow_any_host": True,
+                                                    "allow_insecure_http": True})
 
     assert stored.manifest.egress.allow_any_host is True
     assert stored.manifest.allowed_hosts == ("music.example.com",)
@@ -109,7 +117,8 @@ def test_an_opaque_source_needs_open_egress_and_says_so(tmp_path):
     with pytest.raises(ValueError, match="allow_any_host"):
         install_source(store, {"id": "opaque", "script": opaque})
 
-    stored = install_source(store, {"id": "opaque", "script": opaque, "allow_any_host": True})
+    stored = install_source(store, {"id": "opaque", "script": opaque, "allow_any_host": True,
+                                    "allow_insecure_http": True})
 
     assert stored.manifest.egress.allow_any_host is True
 
@@ -126,3 +135,26 @@ def test_operations_must_be_declared_by_the_contract(tmp_path):
     with pytest.raises(ValueError):
         install_source(PluginStore(tmp_path), {"id": "demo", "language": "python",
                                                "script": PYTHON_SOURCE, "operations": ["invent"]})
+
+
+def test_an_lx_source_cannot_be_installed_without_open_egress(tmp_path):
+    """The one grant every lx source needs, asked for by name.
+
+    A resolved media URL is assembled while the script runs, so the host it
+    points at is not something the analysis can allowlist.  The install has to be
+    refused rather than storing a source whose downloads then fail on a host the
+    operator never saw.
+    """
+    analysis = analyze_source(LX_SOURCE, path="demo.js")
+    store = PluginStore(tmp_path)
+
+    with pytest.raises(ValueError, match="allow_any_host"):
+        install_lx_source(store, plugin_id="demo", script=LX_SOURCE, request={}, analysis=analysis)
+
+    assert store.enabled() == ()
+    stored = install_lx_source(store, plugin_id="demo", script=LX_SOURCE,
+                               request={"allow_any_host": True, "allow_insecure_http": True},
+                               analysis=analysis)
+    assert stored.manifest.egress.allow_any_host is True
+    assert stored.manifest.egress.allow_insecure_http is True
+    assert stored.manifest.operations == ("search", "resolve")

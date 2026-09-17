@@ -80,6 +80,10 @@ class LxAnalysis:
     ip_hosts: tuple[str, ...] = ()
     ports: tuple[int, ...] = ()
     insecure_http: bool = False
+    # Whether the endpoints this script *calls* could not be derived at all (an
+    # opaque script, or one with no readable URL).  Distinct from the
+    # ``allow_any_host`` requirement every lx source carries: the host in the
+    # media URL is produced while the script runs, so no analysis can see it.
     open_egress: bool = False
     opaque: bool = False
     blockers: tuple[LxFinding, ...] = ()
@@ -133,14 +137,29 @@ class LxAnalysis:
         rather than a side effect of importing a file.
         """
         grants: dict[str, Any] = {}
-        if self.insecure_http:
-            grants["allow_insecure_http"] = True
+        # Every lx source gets plain HTTP as well, for the same reason it gets
+        # open egress just below: the media URL is assembled while the script
+        # runs, so neither its host nor its scheme is visible in the text.
+        # Measured on 2026-09-17: 全豆要-聚合音源v3.0 and 星海音乐源 both resolve
+        # kw/128014 to an http:// CDN link their own text never spells out, and
+        # the media transport refused the download as media_url_denied (which is
+        # scheme_denied renamed there) while the same id through 聚合音源 特供版
+        # downloaded 256 KiB once the grant was present.
+        grants["allow_insecure_http"] = True
         if self.ip_hosts:
             grants["allow_ip_hosts"] = True
-        if self.open_egress:
-            # Endpoints this analysis cannot derive are endpoints the strict
-            # allowlist cannot cover, so the only alternative is refusal.
-            grants["allow_any_host"] = True
+        # Every lx source gets open egress, not only the ones whose endpoints
+        # this analysis cannot derive.  The endpoints a script calls are
+        # allowlistable; the media URL it hands back is not, because that host
+        # is produced while the script runs.  Measured on 2026-09-16: the
+        # analysed aggregate source resolved kw/128014 to a kuwo CDN link
+        # (kw-er.kuwo.cn) its own text never mentions, and the media transport,
+        # which shares this manifest's policy, then failed the download with
+        # media_host_denied after a resolve that had succeeded.  Requiring the
+        # grant here makes that one decision explicit per source -- the portal
+        # refuses the install without it -- instead of leaving the operator to
+        # discover it as a download that never finishes.
+        grants["allow_any_host"] = True
         if self.ports:
             grants["allowed_ports"] = list(self.allowed_ports)
         return grants
@@ -369,6 +388,9 @@ def analyze_source(source: str, *, path: str | None = None) -> LxAnalysis:
     if not endpoints and referenced:
         caveats.append(LxFinding("literal_hosts_only",
                                  "every endpoint comes from bare domain literals rather than absolute URLs"))
+    caveats.append(LxFinding("resolved_host_unknown",
+                             "the media URL this script returns is assembled while it runs, so the host it "
+                             "points at cannot be allowlisted and the source always needs open egress"))
     open_egress = obfuscated or (not endpoints and not referenced)
     if not endpoints and not referenced and not obfuscated:
         caveats.append(LxFinding("undecidable_endpoints",
@@ -391,3 +413,17 @@ def analyze_file(path: str | Path) -> LxAnalysis:
     location = Path(path)
     return analyze_source(location.read_text(encoding="utf-8", errors="surrogateescape"),
                           path=str(location))
+
+
+def lx_shaped_file(path: str | Path) -> bool:
+    """Whether one stored script is an lx custom source, without running it.
+
+    The installer routes on this same property, so a plugin the portal accepted
+    as an lx source is exactly the plugin the main process searches the platform
+    catalogue for.  A script that cannot be read or parsed is not one: the
+    caller then keeps whatever the plugin itself provides.
+    """
+    try:
+        return analyze_file(path).lx_shaped
+    except (OSError, ValueError):
+        return False

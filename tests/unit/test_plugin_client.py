@@ -10,7 +10,7 @@ import pytest
 from musicdl.contracts.plugin import (MAX_HTTP_ACTIONS, HttpAction, HttpObservation, PluginError,
                                       PluginManifest, PluginRequest, PluginResponse, PluginStep)
 from musicdl.plugins.broker import ActionDenied
-from musicdl.plugins.client import PluginClient
+from musicdl.plugins.client import REFUSED_ACTION_STATUS, PluginClient
 from musicdl.plugins.store import StoredPlugin
 from musicdl.sources.models import Candidate
 
@@ -85,7 +85,7 @@ def test_actions_accumulate_up_to_the_contract_limit_and_the_next_is_rejected(tm
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode,expected", [("repeat", "action_repeated"), ("mismatch", "observation_mismatch"), ("denied", "action_denied")])
+@pytest.mark.parametrize("mode,expected", [("repeat", "action_repeated"), ("mismatch", "observation_mismatch")])
 def test_action_ids_and_broker_results_are_bounded(tmp_path, mode, expected):
     request_id = uuid4()
     action = HttpAction(action_id="a", method="GET", url="https://api.example.com/x")
@@ -96,7 +96,6 @@ def test_action_ids_and_broker_results_are_bounded(tmp_path, mode, expected):
         steps.append(response(request_id, result={"items": []}))
     class Broker:
         def fetch(self, action, allowed, *, timeout=None):
-            if mode == "denied": raise ActionDenied("host_denied", "secret")
             return HttpObservation(action_id="wrong" if mode == "mismatch" else action.action_id, status_code=200, body="")
     client, http = make_client(tmp_path, steps, Broker())
     async def run():
@@ -105,6 +104,50 @@ def test_action_ids_and_broker_results_are_bounded(tmp_path, mode, expected):
                 await client.invoke(stored(tmp_path), PluginRequest(protocol="musicdl.plugin/v1", request_id=request_id, operation="search"))
         finally: await http.aclose()
     asyncio.run(run())
+
+
+def test_a_refused_action_becomes_a_failing_observation_the_source_can_see(tmp_path):
+    """A refusal ends one request, not the invocation.
+
+    The analysed lx sources carry their own fallback chain and already treat a
+    status of 400 or more as a failed branch, so a broker refusal has to arrive
+    at the script as a failing observation.  Aborting the invocation instead
+    turned one dead endpoint into a source that could not answer at all, which
+    is what the twelve supplied scripts mostly hit.
+    """
+    request_id = uuid4(); requests = []
+    dead = HttpAction(action_id="a0", method="GET", url="https://api.example.com/dead")
+    alive = HttpAction(action_id="a1", method="GET", url="https://api.example.com/alive")
+    steps = [PluginStep(action=dead), PluginStep(action=alive), response(request_id, result={"items": []})]
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=steps.pop(0).model_dump(mode="json"))
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False, follow_redirects=False)
+    class Broker:
+        def fetch(self, action, allowed, *, timeout=None):
+            if action.action_id == "a0":
+                raise ActionDenied("host_denied", "secret reason for the refusal")
+            return HttpObservation(action_id=action.action_id, status_code=200, body="")
+    client = PluginClient("http://runner:8080", broker=Broker(), http_client=http, timeout=2)
+    async def run():
+        try:
+            result = await client.invoke(stored(tmp_path), PluginRequest(protocol="musicdl.plugin/v1", request_id=request_id, operation="search"))
+            assert result.ok and result.result == {"items": []}
+        finally:
+            await http.aclose()
+    asyncio.run(run())
+    carried = requests[-1]
+    assert len(carried["actions"]) == 2
+    refused = carried["observations"][0]
+    assert refused["action_id"] == "a0"
+    assert refused["status_code"] == REFUSED_ACTION_STATUS
+    # One bit does travel with the refusal: a real response and a refusal are
+    # distinguishable, so a source can still probe which hosts it is allowed to
+    # reach by trying them.  What does not travel is the reason -- no code, no
+    # header, no body -- and a refusal is indistinguishable from a request that
+    # failed at DNS or connect time, so probing is noisy rather than exact.
+    assert refused["headers"] == {} and refused["body"] == ""
+    assert "secret" not in json.dumps(carried) and "host_denied" not in json.dumps(carried)
 
 
 @pytest.mark.parametrize("kind", ["timeout", "http", "json"])

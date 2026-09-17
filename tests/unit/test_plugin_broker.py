@@ -168,6 +168,23 @@ def test_exact_host_and_proxy_environment_are_ignored(monkeypatch):
     denied(b, "https://other.example.com/x", code="host_denied")
 
 
+def test_a_missing_user_agent_is_filled_in_and_a_declared_one_wins():
+    # The action is the source's data, but the request is shaped by the host:
+    # 玉宁熙-Pro is written for a runtime whose network layer sends a browser
+    # User-Agent, and without one nmobi.kuwo.cn answers with an unrelated track.
+    b, sock, _, _ = broker()
+    b.fetch(action("https://api.example.com/search?rid=128014"), ("api.example.com",))
+    assert b"User-Agent: Mozilla/5.0" in sock.sent
+    assert sock.sent.count(b"\r\nUser-Agent:") == 1
+
+    b, sock, _, _ = broker()
+    b.fetch(action("https://api.example.com/search?rid=128014",
+                   headers={"user-agent": "kwplayercar_ar_6.0.0.9"}),
+            ("api.example.com",))
+    assert b"\r\nuser-agent: kwplayercar_ar_6.0.0.9\r\n" in sock.sent
+    assert sock.sent.count(b"\r\nUser-Agent:") == 0
+
+
 @pytest.mark.parametrize("status", [301, 302, 307, 308])
 def test_redirects_are_rejected(status):
     b, *_ = broker(f"HTTP/1.1 {status} Found\r\nLocation: https://other.example.com\r\n\r\n".encode())

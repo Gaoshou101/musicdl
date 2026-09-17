@@ -43,7 +43,13 @@ _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 RESOLVED_MEDIA_MAX_BYTES = 500 * 1024 * 1024
 RESOLVED_MEDIA_TYPES = {
     "mp3": frozenset({"audio/mpeg"}),
-    "flac": frozenset({"audio/flac"}),
+    # `audio/x-flac` is the vendor-tree alias of the registered `audio/flac`,
+    # and it is what the CDN a resolved keyword actually points at answers with
+    # (measured 2026-09-17 on car-er.kuwo.cn: HTTP 200, Content-Type
+    # audio/x-flac).  Refusing the alias refused a real song, so both names are
+    # accepted here; the extension still decides which container is expected
+    # and `validate_media` still sniffs the bytes.
+    "flac": frozenset({"audio/flac", "audio/x-flac"}),
     "m4a": frozenset({"audio/mp4", "audio/x-m4a"}),
     "ogg": frozenset({"audio/ogg", "application/ogg"}),
 }

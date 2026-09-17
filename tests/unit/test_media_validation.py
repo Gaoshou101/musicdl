@@ -5,10 +5,15 @@ from pathlib import Path
 import pytest
 
 from musicdl.media import MAX_MEDIA_BYTES, DownloadEvent, DownloadMetadata, MediaError, normalize_language, sanitize_component, validate_media, validated_destination
+from musicdl.media.validation import detect_container
 
 ID3 = b"ID3\x04\x00\x00\x00\x00\x00\x00"
 MPEG = b"\xff\xfb\x90\x64"
 M4A = b"\x00\x00\x00\x14ftypM4A \x00\x00\x00\x00M4A "
+# What kuwo's car CDN actually served on 2026-09-17 for
+# `car-bj.kuwo.cn/.../1904613985.aac`: a 32-byte box whose major brand is the
+# generic `mp42`, with `M4A `, `mp42`, and `isom` as its compatible brands.
+KUWO_AAC = bytes.fromhex("00000020667479706d703432000000004d3441206d70343269736f6d00000000")
 
 
 def test_language_and_path_helpers(tmp_path):
@@ -58,6 +63,18 @@ def test_extended_length_unc_target_prefix_does_not_trigger_path_escape(tmp_path
 def test_valid_signatures(header, fmt):
     ext, mime = validate_media(header, DownloadMetadata(chunks=(), extension=fmt), fmt)
     assert ext == "." + fmt and mime
+
+
+def test_a_generic_major_brand_still_names_the_container_its_brand_list_names():
+    # The brand list identifies the container, and the major brand is only its
+    # first entry: kuwo's `.aac` links are mp42 files that list `M4A ` among
+    # their brands, and reading that list is what admits them.
+    assert detect_container(KUWO_AAC) == ".m4a"
+    assert validate_media(KUWO_AAC, DownloadMetadata(chunks=(), extension="m4a"), None) == (".m4a", "audio/mp4")
+    # Cut off before the brands, the same bytes still decide nothing: this is
+    # the defect that was fixed, not a widened signature table.
+    with pytest.raises(MediaError, match="signature_mismatch"):
+        validate_media(KUWO_AAC[:16], DownloadMetadata(chunks=(), extension="m4a"), None)
 
 
 def test_contract_constants_frozen_and_no_directory_creation(tmp_path):

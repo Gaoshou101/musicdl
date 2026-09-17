@@ -22,6 +22,17 @@ from .broker import ActionDenied, HttpsActionBroker
 from .store import StoredPlugin
 
 
+# The observation a source receives when the broker would not carry one of its
+# requests.  It is a failing status rather than an exception on purpose: an lx
+# custom source keeps its own fallback chain and already treats a status of 400
+# or more as a failed branch, so aborting the whole invocation turns one dead
+# endpoint into an unusable source.  599 is the largest status HttpObservation
+# accepts, and the observation carries no headers and no body, so a refused
+# request cannot be told apart from a request that failed on the wire and the
+# egress policy itself is not observable to the plugin.
+REFUSED_ACTION_STATUS = 599
+
+
 class PluginClientError(RuntimeError):
     """Stable internal client failure which must not be remapped."""
 
@@ -217,8 +228,12 @@ class PluginClient:
                 try:
                     observation = await asyncio.to_thread(
                         self.broker.fetch, action, stored.manifest.egress, timeout=remaining)
-                except ActionDenied as exc:
-                    raise RuntimeError("runner_timeout" if exc.code == "timeout" else "action_denied") from exc
+                except ActionDenied:
+                    # A refusal ends this request, not the invocation.  Whether
+                    # the deadline also ran out is left to the next iteration,
+                    # which is where every other timeout is noticed.
+                    observation = HttpObservation(action_id=action.action_id,
+                                                  status_code=REFUSED_ACTION_STATUS)
                 except Exception as exc:
                     raise RuntimeError("action_failed") from exc
                 if observation.action_id != action.action_id:
