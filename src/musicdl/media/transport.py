@@ -8,6 +8,9 @@ import socket
 import ssl
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from urllib.parse import urljoin
+
 from musicdl.contracts.plugin import RESOLVED_MEDIA_TYPES, ResolvedMedia
 from musicdl.plugins.broker import (
     ActionDenied, EgressPolicy, EgressTarget, PluginManifest, _parse_action_url,
@@ -32,15 +35,17 @@ def _remaining(clock: Callable[[], float], deadline: float) -> float:
     return value
 
 
-def _normalized_target(media: ResolvedMedia, policy: EgressPolicy | PluginManifest | Iterable[str]) -> EgressTarget:
-    """Resolve one media URL against a policy, naming the offending layer.
+def _target_for_url(url: str, policy: EgressPolicy) -> EgressTarget:
+    """Resolve one URL against a policy, naming the offending layer.
 
     The URL shape is refused as ``media_url_denied`` and a destination the
     policy does not reach as ``media_host_denied``, so an operator can tell a
-    malformed plugin answer from a missing grant.
+    malformed plugin answer from a missing grant.  Every hop of a redirect
+    chain goes through here, so a redirect cannot reach a host, scheme, or port
+    the source was never granted.
     """
     try:
-        return _parse_action_url(media.url, coerce_egress_policy(policy))
+        return _parse_action_url(url, policy)
     except ActionDenied as exc:
         raise MediaTransportError(
             "media_host_denied" if exc.code == "host_denied" else "media_url_denied") from exc
@@ -50,6 +55,20 @@ def _close_sync(value: object) -> None:
     close = getattr(value, "close", None)
     if close is not None:
         close()
+
+
+@dataclass(frozen=True)
+class _Hop:
+    """One opened response: what it said, and the sockets still behind it."""
+
+    target: EgressTarget
+    status: int
+    headers: dict[str, str]
+    content_length: int | None
+    content_type: str | None
+    response: object
+    wrapped: object
+    raw: object
 
 
 class SecureMediaTransport:
@@ -64,6 +83,7 @@ class SecureMediaTransport:
         default_timeout_ms: int = 30_000,
         max_bytes: int = MAX_MEDIA_BYTES,
         chunk_size: int = 64 * 1024,
+        max_redirects: int = 4,
     ):
         if isinstance(default_timeout_ms, bool) or not isinstance(default_timeout_ms, int) or not 0 < default_timeout_ms <= 30_000:
             raise ValueError("invalid_timeout")
@@ -71,6 +91,8 @@ class SecureMediaTransport:
             raise ValueError("invalid_max_bytes")
         if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
             raise ValueError("invalid_chunk_size")
+        if isinstance(max_redirects, bool) or not isinstance(max_redirects, int) or not 0 <= max_redirects <= 10:
+            raise ValueError("invalid_max_redirects")
         self.resolver = resolver or self._resolve
         self.connector = connector or self._connect
         self._ssl_context = ssl.create_default_context()
@@ -80,6 +102,7 @@ class SecureMediaTransport:
         self.default_timeout_ms = default_timeout_ms
         self.max_bytes = max_bytes
         self.chunk_size = chunk_size
+        self.max_redirects = max_redirects
         self._active: list[_CloseOnce] = []
         self._active_lock = asyncio.Lock()
 
@@ -194,23 +217,27 @@ class SecureMediaTransport:
             content_length = int(length_header)
         return selected, content_length, selected.get("content-type")
 
-    async def open(
-        self,
-        media: ResolvedMedia,
-        *,
-        policy: EgressPolicy | PluginManifest | Iterable[str],
-        timeout_ms: int | None = None,
-    ) -> DownloadMetadata:
-        if timeout_ms is None:
-            timeout_ms = self.default_timeout_ms
-        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
-            raise MediaTransportError("media_timeout")
-        deadline = self.clock() + timeout_ms / 1000
-        target = _normalized_target(media, policy)
-        approved, port = target.host, target.port
+    async def _discard_handles(self, handles: tuple[object, ...]) -> None:
+        """Close handles whose bytes will never be read.
 
+        A redirect target is fetched on fresh sockets, and a close error on the
+        abandoned hop must not replace the outcome the caller is waiting for.
+        """
+        try:
+            await self._close_handles(handles)
+        except BaseException:
+            pass
+
+    async def _fetch_hop(self, url: str, egress: EgressPolicy, deadline: float) -> _Hop:
+        """Open one hop and read nothing past its status line and headers.
+
+        The caller owns the returned handles on success; every failure path
+        closes whatever this hop already acquired, so a redirect chain that
+        ends in a refusal leaves no socket behind.
+        """
+        target = _target_for_url(url, egress)
+        approved, port = target.host, target.port
         raw = wrapped = response = None
-        close_once: _CloseOnce | None = None
         try:
             try:
                 candidates = await self._run(
@@ -281,16 +308,56 @@ class SecureMediaTransport:
                 response.begin()
 
             await self._run(begin_response, deadline)
-            status = int(getattr(response, "status", 0))
-            if 300 <= status < 400:
-                raise MediaTransportError("media_redirect_denied")
-            if status < 200 or status >= 300:
-                raise MediaTransportError("media_response_invalid")
             headers, content_length, content_type = await self._run(
                 lambda: self._response_headers(response), deadline)
-            expected_types = RESOLVED_MEDIA_TYPES[media.extension]
-            if content_type is None or content_type.split(";", 1)[0].strip().casefold() not in expected_types:
+            return _Hop(target=target, status=int(getattr(response, "status", 0)), headers=headers,
+                        content_length=content_length, content_type=content_type,
+                        response=response, wrapped=wrapped, raw=raw)
+        except BaseException:
+            await self._discard_handles((response, wrapped, raw))
+            raise
+
+    async def open(
+        self,
+        media: ResolvedMedia,
+        *,
+        policy: EgressPolicy | PluginManifest | Iterable[str],
+        timeout_ms: int | None = None,
+    ) -> DownloadMetadata:
+        if timeout_ms is None:
+            timeout_ms = self.default_timeout_ms
+        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
+            raise MediaTransportError("media_timeout")
+        deadline = self.clock() + timeout_ms / 1000
+        egress = coerce_egress_policy(policy)
+
+        raw = wrapped = response = None
+        close_once: _CloseOnce | None = None
+        try:
+            # A CDN link that answers 3xx is followed, but only to a target this
+            # same policy already reaches: every hop repeats the exact-host
+            # allowlist check, the scheme grant, and the global-address check on
+            # the addresses actually resolved for that hop.  A loop, a missing
+            # Location, or a chain longer than ``max_redirects`` stays a
+            # ``media_redirect_denied`` refusal.
+            url = media.url
+            for redirects in range(self.max_redirects + 1):
+                hop = await self._fetch_hop(url, egress, deadline)
+                response, wrapped, raw = hop.response, hop.wrapped, hop.raw
+                if not 300 <= hop.status < 400:
+                    break
+                location = hop.headers.get("location")
+                if not location or redirects == self.max_redirects:
+                    raise MediaTransportError("media_redirect_denied")
+                url = urljoin(url, location)
+                await self._discard_handles((response, wrapped, raw))
+                raw = wrapped = response = None
+            if not 200 <= hop.status < 300:
                 raise MediaTransportError("media_response_invalid")
+            expected_types = RESOLVED_MEDIA_TYPES[media.extension]
+            if hop.content_type is None or hop.content_type.split(";", 1)[0].strip().casefold() not in expected_types:
+                raise MediaTransportError("media_response_invalid")
+            content_length = hop.content_length
             if content_length is not None and content_length > self.max_bytes:
                 raise MediaError("file_too_large")
             if media.declared_size is not None and content_length is not None and content_length != media.declared_size:

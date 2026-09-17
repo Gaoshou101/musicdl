@@ -127,6 +127,152 @@ def test_transport_rejects_redirect_and_non_success():
         error_code(transport_instance.open(media(), policy=("xn--tst-qla.example",)), code)
 
 
+MEDIA_OK = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\nID3payload"
+
+
+def redirect_transport(responses, *, addresses=None, **kwargs):
+    """Serve one scripted response per hop and record what each hop reached."""
+    sockets = [FakeSocket(raw) for raw in responses]
+    connects = []
+    hostnames = []
+    resolved = []
+    address_map = dict(addresses or {})
+
+    def resolve(host, port):
+        resolved.append((host, port))
+        return [(socket.AF_INET, (address_map.get(host, "93.184.216.34"), port))]
+
+    def connect(address, timeout):
+        connects.append(address)
+        if len(connects) > len(sockets):
+            raise AssertionError("the transport opened more hops than the test scripted")
+        return sockets[len(connects) - 1]
+
+    def tls(sock, server_hostname):
+        hostnames.append(server_hostname)
+        return sock
+
+    instance = SecureMediaTransport(resolver=resolve, connector=connect, tls_wrap=tls, **kwargs)
+    return instance, sockets, connects, hostnames, resolved
+
+
+def test_transport_follows_a_redirect_to_a_policy_approved_host():
+    redirect = b"HTTP/1.1 302 Found\r\nLocation: https://cdn.example/song.mp3\r\nContent-Length: 0\r\n\r\n"
+    instance, sockets, _, hostnames, resolved = redirect_transport([redirect, MEDIA_OK])
+    policy = EgressPolicy(allowed_hosts=("xn--tst-qla.example", "cdn.example"))
+
+    metadata = asyncio.run(instance.open(media(), policy=policy))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == b"ID3payload"
+    asyncio.run(metadata.aclose())
+    assert resolved == [("xn--tst-qla.example", 443), ("cdn.example", 443)]
+    assert hostnames == ["xn--tst-qla.example", "cdn.example"]
+    assert sockets[0].closed and sockets[1].closed
+    assert sockets[1].sent == (
+        b"GET /song.mp3 HTTP/1.1\r\nHost: cdn.example\r\n"
+        b"Accept: application/octet-stream\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+    )
+
+
+def test_transport_follows_a_relative_redirect_on_the_same_host():
+    instance, sockets, _, _, resolved = redirect_transport([
+        b"HTTP/1.1 301 Moved Permanently\r\nLocation: /real/song.mp3\r\n\r\n", MEDIA_OK])
+
+    metadata = asyncio.run(instance.open(media("https://täst.example/old.mp3"),
+                                         policy=("xn--tst-qla.example",)))
+
+    asyncio.run(metadata.aclose())
+    assert resolved == [("xn--tst-qla.example", 443)] * 2
+    assert sockets[1].sent.startswith(b"GET /real/song.mp3 HTTP/1.1\r\nHost: xn--tst-qla.example\r\n")
+
+
+def test_transport_refuses_a_redirect_past_the_policy():
+    redirect = b"HTTP/1.1 302 Found\r\nLocation: https://elsewhere.example/song.mp3\r\n\r\n"
+    instance, sockets, connects, _, _ = redirect_transport([redirect, MEDIA_OK])
+
+    error_code(instance.open(media(), policy=("xn--tst-qla.example",)), "media_host_denied")
+
+    assert connects == [("93.184.216.34", 443)]
+    assert sockets[0].closed and sockets[1].sent == b""
+
+
+def test_transport_refuses_a_redirect_to_a_private_address():
+    redirect = b"HTTP/1.1 302 Found\r\nLocation: https://internal.example/song.mp3\r\n\r\n"
+    instance, sockets, *_ = redirect_transport([redirect], addresses={"internal.example": "10.0.0.1"})
+
+    error_code(instance.open(media(), policy=EgressPolicy(allow_any_host=True)), "media_address_denied")
+
+    assert sockets[0].closed
+
+
+def test_transport_stops_a_redirect_loop_at_the_budget():
+    loop = b"HTTP/1.1 302 Found\r\nLocation: https://xn--tst-qla.example/song.mp3\r\n\r\n"
+    instance, sockets, connects, _, _ = redirect_transport([loop] * 8, max_redirects=2)
+
+    error_code(instance.open(media(), policy=("xn--tst-qla.example",)), "media_redirect_denied")
+
+    assert len(connects) == 3
+    assert all(sock.closed for sock in sockets[:3]) and sockets[3].sent == b""
+
+
+def test_transport_refuses_the_first_redirect_when_the_budget_is_zero():
+    redirect = b"HTTP/1.1 302 Found\r\nLocation: https://cdn.example/song.mp3\r\n\r\n"
+    instance, sockets, _, _, _ = redirect_transport([redirect, MEDIA_OK], max_redirects=0)
+
+    error_code(instance.open(media(), policy=EgressPolicy(allow_any_host=True)), "media_redirect_denied")
+
+    assert sockets[0].closed and sockets[1].sent == b""
+
+
+def test_transport_refuses_a_redirect_that_downgrades_without_the_grant():
+    redirect = b"HTTP/1.1 302 Found\r\nLocation: http://cdn.example/song.mp3\r\n\r\n"
+    hosts = ("xn--tst-qla.example", "cdn.example")
+
+    instance, sockets, _, _, _ = redirect_transport([redirect, MEDIA_OK], max_redirects=1)
+    error_code(instance.open(media(), policy=hosts), "media_url_denied")
+    assert sockets[0].closed and sockets[1].sent == b""
+
+    instance, sockets, _, _, resolved = redirect_transport([redirect, MEDIA_OK], max_redirects=1)
+    policy = EgressPolicy(allowed_hosts=hosts, allow_insecure_http=True)
+    metadata = asyncio.run(instance.open(media(), policy=policy))
+
+    asyncio.run(metadata.aclose())
+    assert resolved == [("xn--tst-qla.example", 443), ("cdn.example", 80)]
+
+
+def test_transport_spends_one_deadline_across_every_redirect_hop():
+    class Clock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = Clock()
+    redirect = b"HTTP/1.1 302 Found\r\nLocation: https://cdn.example/song.mp3\r\n\r\n"
+    sockets = [FakeSocket(redirect), FakeSocket(MEDIA_OK)]
+    connects = []
+
+    def connect(address, timeout):
+        connects.append(address)
+        if len(connects) > 1:
+            clock.value = 100.0
+        return sockets[len(connects) - 1]
+
+    instance = SecureMediaTransport(
+        resolver=lambda *_: [(socket.AF_INET, ("93.184.216.34", 443))],
+        connector=connect,
+        tls_wrap=lambda sock, _: sock,
+        clock=clock,
+    )
+    error_code(instance.open(media(), policy=EgressPolicy(allow_any_host=True)), "media_timeout")
+
+    assert len(connects) == 2
+    assert sockets[0].closed and sockets[1].closed
+
+
 def test_transport_rejects_header_limits_and_encoding():
     cases = [
         (b"X-Header: x\r\n" * 65, "media_response_invalid"),
@@ -148,6 +294,20 @@ def test_transport_rejects_content_type_and_size_mismatch():
     wrong_size = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\nID3payload"
     instance, *_ = transport(wrong_size)
     error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_accepts_the_vendor_alias_of_the_container_it_expected():
+    # The CDN a resolved keyword points at answers `audio/x-flac`; refusing that
+    # alias refused a real song, so the alias is part of the contract.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/x-flac\r\nContent-Length: 4\r\n\r\nfLaC"
+    instance, *_ = transport(raw)
+    flac = ResolvedMedia(candidate_id="1", url="https://täst.example/song.flac",
+                         extension="flac", media_type="audio/flac", declared_size=None)
+
+    metadata = asyncio.run(instance.open(flac, policy=("xn--tst-qla.example",)))
+
+    asyncio.run(metadata.aclose())
+    assert metadata.extension == "flac" and metadata.media_type == "audio/flac"
 
 
 def test_transport_bounds_stream_and_closes_on_read_error():
