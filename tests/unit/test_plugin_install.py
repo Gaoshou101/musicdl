@@ -40,7 +40,8 @@ def test_an_lx_source_declares_its_own_language_version_and_allowlist(tmp_path):
     # The language, the version, and the allowlist are the script's to declare;
     # the one grant every lx source needs is still the operator's to give.
     stored = install_source(PluginStore(tmp_path), {"id": "xinghai", "script": LX_SOURCE,
-                                                    "allow_any_host": True})
+                                                    "allow_any_host": True,
+                                                    "allow_insecure_http": True})
 
     manifest = stored.manifest
     assert manifest.language == "javascript" and manifest.version == "v3.2.11"
@@ -102,7 +103,8 @@ def test_a_widened_lx_source_installs_only_once_the_operator_grants_it(tmp_path)
 
 def test_a_grant_nobody_asked_for_is_still_the_operators_choice(tmp_path):
     stored = install_source(PluginStore(tmp_path), {"id": "xinghai", "script": LX_SOURCE,
-                                                    "allow_any_host": True})
+                                                    "allow_any_host": True,
+                                                    "allow_insecure_http": True})
 
     assert stored.manifest.egress.allow_any_host is True
     assert stored.manifest.allowed_hosts == ("music.example.com",)
@@ -115,7 +117,8 @@ def test_an_opaque_source_needs_open_egress_and_says_so(tmp_path):
     with pytest.raises(ValueError, match="allow_any_host"):
         install_source(store, {"id": "opaque", "script": opaque})
 
-    stored = install_source(store, {"id": "opaque", "script": opaque, "allow_any_host": True})
+    stored = install_source(store, {"id": "opaque", "script": opaque, "allow_any_host": True,
+                                    "allow_insecure_http": True})
 
     assert stored.manifest.egress.allow_any_host is True
 
@@ -150,6 +153,8 @@ def test_an_lx_source_cannot_be_installed_without_open_egress(tmp_path):
 
     assert store.enabled() == ()
     stored = install_lx_source(store, plugin_id="demo", script=LX_SOURCE,
-                               request={"allow_any_host": True}, analysis=analysis)
+                               request={"allow_any_host": True, "allow_insecure_http": True},
+                               analysis=analysis)
     assert stored.manifest.egress.allow_any_host is True
+    assert stored.manifest.egress.allow_insecure_http is True
     assert stored.manifest.operations == ("search", "resolve")

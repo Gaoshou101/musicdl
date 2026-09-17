@@ -58,7 +58,8 @@ def test_an_address_literal_becomes_a_grant():
 
     assert analysis.verdict == "installable" and analysis.blocked_reasons == ()
     assert analysis.ip_hosts == ("103.79.184.97",)
-    assert analysis.required_grants == {"allow_ip_hosts": True, "allow_any_host": True}
+    assert analysis.required_grants == {"allow_insecure_http": True, "allow_ip_hosts": True,
+                                        "allow_any_host": True}
 
 
 def test_a_method_the_broker_cannot_perform_is_refused():
@@ -97,7 +98,7 @@ def test_an_escaped_string_table_requires_open_egress_instead_of_refusal():
     assert analysis.verdict == "installable" and analysis.blocked_reasons == ()
     assert "opaque_script" in [item.code for item in analysis.caveats]
     assert analysis.opaque is True and analysis.lx_shaped is True
-    assert analysis.required_grants == {"allow_any_host": True}
+    assert analysis.required_grants == {"allow_insecure_http": True, "allow_any_host": True}
 
 
 def test_a_readable_source_with_no_endpoint_also_requires_open_egress():
@@ -105,7 +106,7 @@ def test_a_readable_source_with_no_endpoint_also_requires_open_egress():
                                   "on(EVENT_NAMES.request, () => resolve(info));\n"))
 
     assert analysis.verdict == "installable" and analysis.open_egress is True
-    assert analysis.required_grants == {"allow_any_host": True}
+    assert analysis.required_grants == {"allow_insecure_http": True, "allow_any_host": True}
 
 
 def test_an_oversized_script_is_refused_before_anything_else():

@@ -109,7 +109,8 @@ def test_an_lx_source_is_stored_with_its_own_language_version_and_allowlist(tmp_
         async with client:
             csrf = await _login(client)
             created = await client.post("/admin/sources", headers={"x-csrf-token": csrf},
-                                        json={"id": "demo", "script": LX_SOURCE, "allow_any_host": True})
+                                        json={"id": "demo", "script": LX_SOURCE, "allow_any_host": True,
+                                              "allow_insecure_http": True})
         return created, store
 
     created, store = asyncio.run(run())
@@ -117,7 +118,7 @@ def test_an_lx_source_is_stored_with_its_own_language_version_and_allowlist(tmp_
     assert created.json()["plugin"] == {"sha256": hashlib.sha256(LX_SOURCE.encode()).hexdigest(),
                                         "version": "v3.2.11", "language": "javascript",
                                         "egress": {"allowed_hosts": ["music.example.com"],
-                                                   "allowed_ports": [443], "allow_insecure_http": False,
+                                                   "allowed_ports": [443], "allow_insecure_http": True,
                                                    "allow_ip_hosts": False, "allow_any_host": True}}
     stored = store.enabled()[0]
     assert stored.manifest.allowed_hosts == ("music.example.com",)

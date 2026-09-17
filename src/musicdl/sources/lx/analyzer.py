@@ -137,8 +137,15 @@ class LxAnalysis:
         rather than a side effect of importing a file.
         """
         grants: dict[str, Any] = {}
-        if self.insecure_http:
-            grants["allow_insecure_http"] = True
+        # Every lx source gets plain HTTP as well, for the same reason it gets
+        # open egress just below: the media URL is assembled while the script
+        # runs, so neither its host nor its scheme is visible in the text.
+        # Measured on 2026-09-17: 全豆要-聚合音源v3.0 and 星海音乐源 both resolve
+        # kw/128014 to an http:// CDN link their own text never spells out, and
+        # the media transport refused the download as media_url_denied (which is
+        # scheme_denied renamed there) while the same id through 聚合音源 特供版
+        # downloaded 256 KiB once the grant was present.
+        grants["allow_insecure_http"] = True
         if self.ip_hosts:
             grants["allow_ip_hosts"] = True
         # Every lx source gets open egress, not only the ones whose endpoints
