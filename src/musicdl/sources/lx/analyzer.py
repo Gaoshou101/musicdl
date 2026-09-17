@@ -413,3 +413,17 @@ def analyze_file(path: str | Path) -> LxAnalysis:
     location = Path(path)
     return analyze_source(location.read_text(encoding="utf-8", errors="surrogateescape"),
                           path=str(location))
+
+
+def lx_shaped_file(path: str | Path) -> bool:
+    """Whether one stored script is an lx custom source, without running it.
+
+    The installer routes on this same property, so a plugin the portal accepted
+    as an lx source is exactly the plugin the main process searches the platform
+    catalogue for.  A script that cannot be read or parsed is not one: the
+    caller then keeps whatever the plugin itself provides.
+    """
+    try:
+        return analyze_file(path).lx_shaped
+    except (OSError, ValueError):
+        return False

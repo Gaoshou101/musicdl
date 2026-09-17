@@ -15,6 +15,8 @@ from .plugins import PluginClient, PluginSource, PluginStore
 from .plugins.broker import HttpsActionBroker
 from .media.transport import SecureMediaTransport
 from .sources import SourceEntry, SourceRegistry, search_sources
+from .sources.lx.analyzer import lx_shaped_file
+from .sources.platform_search import LxSearchAdapter, PlatformSearch
 from .worker.workers import MessageWorker, JobWorker
 from .wecom.client import WeComClient
 from .ai.client import OpenAICompatibleClient
@@ -188,6 +190,29 @@ def _telegram_sources(telegram_settings, bots, *, known_ids=frozenset(), factory
     return connector, definitions
 
 
+def _search_adapter(stored, source: PluginSource, platform_search: PlatformSearch):
+    """Which half of an enabled plugin answers ``search``.
+
+    An lx custom source answers ``musicUrl``, which is this project's
+    ``resolve``.  Of the twelve sources this deployment was built around, none
+    implements ``musicSearch`` (measured 2026-09-17 through the product's own
+    path: 12/12 reported ``search_failed`` while the same twelve resolved 27-30
+    of 48 platform cells), so the main process searches the platform catalogue
+    on the source's behalf and labels every hit with this source's identity.
+    The source still answers the part it is good at, and gains no egress: the
+    search endpoints are main-process constants, not manifest fields.
+
+    A plugin that does implement search -- anything the installer did not
+    accept as an lx custom source -- keeps its own adapter.
+    """
+    manifest = getattr(stored, "manifest", None)
+    if getattr(manifest, "language", None) != "javascript":
+        return source
+    if not lx_shaped_file(getattr(stored, "path", "")):
+        return source
+    return LxSearchAdapter(manifest.plugin_id, manifest.version, platform_search)
+
+
 def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                    telegram_client_factory=None):
     """Build one runtime.
@@ -218,6 +243,10 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                         settings.wecom.agent_id, redis)
     plugin_client = PluginClient(str(settings.plugin.service_url), broker=HttpsActionBroker())
     transport = SecureMediaTransport()
+    # Every installed lx source resolves against the same four catalogues, so
+    # one main-process search client answers all of them: twelve sources cost
+    # four upstream requests per query, not forty-eight.
+    platform_search = PlatformSearch(timeout=worker_settings.search_timeout)
     entries = []
     resolvers: dict[str, PluginSource] = {}
     for p in search_plugins:
@@ -225,7 +254,8 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
         source = PluginSource(p, plugin_client, transport,
                               resolve_stream_timeout_ms=math.ceil(worker_settings.resolve_stream_timeout * 1000),
                               health_timeout_ms=math.ceil(worker_settings.health_timeout * 1000))
-        entries.append(SourceEntry(p.manifest.plugin_id, p.manifest.version, source,
+        entries.append(SourceEntry(p.manifest.plugin_id, p.manifest.version,
+                                   _search_adapter(p, source, platform_search),
                                    enabled=definition.get("enabled", True),
                                    priority=definition.get("priority", 0)))
         if "resolve" in p.manifest.operations:
