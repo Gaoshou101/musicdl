@@ -9,10 +9,14 @@
  * which is how a source written for a long-lived browser host gets to finish.
  *
  * The source is re-read from disk before every step, so a source that reads a
- * clock or a random number between two steps would ask for something else this
- * time.  Answering that with the recorded response would hand one call another
- * call's data, so a replayed call that no longer matches its recorded URL and
- * method is refused instead of answered.
+ * clock or a random number between two steps asks for a slightly different URL
+ * this time.  The ordinal still decides: the recorded answer for call N was
+ * fetched under this source's own policy, for call N, one step ago.  What
+ * would hand one call another call's data is a *different* call moving into
+ * this ordinal, and the first few of those are noted on the host's bounded
+ * stderr rather than refused -- 玉宁熙-Pro rebuilds a random `user`/`loginUid`
+ * pair on every run, and refusing the moved URL made a working source
+ * unresolvable.
  *
  * An lx source takes its runtime from `globalThis.lx` and reports through
  * `on(EVENT_NAMES.request, ...)`.  The host still looks up a global `handle`,
@@ -20,6 +24,17 @@
  * itself unchanged and a source that declares its own `handle` still shadows
  * this adapter.
  */
+
+// The publisher's runtime also carries a byte/string toolkit, and the sources
+// that need it call the members directly instead of feature-detecting them.
+// Measured on 2026-09-17 against the twelve supplied sources: 星海音乐源 probes
+// `lx.utils?.buffer?.bufToString`, while the obfuscated 野花音源, 野草音源 and
+// lx-music-source-v6 die inside the source with "Cannot read properties of
+// undefined (reading 'bufToString'/'md5')", which is what an empty `utils`
+// produces.  These are the members the sources actually reach for; a member
+// nothing has asked for is still absent, so an unmet call stays a loud failure
+// inside the source rather than a silently wrong answer.
+import { createHash } from "node:crypto";
 
 const LX_EVENTS = Object.freeze({ request: "request", inited: "inited", updateAlert: "updateAlert" });
 const LX_ITEM_PREFIX = "lx:";
@@ -71,6 +86,161 @@ function lxToBase64(text) {
   return btoa(binary);
 }
 
+// The publisher's host hands back a body that is already decoded when the
+// upstream answered with JSON, and the supplied sources are written against
+// exactly that.  Every readable one guards its own parse -- 星海音乐源 and
+// 聚合音源 特供版 run `typeof body === "string" ? JSON.parse(body) : body`, K×H
+// writes `let body = resp.body; if (typeof body === "string") { body =
+// JSON.parse(...) }`, and HYWmusic does the same three times -- while 玉宁熙-Pro
+// reads `response.body.code` and `response.body.data.url` with no guard at all
+// and reports "酷我音乐解析失败" against a string.
+//
+// Handing over a bare parsed object would satisfy the first group and break any
+// source that calls `JSON.parse(response.body)` unguarded, so the adapter hands
+// over the parsed value dressed as the text it came from: property reads answer
+// from the JSON, `JSON.parse(body)`, `String(body)` and every string method
+// still see the exact bytes upstream sent, and a `typeof` test sees the object
+// the publisher's host would have given.
+function lxResponseBody(text) {
+  if (typeof text !== "string" || text.length === 0) return "";
+  const head = text.trimStart().slice(0, 1);
+  if (head !== "{" && head !== "[") return text;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (_) {
+    return text;
+  }
+  if (!parsed || typeof parsed !== "object") return text;
+  if (Array.isArray(parsed)) {
+    // An array keeps its identity -- `Array.isArray` and `body[0]` are what a
+    // source checks -- and still stringifies to the raw body.
+    Object.defineProperty(parsed, "toString", { value: () => text, configurable: true });
+    Object.defineProperty(parsed, Symbol.toPrimitive, { value: () => text, configurable: true });
+    return parsed;
+  }
+  return new Proxy(parsed, {
+    get(target, property, receiver) {
+      if (property === Symbol.toPrimitive || property === "toString" || property === "valueOf") {
+        return () => text;
+      }
+      if (Reflect.has(target, property)) return Reflect.get(target, property, receiver);
+      // A source that treats the body as text still gets the text's own members.
+      const member = text[property];
+      return typeof member === "function" ? member.bind(text) : member;
+    },
+  });
+}
+
+const LX_TEXT_ENCODER = new TextEncoder();
+const LX_TEXT_DECODER = new TextDecoder("utf-8");
+
+function lxBytes(value) {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (Array.isArray(value)) {
+    const bytes = new Uint8Array(value.length);
+    for (let index = 0; index < value.length; index += 1) bytes[index] = Number(value[index]) & 0xff;
+    return bytes;
+  }
+  return LX_TEXT_ENCODER.encode(typeof value === "string" ? value : "");
+}
+
+function lxEncoding(value) {
+  // The publisher spells the same encoding as "utf-8", "utf8", or "UTF8"
+  // depending on the source, and defaults to hex when it says nothing.
+  const name = String(value === undefined || value === null ? "hex" : value).trim().toLowerCase();
+  if (name === "utf8" || name === "utf-8") return "utf8";
+  if (name === "base64") return "base64";
+  return "hex";
+}
+
+function lxBufToString(value, encoding) {
+  const bytes = lxBytes(value);
+  const kind = lxEncoding(encoding);
+  if (kind === "utf8") return LX_TEXT_DECODER.decode(bytes);
+  let text = "";
+  if (kind === "base64") {
+    for (let index = 0; index < bytes.length; index += 1) text += String.fromCharCode(bytes[index]);
+    return btoa(text);
+  }
+  for (let index = 0; index < bytes.length; index += 1) text += bytes[index].toString(16).padStart(2, "0");
+  return text;
+}
+
+function lxStringToBuf(value, encoding) {
+  const text = typeof value === "string" ? value : String(value);
+  const kind = lxEncoding(encoding);
+  if (kind === "utf8") return LX_TEXT_ENCODER.encode(text).buffer;
+  if (kind === "base64") {
+    let binary;
+    try {
+      binary = atob(text);
+    } catch (_) {
+      binary = "";
+    }
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes.buffer;
+  }
+  const bytes = new Uint8Array(Math.floor(text.length / 2));
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(text.slice(index * 2, index * 2 + 2), 16) & 0xff;
+  }
+  return bytes.buffer;
+}
+
+function lxMd5(value) {
+  const bytes = typeof value === "string" ? LX_TEXT_ENCODER.encode(value) : lxBytes(value);
+  return createHash("md5").update(bytes).digest("hex");
+}
+
+// A source that mixes a random nonce into a URL is replayed by re-running the
+// whole script once per step, so the bytes must repeat across runs of one step
+// and still advance between one call and the next: a source that asks twice
+// must not receive one value.  Real randomness cannot do that here, and a
+// toolkit that hands out a fresh nonce per run would make every signed request
+// move, so the adapter carries a fixed-seed stream instead.
+let lxRandomState = 0x9e3779b9;
+
+function lxRandomUnit() {
+  lxRandomState = (lxRandomState + 0x6d2b79f5) >>> 0;
+  let value = lxRandomState;
+  value = Math.imul(value ^ (value >>> 15), value | 1) >>> 0;
+  value = (value ^ (value + Math.imul(value ^ (value >>> 7), value | 61))) >>> 0;
+  return (value ^ (value >>> 14)) >>> 0;
+}
+
+function lxRandomBytes(size) {
+  const count = Number.isFinite(size) && size > 0 ? Math.min(Math.floor(size), 4096) : 0;
+  const bytes = new Uint8Array(count);
+  for (let index = 0; index < count; index += 1) {
+    bytes[index] = lxRandomUnit() & 0xff;
+  }
+  return bytes.buffer;
+}
+
+// `Math.random` is where the supplied sources actually reach, and it carries the
+// same requirement: 玉宁熙-Pro draws its kuwo `user`/`loginUid` pair from it, and
+// nmobi.kuwo.cn echoes that user back inside the JSON it answers with, so a
+// fresh draw on the re-run made the source reject its own, already fetched answer
+// as "酷我音乐解析失败".  The stream is seeded, so it repeats per process and
+// still advances between two draws inside one run.
+Math.random = function lxRandom() {
+  return lxRandomUnit() / 4294967296;
+};
+
+const LX_UTILS = Object.freeze({
+  buffer: Object.freeze({
+    bufToString: lxBufToString,
+    stringToBuf: lxStringToBuf,
+    from: lxStringToBuf,
+  }),
+  crypto: Object.freeze({ md5: lxMd5, randomBytes: lxRandomBytes }),
+});
+
 function lxOn(name, handler) {
   if (name === LX_EVENTS.request && typeof handler === "function") lxHandler = handler;
 }
@@ -115,6 +285,23 @@ function lxAction(index, method, url, settings) {
   return action;
 }
 
+// A moved call is worth seeing once, but the note is a diagnostic and not a
+// refusal: the answer below is the one recorded for this ordinal, which is what
+// a live host would have delivered to this call.
+let lxMovedCalls = 0;
+
+function lxNoteMovedCall(index, method, target) {
+  if (lxMovedCalls >= 4) return;
+  const recorded = invocation.actions[index];
+  if (!recorded || recorded.url === undefined || recorded.url === null) return;
+  const wanted = String(recorded.url);
+  const wantedMethod = String(recorded.method || "GET").toUpperCase();
+  if (wanted === target && wantedMethod === method) return;
+  lxMovedCalls += 1;
+  console.error("lx replay: call " + index + " moved from " + wantedMethod + " " + wanted
+                + " to " + method + " " + target);
+}
+
 function lxRequest(url, options, callback) {
   const index = lxCalls;
   lxCalls += 1;
@@ -123,15 +310,12 @@ function lxRequest(url, options, callback) {
   const target = typeof url === "string" ? url : String(url);
   const observation = invocation.observations[index];
   if (observation !== undefined && observation !== null) {
-    const recorded = invocation.actions[index];
-    if (!recorded || recorded.url !== target || String(recorded.method || "GET").toUpperCase() !== method) {
-      throw new Error("lx source does not replay deterministically");
-    }
+    lxNoteMovedCall(index, method, target);
     if (typeof callback === "function") {
       callback(null, {
         statusCode: observation.status_code,
         headers: observation.headers || {},
-        body: lxFromBase64(observation.body),
+        body: lxResponseBody(lxFromBase64(observation.body)),
       });
     }
     return lxNoop;
@@ -307,15 +491,26 @@ globalThis.lx = {
   env: "musicdl",
   version: "musicdl.plugin/v1",
   currentScriptInfo: { name: invocation.manifest.plugin_id, version: invocation.manifest.version },
-  // Sources probe this before using it (a source that needs it checks
-  // `lx.utils?.buffer?.bufToString` first), so an empty object is enough.
-  utils: {},
+  utils: LX_UTILS,
 };
 
 globalThis.handle = async function lxHandle(request) {
   // A plain JavaScript plugin registers no lx handler; leaving the host without
   // a `handle` keeps its own "missing handle" failure rather than inventing one.
-  if (typeof lxHandler !== "function") return undefined;
+  if (typeof lxHandler !== "function") {
+    // A source may fetch its own configuration while it loads and register
+    // nothing until that answer arrives: lx-music-source-v6 asks a publisher
+    // server for `rconfig` before it has a handler at all.  The request it made
+    // is still this step's action, so report it rather than calling the source
+    // entrypointless; the answer is on disk before the next run.
+    for (let turn = 0; turn < 200 && lxHandler === null && lxPending === null; turn += 1) {
+      if (turn % 25 === 24) await new Promise((resolve) => setTimeout(resolve, 0));
+      else await Promise.resolve();
+    }
+    if (typeof lxHandler !== "function") {
+      return lxPending === null ? undefined : { action: lxPending };
+    }
+  }
   const outcome = Promise.resolve().then(() => lxDispatch(request)).then(
     (value) => ({ kind: "result", value }),
     (error) => ({ kind: "error", error }),
