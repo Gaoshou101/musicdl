@@ -24,6 +24,17 @@ class ActionDenied(Exception):
         super().__init__(message or code)
 
 
+# A browser-shaped default User-Agent, for the same reason the host supplies a
+# default Accept: every analysed source is written for a host whose network layer
+# sends one, and an upstream that sees none may answer with something else
+# entirely.  Measured 2026-09-17 against nmobi.kuwo.cn -- the same signed URL for
+# `rid=128014` answers with that track when any User-Agent is present, and with an
+# unrelated track (`rid=260839262`) when the header is absent, which 玉宁熙-Pro
+# then reports as "解析数据失败" and refuses to resolve.
+DEFAULT_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+
 def _hostname(host: str) -> str:
     try:
         return host.rstrip(".").encode("idna").decode("ascii").lower()
@@ -110,8 +121,11 @@ def _parse_action_url(url: str, policy: EgressPolicy) -> EgressTarget:
 def _request_bytes(action: HttpAction, target: EgressTarget) -> bytes:
     """Serialize one action; the plugin supplies data, never framing."""
     lines = [f"{action.method} {target.target} HTTP/1.1", f"Host: {target.authority}", "Connection: close"]
-    if "accept" not in {name.lower() for name in action.headers}:
+    declared = {name.lower() for name in action.headers}
+    if "accept" not in declared:
         lines.append("Accept: application/json")
+    if "user-agent" not in declared:
+        lines.append(f"User-Agent: {DEFAULT_USER_AGENT}")
     body = base64.b64decode(action.body) if action.body else b""
     if body:
         lines.append(f"Content-Length: {len(body)}")
