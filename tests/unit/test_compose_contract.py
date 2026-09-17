@@ -82,3 +82,18 @@ def test_compose_uses_pinned_images_and_stdlib_healthchecks():
 def test_compose_disables_uvicorn_query_string_access_logs():
     command = compose()["services"]["musicdl"]["command"]
     assert "--no-access-log" in command
+
+
+def test_main_image_initialises_every_compose_volume_mountpoint_for_the_service_uid():
+    """Docker seeds a fresh named volume from the image directory it mounts over.
+
+    Without those directories in the image the volume is created root-owned, the
+    service runs as 10001, and the first write to the admin state file, the media
+    root, or the session root fails with EACCES.
+    """
+    mounts = {entry.split(":")[1] for entry in compose()["services"]["musicdl"]["volumes"]}
+    text = (ROOT / "docker/main/Dockerfile").read_text(encoding="utf-8")
+    line = next(line for line in text.splitlines() if "install -d" in line)
+    assert mounts <= set(line.split())
+    assert "-o 10001" in line and "-g 10001" in line
+    assert text.index("useradd") < text.index("install -d") < text.index("USER 10001:10001")

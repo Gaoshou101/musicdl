@@ -11,6 +11,7 @@ from pydantic import SecretStr
 
 from musicdl.app import create_app
 from musicdl.config import AppSettings, WeComSettings
+from musicdl.sources import SourceEntry, SourceRegistry
 
 
 AES_KEY = base64.b64encode(b"k" * 32).decode().rstrip("=")
@@ -55,6 +56,13 @@ class ExitingWorker:
         self.started.set()
         if self.error is not None:
             raise self.error
+
+
+class StubSource:
+    """A source that answers with nothing; the wiring is what is under test."""
+
+    async def search(self, query: str):
+        return ()
 
 
 @dataclass
@@ -161,25 +169,67 @@ def test_shutdown_cancels_both_workers_before_runtime_close():
     run(scenario())
 
 
-def test_disabled_wecom_does_not_call_runtime_factory_and_is_ready():
-    async def scenario():
-        called = False
+def test_disabled_wecom_starts_no_workers_but_still_assembles_the_source_runtime():
+    """The panel's search box is not a WeCom feature.
 
+    With WeCom off there are no workers to start and nothing to poll, but the
+    registry still has to exist: it is what the administration portal searches
+    and downloads through, and it needs no Redis to answer.
+    """
+
+    @dataclass
+    class SearchRuntime:
+        registry: object
+        state: object = None
+        service: object = None
+        message_worker: object = None
+        job_worker: object = None
+
+        def __post_init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    async def scenario():
+        calls = []
+        runtime = SearchRuntime(SourceRegistry([SourceEntry("primary", "1", StubSource())]))
+
+        def factory(settings):
+            calls.append(settings)
+            return runtime
+
+        app = create_app(AppSettings(), runtime_factory=factory)
+        async with app.router.lifespan_context(app):
+            assert app.state.runtime is runtime
+            assert not hasattr(app.state, "worker_tasks")
+            assert app.state.runtime_error is None
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.get("/readyz")
+        assert response.status_code == 200
+        assert len(calls) == 1 and calls[0].wecom.enabled is False
+        assert runtime.closed
+
+    run(scenario())
+
+
+def test_a_source_runtime_that_cannot_be_assembled_is_reported_not_faked():
+    """The panel starts and says so; /readyz must not claim a working search."""
+
+    async def scenario():
         def factory(_settings):
-            nonlocal called
-            called = True
-            raise AssertionError("disabled WeCom must not construct runtime")
+            raise OSError("app data missing")
 
         app = create_app(AppSettings(), runtime_factory=factory)
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
-                response = await client.get("/readyz")
-        assert response.status_code == 200
-        assert called is False
+                return await client.get("/readyz")
 
-    run(scenario())
+    assert run(scenario()).status_code == 503
 
 
 def test_runtime_factory_failure_fails_closed_without_redis_fallback():

@@ -32,6 +32,11 @@ from .store import StoredPlugin
 # egress policy itself is not observable to the plugin.
 REFUSED_ACTION_STATUS = 599
 
+# A health check is a liveness question about a service on the same private
+# network, not an invocation.  It gets its own budget so a wedged runner cannot
+# hold the panel's dashboard open for the full invocation timeout.
+HEALTH_TIMEOUT = 2.0
+
 
 class PluginClientError(RuntimeError):
     """Stable internal client failure which must not be remapped."""
@@ -40,7 +45,8 @@ class PluginClientError(RuntimeError):
 class PluginClient:
     def __init__(self, service_url: str, *, broker: HttpsActionBroker | None = None,
                  http_client: httpx.AsyncClient | None = None, timeout: float = 30.0):
-        self.service_url = service_url.rstrip("/") + "/v1/execute"
+        self.base_url = service_url.rstrip("/")
+        self.service_url = self.base_url + "/v1/execute"
         self.broker = broker
         self._owned_client = http_client is None
         self.http = http_client or httpx.AsyncClient(trust_env=False, follow_redirects=False)
@@ -56,6 +62,25 @@ class PluginClient:
     async def aclose(self) -> None:
         if self._owned_client:
             await self.http.aclose()
+
+    async def service_health(self) -> bool:
+        """Whether the runner service itself is assembled and answering.
+
+        Distinct from :meth:`health`, which asks one stored plugin to run its
+        own health operation.  The panel asks this about the deployment it is
+        looking at, so a runner that is down has to read as one failed check
+        rather than as an exception escaping the dashboard.
+        """
+        try:
+            response = await self.http.get(self.base_url + "/healthz", timeout=HEALTH_TIMEOUT)
+        except Exception:
+            return False
+        if response.status_code != 200:
+            return False
+        try:
+            return response.json().get("status") == "ok"
+        except ValueError:
+            return False
 
     @staticmethod
     def _normalize_timeout_ms(timeout_ms: int | None, default_timeout: float) -> int:
