@@ -18,6 +18,16 @@ from musicdl.contracts.plugin import DEFAULT_EGRESS_PORT, Operation
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _REGISTRY = "registry.json"
+# One plugin id is the storage key, the manifest field, and the name an operator
+# types into the portal.  Both the installer and the portal's import preview have
+# to answer "would this id be accepted?", so the answer lives here once.
+PLUGIN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+def validate_plugin_id(plugin_id: object) -> None:
+    """Accept one storable plugin id, or say why it is not one."""
+    if not isinstance(plugin_id, str) or PLUGIN_ID_PATTERN.fullmatch(plugin_id) is None:
+        raise ValueError("invalid plugin id")
 
 
 @dataclass(frozen=True)
@@ -123,8 +133,7 @@ class PluginStore:
 
     @staticmethod
     def _validate_id(plugin_id: str) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", plugin_id):
-            raise ValueError("invalid plugin id")
+        validate_plugin_id(plugin_id)
 
     def install(
         self,

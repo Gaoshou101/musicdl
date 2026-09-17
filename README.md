@@ -57,6 +57,13 @@ script whose endpoints cannot be derived by reading it, and the analysis require
 explicit grant for it. `POST /admin/sources` reports every granted widening back in
 its `plugin.egress`, so an operator can see exactly what is in force.
 
+An import can be reviewed before it happens. `POST /admin/sources/analyze` takes the
+same body and answers with the analysis, the grants the script still needs, the id the
+store would accept, and whether an install carrying the grants in that request would
+succeed; it opens no stored script and writes none, so an operator can look before
+anything is kept. Both routes are the interface a full administration console is
+written against -- the portal's HTML is still a placeholder.
+
 The supported entry point is a `handle(request)` function. A plugin may return a
 JSON-compatible result or one HTTP `GET`/`POST` action at a time; the main action loop
 supplies bounded observations. An action may name headers and, for `POST`, a base64
