@@ -49,3 +49,10 @@ try {
 } catch (_) {
   await Deno.stdout.write(new TextEncoder().encode(JSON.stringify({response:{protocol:"musicdl.plugin/v1",request_id:request?.request_id??"00000000-0000-0000-0000-000000000000",operation:request?.operation??"health",ok:false,error:{code:"plugin_error",message:"plugin execution failed",retryable:false,details:{}}},action:null})));
 }
+// The step above is written and awaited, so this invocation is over.  A source
+// that keeps its own async work alive after answering -- 玉宁熙 starts a
+// telemetry read and a retry timer after returning its first URL -- would
+// otherwise hold this process open until that leftover chain settles, and the
+// supervisor only reads the step once the process exits.  One step per process
+// means the answer decides when the process ends.
+Deno.exit(0);
