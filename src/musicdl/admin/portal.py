@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 from html import escape
 from typing import Any, Callable
 
-from musicdl.plugins.install import install_source
+from musicdl.plugins.install import install_source, preview_source
 from .auth import AdminAuth, RateLimiter
 from .health import EventLogStore, HealthAggregator
 from .management import BotManager, SourceManager
@@ -119,6 +119,26 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         require(request)
         index = installed(open_store())
         return {"items": [with_plugin(index, item) for item in sources.list()]}
+
+    @router.post("/sources/analyze")
+    async def analyze_import(body: dict, request: Request):
+        """Preview one import, and store nothing.
+
+        The operator is about to hand the portal a script it has never seen, so
+        the screen that does it has to be able to say, before anything is
+        written, what the script declares about itself, which egress widenings
+        it needs, and whether an install with these grants would be accepted.
+        A POST because one source file is far larger than a query string, and
+        because the same CSRF guard as every other portal change then covers it;
+        the plugin store is not opened at all.  The source's own portal settings
+        -- its name, priority and timeout -- are validated by the route that
+        saves them, not by this preview.
+        """
+        mutate(request)
+        try:
+            return preview_source(body)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     @router.post("/sources")
     async def create_source(body: dict, request: Request):
