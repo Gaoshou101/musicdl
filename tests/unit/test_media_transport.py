@@ -341,6 +341,50 @@ def test_transport_refuses_bytes_that_contradict_the_extension_too():
     error_code(instance.open(flac, policy=("xn--tst-qla.example",)), "media_response_invalid")
 
 
+def _octet_stream_raw(body: bytes) -> bytes:
+    return (b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: "
+            + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+
+
+def _m4a_media():
+    return ResolvedMedia(candidate_id="1", url="https://täst.example/song.m4a",
+                         extension="m4a", media_type="audio/mp4", declared_size=None)
+
+
+def test_transport_reads_the_mp4_box_whose_brand_names_the_container():
+    # Measured 2026-09-17 on car-bj.kuwo.cn: kuwo's car CDN answers its `.aac`
+    # links with `Content-Type: application/octet-stream` and an ftyp/mp42 box
+    # whose `M4A ` brand sits at byte 16 -- past the 16-byte prefix that used to
+    # decide, which is why four sources' downloads were refused.
+    body = bytes.fromhex("00000020667479706d703432000000004d3441206d70343269736f6d00000000") + b"moov"
+    instance, *_ = transport(_octet_stream_raw(body))
+
+    metadata = asyncio.run(instance.open(_m4a_media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == body
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_finishes_an_mp4_box_longer_than_the_prefix():
+    # The box states its own length, so a brand list longer than the prefix is
+    # read out instead of being truncated into a refusal.
+    brands = b"M4A " + b"isom" * 24
+    size = 16 + len(brands)
+    body = size.to_bytes(4, "big") + b"ftypmp42\x00\x00\x00\x00" + brands + b"moov"
+    instance, *_ = transport(_octet_stream_raw(body))
+
+    metadata = asyncio.run(instance.open(_m4a_media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == body
+    asyncio.run(metadata.aclose())
+
+
 def test_transport_bounds_stream_and_closes_on_read_error():
     instance, sock, _, _ = transport(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\nID3payload")
     instance.max_bytes = 3

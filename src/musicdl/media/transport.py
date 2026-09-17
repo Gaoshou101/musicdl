@@ -23,9 +23,16 @@ from .validation import detect_container
 MAX_RESPONSE_HEADER_COUNT = 64
 MAX_RESPONSE_HEADER_FIELD_BYTES = 8 * 1024
 MAX_RESPONSE_HEADERS_BYTES = 64 * 1024
-# Enough bytes for every signature `detect_container` knows, and small enough
-# that a body which is not what the label claimed costs nothing to classify.
-PREFIX_BYTES = 16
+# Enough bytes for every signature `detect_container` knows, except the one that
+# states its own length: an ISO base media file is a 4-byte size, `ftyp`, a
+# major brand, a minor version, and then the brand list -- 16 bytes before the
+# `M4A ` brand that identifies it can even appear.  Measured 2026-09-17: a
+# 16-byte prefix cut that list off, so four sources' downloads of one kuwo song
+# were refused as `media_response_invalid` although every byte was audio.
+PREFIX_BYTES = 64
+# The longest `ftyp` box `_read_prefix` will follow, so a broken or hostile
+# length field cannot turn classification into an unbounded read.
+MAX_PREFIX_BYTES = 512
 
 
 class MediaTransportError(MediaError):
@@ -241,6 +248,22 @@ class SecureMediaTransport:
         value = response.read(PREFIX_BYTES)
         if not isinstance(value, bytes):
             raise MediaTransportError("media_response_invalid")
+        # An ISO base media file puts the length of its own `ftyp` box in the
+        # first four bytes and lists the brands after that header, so a box
+        # longer than the prefix is read out rather than decided on a truncated
+        # slice.  A short read stays a short prefix: the signature check then
+        # does not recognise the bytes and refuses, which is the failing-closed
+        # answer either way.
+        if len(value) == PREFIX_BYTES and value[4:8] == b"ftyp":
+            size = int.from_bytes(value[:4], "big")
+            if PREFIX_BYTES < size <= MAX_PREFIX_BYTES:
+                while len(value) < size:
+                    chunk = response.read(size - len(value))
+                    if not isinstance(chunk, bytes):
+                        raise MediaTransportError("media_response_invalid")
+                    if not chunk:
+                        break
+                    value += chunk
         return value
 
     async def _fetch_hop(self, url: str, egress: EgressPolicy, deadline: float) -> _Hop:

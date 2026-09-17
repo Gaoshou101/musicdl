@@ -47,6 +47,15 @@ const LX_MEDIA_TYPES = Object.freeze({
   m4a: "audio/mp4",
   ogg: "audio/ogg",
 });
+// A link's suffix is what the CDN chose to call the file, and the contract
+// publishes four containers.  Measured 2026-09-17: kuwo's car CDN answers
+// `car-bj.kuwo.cn/.../1904613985.aac` with an ISO base media file -- ftyp/mp42
+// with the brands `M4A `, `mp42`, `isom` -- so `.aac` on these links names an
+// m4a and is declared as one.  Declared as a guessed mp3 instead, four sources
+// resolved a real song and the transport refused the bytes as the wrong
+// container.  Every other suffix still falls through to the quality guess, and
+// the transport still fails loudly on bytes that disagree with the answer.
+const LX_SUFFIX_EXTENSIONS = Object.freeze({ aac: "m4a" });
 // The main process writes the request line and the framing headers itself, so
 // a source may not supply one of them.
 const LX_TRANSPORT_HEADERS = new Set([
@@ -440,7 +449,9 @@ function lxExtension(url, quality) {
   }
   const dot = pathname.lastIndexOf(".");
   const suffix = dot === -1 ? "" : pathname.slice(dot + 1).toLowerCase();
-  if (Object.prototype.hasOwnProperty.call(LX_MEDIA_TYPES, suffix)) return suffix;
+  const named = Object.prototype.hasOwnProperty.call(LX_SUFFIX_EXTENSIONS, suffix)
+    ? LX_SUFFIX_EXTENSIONS[suffix] : suffix;
+  if (Object.prototype.hasOwnProperty.call(LX_MEDIA_TYPES, named)) return named;
   // Most endpoints these sources fall back to hand back a direct link whose
   // path carries no audio suffix (`/wy/wy.php?type=mp3&id=...`), so the quality
   // the source was asked for is the only container it ever states.  The

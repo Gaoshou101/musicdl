@@ -170,6 +170,28 @@ def test_a_direct_link_without_a_suffix_falls_back_to_the_requested_quality():
     assert lossless.response.result["media_type"] == "audio/flac"
 
 
+AAC_LINK_SOURCE = """
+const { EVENT_NAMES, on, send } = globalThis.lx;
+on(EVENT_NAMES.request, async () => "http://car-bj.kuwo.cn/1904613985.aac?type=convert_url_with_sign");
+send(EVENT_NAMES.inited, { sources: { wy: { type: "music", actions: ["musicUrl"] } } });
+"""
+
+
+@requires_deno
+def test_an_aac_link_is_declared_as_the_container_it_actually_carries():
+    # Measured 2026-09-17: `car-bj.kuwo.cn/.../1904613985.aac` answers with an
+    # ISO base media file whose brands are `M4A `, `mp42`, `isom`.  Declared as
+    # a guessed mp3, the transport refused four sources' downloads of a real
+    # song as `media_response_invalid`; the suffix names an m4a.
+    candidate = dict(CANDIDATE, item_id="lx:wy:1904613985", source_id="wy")
+    step = _run(_invocation(AAC_LINK_SOURCE, operation="resolve",
+                            payload={"candidate": candidate, "quality": "320k"}))
+
+    assert step.response.ok
+    assert step.response.result["extension"] == "m4a"
+    assert step.response.result["media_type"] == "audio/mp4"
+
+
 @requires_deno
 def test_request_post_body_is_base64_and_transport_headers_are_dropped():
     source = """
