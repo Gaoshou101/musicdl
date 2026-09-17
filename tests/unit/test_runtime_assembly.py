@@ -407,9 +407,13 @@ def _probe_state(runtime):
     return SimpleNamespace(state=SimpleNamespace(runtime=runtime))
 
 
-async def _check_telegram(probes):
+async def _check(probes, name):
     """``_admin_probes`` hands back a mapping of probe name to coroutine factory."""
-    return await probes["telegram"]()
+    return await probes[name]()
+
+
+async def _check_telegram(probes):
+    return await _check(probes, "telegram")
 
 
 def test_the_telegram_probe_reports_every_state_honestly(runtime_fakes, tmp_path):
@@ -422,7 +426,7 @@ def test_the_telegram_probe_reports_every_state_honestly(runtime_fakes, tmp_path
 
     # A disabled deployment has nothing to check.
     offline = _probe_state(SimpleNamespace(telegram=None))
-    assert asyncio.run(_check_telegram(probes(disabled, offline))) is True
+    assert asyncio.run(_check_telegram(probes(disabled, offline))) is None
     # Enabled but never wired, or wired with nothing defined: unhealthy, not fine.
     assert asyncio.run(_check_telegram(probes(enabled, offline))) is False
     defined = _probe_state(SimpleNamespace(telegram=_RestoringConnector(TelegramStatus.READY),
@@ -437,3 +441,45 @@ def test_the_telegram_probe_reports_every_state_honestly(runtime_fakes, tmp_path
         state = _probe_state(SimpleNamespace(telegram=connector, telegram_sources=1))
         assert asyncio.run(_check_telegram(probes(enabled, state))) is expected
         assert connector.profiles == ["default"]
+
+
+def test_the_redis_probe_reports_not_required_where_no_wecom_state_is_held(runtime_fakes):
+    probes = runtime_fakes._admin_probes
+
+    class State:
+        def __init__(self, alive):
+            self.alive = alive
+
+        async def ping(self):
+            return self.alive
+
+    def app(wecom_state):
+        return SimpleNamespace(state=SimpleNamespace(runtime=None, wecom_state=wecom_state))
+
+    # WeCom off: the runtime never opens a Redis client, so there is nothing to
+    # report but the fact that this dependency is not part of the deployment.
+    assert asyncio.run(_check(probes(_settings(), app(None)), "redis")) is None
+    assert asyncio.run(_check(probes(_settings(), app(State(True))), "redis")) is True
+    assert asyncio.run(_check(probes(_settings(), app(State(False))), "redis")) is False
+
+
+def test_the_plugin_runner_probe_asks_the_client_the_runtime_holds(runtime_fakes):
+    probes = runtime_fakes._admin_probes
+    asked = []
+
+    class Client:
+        async def service_health(self):
+            asked.append(True)
+            return False
+
+    def app(runtime):
+        return SimpleNamespace(state=SimpleNamespace(runtime=runtime))
+
+    assert asyncio.run(_check(probes(_settings(), app(None)), "plugin_runner")) is None
+    assert asked == []
+    unwired = SimpleNamespace(plugin_client=None)
+    assert asyncio.run(_check(probes(_settings(), app(unwired)), "plugin_runner")) is None
+    assert asked == []
+    assert asyncio.run(_check(probes(_settings(), app(SimpleNamespace(plugin_client=Client()))),
+                              "plugin_runner")) is False
+    assert asked == [True]

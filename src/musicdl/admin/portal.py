@@ -1,26 +1,90 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import secrets
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from html import escape
+from pydantic import ValidationError
 from typing import Any, Callable
 
+from musicdl.media import download_candidate
+from musicdl.media.models import MediaError
 from musicdl.plugins.install import install_source, preview_source
+from musicdl.sources.models import Candidate
+from musicdl.sources.search import search_sources
 from .auth import AdminAuth, RateLimiter
+from .forms import form_fields
 from .health import EventLogStore, HealthAggregator
 from .management import BotManager, SourceManager
+from .pages import credentials_form, credentials_page, login_page
+
+
+def _positive(value: Any, default: float) -> float:
+    """A usable positive budget, or the default the portal falls back to."""
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else default
+
+
+def _media_target(root: str | Path, relative_path: str) -> Path:
+    """Resolve one artifact below the media root, or refuse it.
+
+    ``download_candidate`` reports a path it derived from the media root; serving
+    that path back must not become a way to read any other file, so it is
+    re-checked here rather than trusted.
+    """
+    if not isinstance(relative_path, str) or not relative_path or "\\" in relative_path:
+        raise HTTPException(404, "media not found")
+    parts = PurePosixPath(relative_path)
+    if parts.is_absolute() or any(part in {"", ".", ".."} for part in parts.parts):
+        raise HTTPException(404, "media not found")
+    root_path = Path(root).resolve(strict=False)
+    try:
+        resolved = root_path.joinpath(*parts.parts).resolve(strict=True)
+        resolved.relative_to(root_path)
+    except (OSError, ValueError):
+        raise HTTPException(404, "media not found") from None
+    if not resolved.is_file() or resolved.is_symlink():
+        raise HTTPException(404, "media not found")
+    return resolved
 
 
 def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager | None = None,
                         health: HealthAggregator | None = None, events: EventLogStore | None = None,
                         limiter: RateLimiter | None = None, bots: SourceManager | None = None,
                         audit: EventLogStore | None = None,
-                        plugins: Callable[[], Any] | None = None) -> APIRouter:
+                        plugins: Callable[[], Any] | None = None,
+                        runtime: Callable[[], Any] | None = None,
+                        media_root: str | Path | None = None,
+                        worker: Any | None = None) -> APIRouter:
     auth, sources, health, events, limiter = auth or AdminAuth(), sources or SourceManager(), health or HealthAggregator({}), events or EventLogStore(), limiter or RateLimiter()
     bots, audit = bots or BotManager(), audit or EventLogStore()
     router = APIRouter(prefix="/admin")
+    search_timeout = _positive(getattr(worker, "search_timeout", None), 10.0)
+    resolve_timeout = _positive(getattr(worker, "resolve_stream_timeout", None), 30.0)
+    credential_paths = {"/admin/", "/admin/change-credentials", "/admin/change-credentials-form"}
+
+    def start_session(response: Response) -> str:
+        """Issue a session and bind the CSRF token its forms will carry."""
+        session = auth.issue_session()
+        csrf = secrets.token_urlsafe(24)
+        auth.bind_csrf(session, csrf)
+        response.set_cookie("admin_session", session, httponly=True, secure=True, samesite="lax")
+        response.set_cookie("csrf_token", csrf, httponly=False, secure=True, samesite="lax")
+        return csrf
+
+    def active_runtime():
+        """The runtime the panel searches and downloads through.
+
+        It is built at start-up and independent of WeCom, so a deployment with
+        no WeCom account still answers here; a deployment whose runtime could
+        not be assembled says so instead of failing halfway through a request.
+        """
+        service = runtime() if runtime is not None else None
+        if service is None or getattr(service, "registry", None) is None:
+            raise HTTPException(503, "search runtime is unavailable")
+        return service
 
     def plugin_store():
         """The plugin storage this portal may install into; absent means no code."""
@@ -73,7 +137,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     def require(request: Request):
         session = request.cookies.get("admin_session")
         if not auth.session_user(session): raise HTTPException(401, "authentication required")
-        if auth.session_must_change(session) and request.url.path not in {"/admin/", "/admin/change-credentials"}: raise HTTPException(403, "credential change required")
+        if auth.session_must_change(session) and request.url.path not in credential_paths: raise HTTPException(403, "credential change required")
         return session
 
     def mutate(request: Request):
@@ -91,13 +155,30 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         if not result.ok:
             audit.append({"action": "login", "status": "failed"})
             raise HTTPException(401, "invalid credentials")
-        session = auth.issue_session()
-        csrf = secrets.token_urlsafe(24)
-        auth.bind_csrf(session, csrf)
-        response.set_cookie("admin_session", session, httponly=True, secure=True, samesite="lax")
-        response.set_cookie("csrf_token", csrf, httponly=False, secure=True, samesite="lax")
+        csrf = start_session(response)
         audit.append({"action": "login", "status": "success"})
         return {"ok": True, "must_change": result.must_change, "csrf_token": csrf}
+
+    @router.post("/login-form")
+    async def login_form(request: Request):
+        """The browser's own login: one page in, one redirect out.
+
+        Same credential check, same rate limit and same audit record as
+        ``/admin/login``; only the reply differs, because a browser has to be
+        able to read why it was refused and follow the redirect itself.
+        """
+        form = await form_fields(request)
+        if not limiter.allow(request.client.host if request.client else "unknown"):
+            audit.append({"action": "login", "status": "rate_limited"})
+            return HTMLResponse(login_page(error="登录尝试过于频繁，请稍后再试。"), status_code=429)
+        result = auth.authenticate(str(form.get("username", "")), str(form.get("password", "")))
+        if not result.ok:
+            audit.append({"action": "login", "status": "failed"})
+            return HTMLResponse(login_page(error="用户名或密码不正确。"), status_code=401)
+        response = RedirectResponse("/admin/", status_code=303)
+        start_session(response)
+        audit.append({"action": "login", "status": "success"})
+        return response
 
     @router.post("/change-credentials")
     async def change_credentials(request: Request, response: Response):
@@ -113,6 +194,33 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         response.set_cookie("csrf_token", csrf, secure=True, samesite="lax")
         audit.append({"action": "change_credentials", "status": "success"})
         return {"ok": True, "csrf_token": csrf}
+
+    @router.post("/change-credentials-form")
+    async def change_credentials_form(request: Request):
+        """The same credential change, posted from the dashboard's form.
+
+        A deployment that still carries the default password reaches this page
+        first, so it has to succeed or fail in a browser rather than in JSON.
+        """
+        session = require(request)
+        form = await form_fields(request)
+        result = auth.authenticate(auth.session_user(session) or "", str(form.get("password", "")))
+        if not result.ok:
+            audit.append({"action": "change_credentials", "status": "failed"})
+            return HTMLResponse(credentials_page(csrf=auth.session_csrf(session) or "",
+                                                 error="当前密码不正确。"), status_code=401)
+        try:
+            auth.change_credentials(result.user_id or "", str(form.get("username", "")),
+                                    str(form.get("new_password", "")))
+        except ValueError:
+            audit.append({"action": "change_credentials", "status": "failed"})
+            return HTMLResponse(credentials_page(csrf=auth.session_csrf(session) or "",
+                                                 error="凭据未被接受：用户名不能为空，新密码至少 8 位，且不能与默认密码相同。"),
+                                status_code=422)
+        response = RedirectResponse("/admin/", status_code=303)
+        start_session(response)
+        audit.append({"action": "change_credentials", "status": "success"})
+        return response
 
     @router.get("/sources")
     async def list_sources(request: Request):
@@ -208,6 +316,71 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                       "versions": uninstalled})
         return {**removed, "uninstalled": uninstalled}
 
+    @router.get("/search")
+    async def search(request: Request, q: str = "", limit: int = 50):
+        """The panel's own search: exactly the query the workers run.
+
+        It answers from the registry the runtime assembled, so a search here
+        exercises the same sources a WeCom message would reach, and it needs no
+        Redis, no WeCom account and no running worker.
+        """
+        require(request)
+        service = active_runtime()
+        if not 1 <= limit <= 200:
+            raise HTTPException(422, "invalid limit")
+        try:
+            result = await search_sources(service.registry, q, timeout=search_timeout)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        page = result.candidates[:limit]
+        return {"query": q.strip(), "version": result.version, "count": len(page),
+                "total": len(result.candidates),
+                "candidates": [candidate.public_representation for candidate in page],
+                "sources": [{"id": status.source_id, "status": status.status, "count": status.count}
+                            for status in result.statuses]}
+
+    @router.post("/download")
+    async def download(body: dict, request: Request):
+        """Download one candidate the search just listed, into the media root.
+
+        The body carries the candidate itself rather than an id the server has
+        to remember: the portal keeps no per-session state, and a candidate is
+        already a complete, validated description of one recording.
+        """
+        mutate(request)
+        service = active_runtime()
+        if media_root is None:
+            raise HTTPException(503, "media root is unavailable")
+        try:
+            candidate = Candidate.model_validate(body.get("candidate"))
+        except ValidationError:
+            raise HTTPException(422, "invalid candidate") from None
+        source = (getattr(service, "resolvers", None) or {}).get(candidate.source_id)
+        if source is None:
+            raise HTTPException(404, "source cannot resolve media")
+        request_id = secrets.token_hex(16)
+        try:
+            async with asyncio.timeout(resolve_timeout):
+                result = await download_candidate(candidate, source, media_root, request_id=request_id,
+                                                  record=events.append)
+        except MediaError as exc:
+            raise HTTPException(502, exc.code) from None
+        except TimeoutError:
+            raise HTTPException(504, "media_timeout") from None
+        return {"request_id": request_id, "source_id": candidate.source_id,
+                "relative_path": str(result.relative_path).replace(os.sep, "/"),
+                "sha256": result.sha256, "size_bytes": result.size_bytes,
+                "media_type": result.media_type, "extension": result.extension,
+                "language": getattr(result.language, "value", result.language)}
+
+    @router.get("/media/{relative_path:path}")
+    async def media(relative_path: str, request: Request):
+        """Serve one downloaded artifact, so a browser can play what it fetched."""
+        require(request)
+        if media_root is None:
+            raise HTTPException(503, "media root is unavailable")
+        return FileResponse(_media_target(media_root, relative_path))
+
     @router.get("/bots")
     async def list_bots(request: Request):
         require(request); return {"items": bots.list()}
@@ -260,8 +433,16 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
 
     @router.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
+        session = request.cookies.get("admin_session")
+        if not auth.session_user(session):
+            # The panel's front door is a page: a browser arriving at /admin/
+            # has no other way in, while the API routes keep answering JSON.
+            return HTMLResponse(login_page())
         require(request)
-        warning = "<p>SECURITY WARNING: credential change required (强制修改)。</p>" if auth.session_must_change(request.cookies.get("admin_session")) else ""
+        warning = ""
+        if auth.session_must_change(session):
+            warning = ("<p>SECURITY WARNING: credential change required (强制修改)。</p>"
+                       + credentials_form(csrf=auth.session_csrf(session) or ""))
         source_ids = ''.join(f"<li>{escape(item['id'])}</li>" for item in sources.list())
         bot_ids = ''.join(
             f"<li>{escape(item['id'])}{'' if item.get('username') is None else ' (' + escape(item['username']) + ')'}</li>"

@@ -118,6 +118,15 @@ class AdminAuth:
         value = self._sessions.get(token or "")
         return bool(value and value[1])
 
+    def session_csrf(self, token: str | None) -> str | None:
+        """The CSRF token bound to a session, for a server-rendered form.
+
+        A page that carries a form has to embed the token the session is
+        already bound to; without this the only way to obtain one is the JSON
+        login response, which a browser cannot put into a hidden field.
+        """
+        return self._csrf.get(token or "")
+
     @property
     def password_hash(self) -> str:
         return self._password_hash

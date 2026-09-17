@@ -67,12 +67,16 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_admin_portal_is_mounted_and_requires_a_session():
+def test_admin_portal_serves_a_login_page_while_its_api_requires_a_session():
     async def scenario():
         app = build()
         async with client_for(app) as client:
-            response = await client.get("/admin/")
-        assert response.status_code == 401
+            page = await client.get("/admin/")
+            api = await client.get("/admin/sources")
+        assert page.status_code == 200
+        assert 'action="/admin/login-form"' in page.text
+        assert "登录" in page.text
+        assert api.status_code == 401
 
     run(scenario())
 

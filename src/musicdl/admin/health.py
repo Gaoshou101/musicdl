@@ -8,7 +8,7 @@ from musicdl.media.models import DownloadEvent
 
 
 class HealthAggregator:
-    def __init__(self, probes: dict[str, Callable[[], Awaitable[bool]]]):
+    def __init__(self, probes: dict[str, Callable[[], Awaitable[bool | None]]]):
         self.probes = probes
 
     async def check(self) -> dict:
@@ -17,10 +17,17 @@ class HealthAggregator:
             probe = self.probes.get(name)
             if probe is None: checks[name] = "unavailable"; continue
             try:
-                checks[name] = "ok" if await probe() else "failed"
+                outcome = await probe()
             except Exception:
                 checks[name] = "unavailable"
-        return {"status": "ok" if all(v == "ok" for v in checks.values()) else "degraded", "checks": checks}
+                continue
+            # ``None`` is the probe saying this deployment has nothing for that
+            # dependency to do -- Redis without WeCom, the plugin runner before
+            # a source needs it.  Reporting that as a failure would keep a
+            # working deployment red on the panel for its whole life.
+            checks[name] = "not_required" if outcome is None else ("ok" if outcome else "failed")
+        healthy = all(value in ("ok", "not_required") for value in checks.values())
+        return {"status": "ok" if healthy else "degraded", "checks": checks}
 
 
 class EventLogStore:

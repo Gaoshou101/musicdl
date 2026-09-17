@@ -63,7 +63,10 @@ class _AdminState:
         app.include_router(create_admin_router(auth=self.auth, sources=self.sources, bots=self.bots,
                                                health=self.health, events=self.events,
                                                audit=self.audit, limiter=self.limiter,
-                                               plugins=self.plugin_store))
+                                               plugins=self.plugin_store,
+                                               runtime=lambda: getattr(app.state, "runtime", None),
+                                               media_root=settings.media.root,
+                                               worker=settings.worker))
         app.add_middleware(CSRFMiddleware, auth=self.auth)
 
     def plugin_store(self) -> PluginStore:
@@ -103,7 +106,12 @@ class _AdminState:
 
 
 def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
-    """Dependency probes for the portal; an omitted key reports unavailable."""
+    """Dependency probes for the portal.
+
+    An omitted key reports ``unavailable``.  A probe answering ``None`` reports
+    ``not_required``: the dependency is real but this deployment has nothing
+    for it to do, so its absence is not a fault to show the operator.
+    """
 
     async def readyz() -> bool:
         tasks = getattr(app.state, "worker_tasks", None)
@@ -111,19 +119,31 @@ def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
             return True
         return app.state.worker_error is None and not any(task.done() for task in tasks)
 
-    async def redis() -> bool:
+    async def redis() -> bool | None:
         state = getattr(app.state, "wecom_state", None)
         if state is None:
-            raise RuntimeError("state unavailable")
+            # Redis carries the WeCom sessions and the job queue.  With no
+            # WeCom account the runtime never opens a client, so asking after
+            # one would mark a working deployment as broken.
+            return None
         return bool(await state.ping())
 
-    async def telegram() -> bool:
+    async def plugin_runner() -> bool | None:
+        # The runner is what actually fetches media, so its health is the one
+        # an operator most wants to see; before a runtime exists there is
+        # nothing to ask.
+        client = getattr(getattr(app.state, "runtime", None), "plugin_client", None)
+        if client is None:
+            return None
+        return await client.service_health()
+
+    async def telegram() -> bool | None:
         # An enabled Telegram deployment is healthy only when a connector is
         # wired, at least one Bot definition is registered, and the account
         # session is authorized. A disabled deployment has nothing to check.
         configured = getattr(settings, "telegram", None)
         if not getattr(configured, "enabled", False):
-            return True
+            return None
         runtime = getattr(app.state, "runtime", None)
         connector = getattr(runtime, "telegram", None)
         if connector is None or not getattr(runtime, "telegram_sources", 0):
@@ -131,16 +151,20 @@ def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
         result = await connector.restore(getattr(configured, "profile", "default"))
         return result.status is TelegramStatus.READY
 
-    return {"readyz": readyz, "redis": redis, "telegram": telegram}
+    return {"readyz": readyz, "redis": redis, "plugin_runner": plugin_runner, "telegram": telegram}
 
 
 class _Runtime:
     def __init__(self, *, redis, state, service, wecom, plugin_client, transport, registry,
-                 message_worker, job_worker, telegram=None, plugin_registry=None, telegram_sources=0):
+                 message_worker, job_worker, telegram=None, plugin_registry=None, telegram_sources=0,
+                 resolvers=None):
         self.redis, self.state, self.service = redis, state, service
         self.wecom, self.plugin_client, self.registry = wecom, plugin_client, registry
         self.transport = transport
         self.message_worker, self.job_worker = message_worker, job_worker
+        # Search and resolve are separate capabilities: an lx source resolves
+        # media but never searches, so the two maps are not the same one.
+        self.resolvers = dict(resolvers or {})
         self.telegram, self.telegram_sources = telegram, telegram_sources
         # Only plugin sources are published to the portal. A Telegram bot is
         # configured as a bot, so a second copy under "sources" would be a
@@ -232,15 +256,20 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
         raise ValueError("duplicate_source_id")
     overrides = {item["id"]: item for item in sources
                  if isinstance(item, dict) and isinstance(item.get("id"), str)}
-    if Redis is None:  # pragma: no cover
-        raise RuntimeError("redis dependency is unavailable")
-    redis = Redis.from_url(settings.redis.url.get_secret_value(), decode_responses=False,
-                           socket_connect_timeout=settings.redis.connect_timeout,
-                           socket_timeout=settings.redis.operation_timeout)
-    state = RedisStateStore(redis)
-    service = WeComService(settings.wecom, state, clock or time.time)
-    wecom = WeComClient(settings.wecom.corp_id, settings.wecom.secret.get_secret_value(),
-                        settings.wecom.agent_id, redis)
+    # Only the WeCom workers need Redis and the WeCom client.  The registry
+    # below answers the panel's own search and download without either, so a
+    # deployment that has no WeCom account still gets a working runtime.
+    redis = state = service = wecom = None
+    if settings.wecom.enabled:
+        if Redis is None:  # pragma: no cover
+            raise RuntimeError("redis dependency is unavailable")
+        redis = Redis.from_url(settings.redis.url.get_secret_value(), decode_responses=False,
+                               socket_connect_timeout=settings.redis.connect_timeout,
+                               socket_timeout=settings.redis.operation_timeout)
+        state = RedisStateStore(redis)
+        service = WeComService(settings.wecom, state, clock or time.time)
+        wecom = WeComClient(settings.wecom.corp_id, settings.wecom.secret.get_secret_value(),
+                            settings.wecom.agent_id, redis)
     plugin_client = PluginClient(str(settings.plugin.service_url), broker=HttpsActionBroker())
     transport = SecureMediaTransport()
     # Every installed lx source resolves against the same four catalogues, so
@@ -289,25 +318,27 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
         return await search_sources(SourceRegistry(e for e in entries if e.source_id not in excluded),
                                      query, timeout=search_timeout)
 
-    message_worker = MessageWorker(redis, registry, wecom, state=state, ai_ranker=ranker,
-                                   search_timeout=search_timeout,
-                                   selection_ttl=settings.wecom.selection_ttl)
-    job_worker = JobWorker(redis, wecom, sources=resolvers, media_root=settings.media.root, state=state,
-                           refresh=refresh, job_timeout=worker_settings.job_timeout,
-                           language_advisor=language_advisor,
-                           resolve_stream_timeout=worker_settings.resolve_stream_timeout,
-                           refresh_timeout=worker_settings.search_timeout,
-                           health_timeout=worker_settings.health_timeout,
-                           pending_idle_ms=worker_settings.pending_idle_ms,
-                           job_ttl=worker_settings.job_ttl,
-                           retry_window_seconds=worker_settings.retry_window_seconds,
-                           max_attempts=worker_settings.max_attempts,
-                           selection_ttl=settings.wecom.selection_ttl)
+    message_worker = job_worker = None
+    if settings.wecom.enabled:
+        message_worker = MessageWorker(redis, registry, wecom, state=state, ai_ranker=ranker,
+                                       search_timeout=search_timeout,
+                                       selection_ttl=settings.wecom.selection_ttl)
+        job_worker = JobWorker(redis, wecom, sources=resolvers, media_root=settings.media.root, state=state,
+                               refresh=refresh, job_timeout=worker_settings.job_timeout,
+                               language_advisor=language_advisor,
+                               resolve_stream_timeout=worker_settings.resolve_stream_timeout,
+                               refresh_timeout=worker_settings.search_timeout,
+                               health_timeout=worker_settings.health_timeout,
+                               pending_idle_ms=worker_settings.pending_idle_ms,
+                               job_ttl=worker_settings.job_ttl,
+                               retry_window_seconds=worker_settings.retry_window_seconds,
+                               max_attempts=worker_settings.max_attempts,
+                               selection_ttl=settings.wecom.selection_ttl)
     return _Runtime(redis=redis, state=state, service=service, wecom=wecom,
                     plugin_client=plugin_client, transport=transport, registry=registry,
                     message_worker=message_worker, job_worker=job_worker,
                     telegram=telegram, plugin_registry=plugin_registry,
-                    telegram_sources=telegram_sources)
+                    telegram_sources=telegram_sources, resolvers=resolvers)
 
 
 def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any], Any] | None = None,
@@ -322,49 +353,71 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
         tasks: list[asyncio.Task] = []
         app.state.worker_error = None
         app.state.stopping = False
-        if settings.wecom.enabled:
-            if state_factory:
-                state = state_factory(settings)
-                if inspect.isawaitable(state):
-                    state = await state
-                app.state.wecom_state = state
-                app.state.wecom_service = WeComService(settings.wecom, state, clock or time.time)
-            else:
-                definitions = tuple(admin.bots.list()) if admin is not None else ()
-                source_definitions = tuple(admin.sources.list()) if admin is not None else ()
-                factory = runtime_factory or (
-                    lambda current: _build_runtime(current, clock, bots=definitions,
-                                                   sources=source_definitions))
+        app.state.runtime_error = None
+        if settings.wecom.enabled and state_factory:
+            state = state_factory(settings)
+            if inspect.isawaitable(state):
+                state = await state
+            app.state.wecom_state = state
+            app.state.wecom_service = WeComService(settings.wecom, state, clock or time.time)
+        elif state_factory:
+            # An injected state boundary means the caller owns the WeCom half;
+            # assembling the source runtime on top of it is not what it asked
+            # for, and nothing here needs the plugin volume then.
+            pass
+        elif settings.wecom.enabled or settings.admin.enabled:
+            # The one registry answers both surfaces -- the WeCom workers and
+            # the panel's own search box -- so it is assembled whenever either
+            # is on.  A deployment that runs only the panel must not be left
+            # with nothing to search, and one that runs neither is not asked
+            # for plugin storage it will never read.
+            definitions = tuple(admin.bots.list()) if admin is not None else ()
+            source_definitions = tuple(admin.sources.list()) if admin is not None else ()
+            factory = runtime_factory or (
+                lambda current: _build_runtime(current, clock, bots=definitions,
+                                               sources=source_definitions))
+            try:
                 runtime = factory(settings)
                 if inspect.isawaitable(runtime):
                     runtime = await runtime
+            except Exception as error:
+                # A WeCom deployment cannot serve its callback without workers;
+                # the panel can still start and report what is missing.
+                if settings.wecom.enabled:
+                    raise
+                runtime = None
+                app.state.runtime_error = error
+            if runtime is not None:
                 app.state.runtime = runtime
                 state = runtime.state
-                app.state.wecom_state = state
-                app.state.wecom_service = runtime.service
-                app.state.service = runtime.service
-                app.state.message_worker = runtime.message_worker
-                app.state.job_worker = runtime.job_worker
+                if state is not None:
+                    app.state.wecom_state = state
+                    app.state.wecom_service = runtime.service
+                    app.state.service = runtime.service
                 if admin is not None:
                     admin.publish_sources(getattr(runtime, "plugin_registry", None)
                                           or getattr(runtime, "registry", None))
-                async def observe(worker):
-                    await worker.run_forever()
+                if runtime.message_worker is not None and runtime.job_worker is not None:
+                    app.state.message_worker = runtime.message_worker
+                    app.state.job_worker = runtime.job_worker
 
-                def completed(task: asyncio.Task) -> None:
-                    if app.state.stopping or task.cancelled():
-                        return
-                    try:
-                        error = task.exception()
-                    except asyncio.CancelledError:
-                        return
-                    app.state.worker_error = error or RuntimeError("worker exited")
+                    async def observe(worker):
+                        await worker.run_forever()
 
-                tasks = [asyncio.create_task(observe(runtime.message_worker)),
-                         asyncio.create_task(observe(runtime.job_worker))]
-                for task in tasks:
-                    task.add_done_callback(completed)
-                app.state.worker_tasks = tasks
+                    def completed(task: asyncio.Task) -> None:
+                        if app.state.stopping or task.cancelled():
+                            return
+                        try:
+                            error = task.exception()
+                        except asyncio.CancelledError:
+                            return
+                        app.state.worker_error = error or RuntimeError("worker exited")
+
+                    tasks = [asyncio.create_task(observe(runtime.message_worker)),
+                             asyncio.create_task(observe(runtime.job_worker))]
+                    for task in tasks:
+                        task.add_done_callback(completed)
+                    app.state.worker_tasks = tasks
         try:
             yield
         finally:
@@ -381,6 +434,9 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
     app = FastAPI(title="musicdl", docs_url=None, redoc_url=None, lifespan=lifespan)
     admin = _AdminState(settings, app) if settings.admin.enabled else None
     app.state.admin = admin
+    # Read as plain state by /readyz, which must answer even when no lifespan
+    # ever ran: a probe should never be the thing that raises.
+    app.state.runtime_error = None
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
@@ -389,6 +445,10 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
     @app.get("/readyz")
     async def readyz() -> Response:
         if not settings.wecom.enabled:
+            # Without WeCom there are no workers to lose, but a panel whose
+            # source runtime could not be assembled has nothing to search.
+            if app.state.runtime_error is not None:
+                return PlainTextResponse("not ready", status_code=503)
             return PlainTextResponse("ready")
         try:
             if not await app.state.wecom_state.ping():

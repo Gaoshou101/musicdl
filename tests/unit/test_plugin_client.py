@@ -66,6 +66,52 @@ def test_direct_response_and_source_is_sent(tmp_path):
     asyncio.run(run())
 
 
+def test_service_health_asks_the_runner_and_answers_with_a_verdict():
+    """The panel's health card reads this, so every failure mode is a ``False``."""
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"service": "plugin-runner", "status": "ok"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False,
+                             follow_redirects=False)
+    client = PluginClient("http://runner:8080/", http_client=http)
+
+    async def run():
+        try:
+            return await client.service_health()
+        finally:
+            await http.aclose()
+
+    assert asyncio.run(run()) is True
+    assert seen == ["http://runner:8080/healthz"]
+
+
+def test_service_health_reports_a_runner_that_is_down_rather_than_raising():
+    def refusing(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    def failing(status_code, payload):
+        return lambda request: httpx.Response(status_code, json=payload)
+
+    cases = [
+        httpx.MockTransport(refusing),
+        httpx.MockTransport(failing(500, {"status": "ok"})),
+        httpx.MockTransport(failing(200, {"status": "starting"})),
+    ]
+
+    async def run():
+        for transport in cases:
+            http = httpx.AsyncClient(transport=transport, trust_env=False, follow_redirects=False)
+            try:
+                assert await PluginClient("http://runner:8080", http_client=http).service_health() is False
+            finally:
+                await http.aclose()
+
+    asyncio.run(run())
+
+
 def test_actions_accumulate_up_to_the_contract_limit_and_the_next_is_rejected(tmp_path):
     request_id = uuid4()
     steps = []
