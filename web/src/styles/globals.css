@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+@theme {
+  /* The panel is read in Chinese on whatever machine runs the browser, so the
+     stack names the CJK faces each desktop actually ships instead of pulling a
+     Latin webfont over the network (which a container build cannot reach). */
+  --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+
+  /* Neutral color system - Zinc base */
+  --color-neutral-50: oklch(98% 0 0);
+  --color-neutral-100: oklch(96% 0 0);
+  --color-neutral-200: oklch(92% 0 0);
+  --color-neutral-300: oklch(85% 0 0);
+  --color-neutral-400: oklch(70% 0 0);
+  --color-neutral-500: oklch(55% 0 0);
+  --color-neutral-600: oklch(42% 0 0);
+  --color-neutral-700: oklch(35% 0 0);
+  --color-neutral-800: oklch(25% 0 0);
+  --color-neutral-900: oklch(18% 0 0);
+  --color-neutral-950: oklch(12% 0 0);
+
+  /* Accent color - Electric Blue */
+  --color-accent-50: oklch(96% 0.02 240);
+  --color-accent-100: oklch(92% 0.04 240);
+  --color-accent-200: oklch(85% 0.08 240);
+  --color-accent-300: oklch(75% 0.12 240);
+  --color-accent-400: oklch(65% 0.15 240);
+  --color-accent-500: oklch(55% 0.18 240);
+  --color-accent-600: oklch(45% 0.15 240);
+  --color-accent-700: oklch(38% 0.12 240);
+  --color-accent-800: oklch(30% 0.08 240);
+  --color-accent-900: oklch(22% 0.04 240);
+
+  /* Semantic colors */
+  --color-success: oklch(65% 0.15 145);
+  --color-warning: oklch(70% 0.15 85);
+  --color-danger: oklch(58% 0.18 25);
+  --color-info: oklch(60% 0.15 240);
+
+  /* Glass effect variables */
+  --glass-bg: rgb(255 255 255 / 0.08);
+  --glass-border: rgb(255 255 255 / 0.12);
+  --glass-highlight: rgb(255 255 255 / 0.16);
+  --glass-blur: 24px;
+}
+
+@layer base {
+  * {
+    @apply border-neutral-800;
+  }
+
+  body {
+    @apply bg-neutral-950 text-neutral-100 font-sans antialiased;
+    font-feature-settings: "tnum" on, "lnum" on;
+  }
+
+  input, textarea, select {
+    font-feature-settings: "tnum" on, "lnum" on;
+  }
+}
+
+/* Glass morphism utility classes */
+@layer utilities {
+  .glass {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    /* Plain property only: Tailwind's build adds the -webkit- alias itself, and
+       spelling both by hand makes it drop this one as the redundant half. */
+    backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  }
+
+  .glass-highlight {
+    position: relative;
+  }
+
+  .glass-highlight::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(135deg, var(--glass-highlight) 0%, transparent 50%);
+    pointer-events: none;
+  }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Reduced transparency support */
+@media (prefers-reduced-transparency: reduce) {
+  .glass {
+    background: rgb(25 25 28 / 0.96);
+    backdrop-filter: none;
+  }
+}

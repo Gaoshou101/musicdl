@@ -1,0 +1,31 @@
+{
+  "name": "tgmusic-admin",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "check:api:build": "tsc src/lib/api.ts --outDir .next/contract --module esnext --moduleResolution bundler --target es2022 --skipLibCheck && node -e \"require('node:fs').renameSync('.next/contract/api.js', '.next/contract/api.mjs')\"",
+    "check:api:remote": "npm run check:api:build && node scripts/check-api-contract.mjs",
+    "check:api:local": "npm run check:api:build && node scripts/check-api-contract.mjs http://127.0.0.1:3101 local",
+    "check:api:local-nostore": "npm run check:api:build && node scripts/check-api-contract.mjs http://127.0.0.1:3101 local-nostore"
+  },
+  "dependencies": {
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@phosphor-icons/react": "^2.1.7",
+    "motion": "^11.14.3",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@tailwindcss/postcss": "^4.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5"
+  }
+}

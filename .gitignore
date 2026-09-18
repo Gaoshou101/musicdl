@@ -13,6 +13,15 @@ build/
 *.egg-info/
 .worktrees/
 
+# The admin panel's own build products never enter Git.
+web/node_modules/
+web/.next/
+web/out/
+web/tsconfig.tsbuildinfo
+
+# A local Deno module cache belongs to whoever ran the plugin runner by hand.
+.deno-cache/
+
 # Runtime data and user-managed media must never enter Git.
 data/
 music/
