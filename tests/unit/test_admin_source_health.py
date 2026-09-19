@@ -251,3 +251,72 @@ def test_a_channel_that_fails_its_search_is_reported_as_failing():
     primary = run(scenario())
     assert primary["status"] == "failing"
     assert primary["last_error"] == "search_error" and primary["last_error_stage"] == "search"
+
+# -- the weight a search tie-break is given ------------------------------
+#
+# ``preference`` is what the panel hands to ``search_sources``: a small bounded
+# number per channel, built from what this process actually observed. It never
+# outweighs an operator's declared priority, so it only has to be right about
+# which of two otherwise-equal channels has been answering.
+
+
+def test_an_unobserved_channel_has_no_preference_either_way():
+    assert SourceHealthStore().preference("primary") == 0
+
+
+def test_a_channel_that_has_only_been_probed_has_no_preference():
+    store = SourceHealthStore()
+    store.observe_event(event("primary", "health", "success", healthy=True))
+    assert store.preference("primary") == 0
+
+
+def test_a_window_of_successes_prefers_a_channel_strongly():
+    store = SourceHealthStore()
+    store.observe_search("primary", "ok")
+    assert store.preference("primary") == 10
+
+
+def test_a_failed_search_costs_a_channel_more_than_its_rate_suggests():
+    store = SourceHealthStore()
+    store.observe_search("primary", "error")
+    assert store.preference("primary") == -5
+
+    store.observe_event(event("primary", "download", "failed", error_code="download_failed"))
+    assert store.preference("primary") == -10
+
+
+def test_a_successful_download_after_a_failed_search_reads_as_recovering():
+    store = SourceHealthStore()
+    store.observe_search("primary", "error")
+    store.observe_event(event("primary", "download", "success"))
+
+    # Half the window succeeded, the last download worked, the last search did not.
+    assert store.preference("primary") == 5
+
+
+def test_the_rate_is_the_rounded_share_of_the_window():
+    store = SourceHealthStore()
+    for status in ("success", "success", "success", "failed"):
+        store.observe_event(event("primary", "refresh", status))
+
+    assert store.preference("primary") == 8
+
+
+def test_a_health_probe_never_enters_the_window():
+    store = SourceHealthStore()
+    store.observe_search("primary", "ok")
+    store.observe_event(event("primary", "health", "failed", error_code="health_failed"))
+    store.observe_event(event("primary", "health", "success", healthy=True))
+
+    assert store.preference("primary") == 10
+
+
+def test_the_preference_stays_bounded_and_never_raises():
+    store = SourceHealthStore()
+    for _ in range(5):
+        store.observe_search("primary", "timeout")
+        store.observe_event(event("primary", "download", "failed", error_code="media_timeout"))
+
+    score = store.preference("primary")
+    assert -20 <= score <= 20
+    assert store.preference(None) == 0 and store.preference("") == 0
