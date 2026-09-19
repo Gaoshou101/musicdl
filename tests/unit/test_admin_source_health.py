@@ -127,6 +127,31 @@ def test_a_cleanup_failure_is_not_charged_to_the_channel():
     assert primary["status"] == "unknown" and primary["attempts"] == 0 and primary["last_error"] is None
 
 
+def test_a_refresh_is_counted_the_way_a_download_is():
+    """The fallback pipeline refreshes the catalogue after a failed download.
+
+    A refresh that fails is the same channel failing to answer a search, so it
+    counts; a refresh that succeeds after a failed download is the channel
+    recovering, which is what makes the verdict ``degraded`` rather than ``ok``.
+    """
+    store = SourceHealthStore()
+    store.observe_event(event("primary", "download", "failed", error_code="download_failed"))
+    store.observe_event(event("primary", "refresh", "success"))
+    primary = row(store.snapshot([{"id": "primary", "enabled": True, "priority": 1}]), "primary")
+    assert (primary["downloads"], primary["refreshes"]) == (1, 1)
+    assert primary["status"] == "degraded"
+    assert primary["last_refresh"] == "success"
+    assert primary["last_error"] == "download_failed" and primary["last_error_stage"] == "download"
+
+
+def test_a_failed_refresh_is_the_channel_failing():
+    store = SourceHealthStore()
+    store.observe_event(event("primary", "refresh", "failed", error_code="refresh_failed"))
+    primary = row(store.snapshot([{"id": "primary", "enabled": True, "priority": 1}]), "primary")
+    assert primary["status"] == "failing" and primary["refreshes"] == 1
+    assert primary["last_error"] == "refresh_failed" and primary["last_error_stage"] == "refresh"
+
+
 def test_a_channel_with_traffic_but_no_configuration_is_still_reported():
     store = SourceHealthStore()
     store.observe_search("retired", "error")

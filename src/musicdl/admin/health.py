@@ -52,10 +52,10 @@ class AuditLogStore(EventLogStore):
 # means the channel answered; an empty result set is still a working channel.
 SEARCH_OK = "ok"
 
-# The one stage where a failure is the source's fault. ``cleanup`` failing is
-# this process failing to remove a temporary file, not the channel misbehaving,
-# so it is deliberately not counted against a source.
-_SOURCE_STAGES = ("search", "download", "refresh", "health")
+# The stages of a download attempt that count against a channel, and the counter
+# each one feeds. ``cleanup`` failing is this process failing to remove a
+# temporary file, not the channel misbehaving, so it is deliberately absent.
+_ATTEMPT_STAGES = {"download": "downloads", "refresh": "refreshes"}
 
 
 class SourceHealthStore:
@@ -110,7 +110,7 @@ class SourceHealthStore:
         if not isinstance(source_id, str) or not source_id:
             return
         stage = data.get("stage")
-        if stage not in _SOURCE_STAGES:
+        if stage != "health" and stage not in _ATTEMPT_STAGES:
             return
         record = self._record(source_id)
         if record is None:
@@ -126,7 +126,7 @@ class SourceHealthStore:
                 record["last_error"] = data.get("error_code") or "health_failed"
                 record["last_error_stage"] = "health"
             return
-        record[f"{stage}s"] += 1
+        record[_ATTEMPT_STAGES[stage]] += 1
         record[f"last_{stage}"] = status
         record["outcomes"].append(status == "success")
         if status != "success":
