@@ -266,6 +266,10 @@ def test_the_adapter_names_the_source_that_will_resolve_each_hit():
         f"{ITEM_PREFIX}kw:51449297", f"{ITEM_PREFIX}kw:7"]
     assert {candidate.source_id for candidate in candidates} == {"lx-jade-pro"}
     assert {candidate.source_version for candidate in candidates} == {"1.2.2"}
+    # Which catalogue the row came from travels with it: twelve channels answer
+    # from the same one, so without this a kw row and a kw row on another
+    # channel are the same row with the same words.
+    assert {candidate.platform for candidate in candidates} == {"kw"}
     # Nothing here claims a container the download has not been asked for yet.
     assert {candidate.format for candidate in candidates} == {None}
     assert {candidate.bitrate for candidate in candidates} == {None}

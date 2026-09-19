@@ -24,8 +24,17 @@ source, because they all resolve against the same catalogue.  Twelve sources
 cost four requests per query rather than forty-eight.
 
 What comes back is one candidate per hit, tagged with the identity of one
-installed lx source and the ``lx:<platform>:<songId>`` item id its shim decodes
-back on ``resolve``.  The source keeps the half it is good at.
+installed lx source, the ``lx:<platform>:<songId>`` item id its shim decodes
+back on ``resolve``, and the platform the row came from.  The source keeps the
+half it is good at.
+
+The platform tag is what makes a shared catalogue search legible downstream.
+Every installed lx source resolves against the same four catalogues, so all
+twelve answer with the same rows; without the tag, twelve copies of one kw row
+are indistinguishable from twelve findings, and nothing downstream can say
+which platform a listed recording is actually on.  It is provenance, not a
+second search: the source still runs no code here, and ``resolve`` still goes
+to the channel it was asked of.
 """
 
 from __future__ import annotations
@@ -372,6 +381,11 @@ class LxSearchAdapter:
     decodes back, so ``resolve`` still goes to the source that will answer it.
     """
 
+    # Every adapter of this kind answers from the one catalogue search the main
+    # process owns, rather than from an index of its own.  The portal reads this
+    # to report that one shared search instead of once per installed channel.
+    catalogue_shared = True
+
     def __init__(self, source_id: str, source_version: str, search: PlatformSearch, *,
                  platforms: Iterable[str] = PLATFORMS, limit: int = MAX_CANDIDATES):
         if not isinstance(source_id, str) or not source_id:
@@ -414,6 +428,7 @@ class LxSearchAdapter:
                 candidates.append(Candidate(
                     source_id=self.source_id, source_version=self.source_version, item_id=hit.item_id,
                     title=hit.title, artist=hit.artist, album=hit.album, duration=hit.duration,
+                    platform=hit.platform,
                     # Quality is what the resolve step negotiates, not what a
                     # search listing advertises, so nothing here claims a
                     # container the download has not been asked for yet.

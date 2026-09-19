@@ -52,7 +52,11 @@ def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_
             elif name == "version": version = trimmed
             else: file_format = trimmed
         line = required()
-        optional = [("专辑", c.album), ("时长", _duration(c.duration)), ("码率", f"{c.bitrate} kbps" if c.bitrate is not None else None)]
+        # The catalogue leads the optional fields: a bot that listed twelve
+        # channels all answering from one catalogue search would otherwise show
+        # the same line twelve times with nothing to choose between them.
+        optional = [("平台", c.platform), ("专辑", c.album), ("时长", _duration(c.duration)),
+                    ("码率", f"{c.bitrate} kbps" if c.bitrate is not None else None)]
         for label, value in optional:
             if value is None:
                 continue

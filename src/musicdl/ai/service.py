@@ -92,7 +92,12 @@ async def advise_ranking(
 
     by_token = {f"candidate-{index}": candidate for index, candidate in enumerate(disclosed, 1)}
     reordered = tuple(by_token[token] for token in tokens) + search.candidates[len(disclosed):]
-    updated = SearchResult(reordered, search.statuses, search_result_version(reordered))
+    # Reordering the rows must not lose what each row says about the channels
+    # behind it: the offer list is carried by identity, not by position.
+    offers = {candidate.canonical_version_key: offered
+              for candidate, offered in zip(search.candidates, search.offers)}
+    updated = SearchResult(reordered, search.statuses, search_result_version(reordered),
+                           tuple(offers.get(candidate.canonical_version_key, ()) for candidate in reordered))
     emit_event(record, AIEvent("rank", "applied"))
     return AIRankResult(updated, True)
 

@@ -70,6 +70,18 @@ def _replacement(wanted: Candidate, candidates, resolvers) -> Candidate | None:
     return min(matches, key=distance) if matches else None
 
 
+def _shared_catalogue(registry, source_id: str) -> bool:
+    """Whether one channel answers out of the shared catalogue search.
+
+    Every installed lx source resolves against the same four catalogues and
+    runs no search code of its own, so their answers are not independent
+    findings.  The panel says so once instead of printing one identical result
+    count per channel, which is what the count alone would claim.
+    """
+    entry = registry.get(source_id) if registry is not None else None
+    return bool(getattr(getattr(entry, "source", None), "catalogue_shared", False))
+
+
 def _media_target(root: str | Path, relative_path: str) -> Path:
     """Resolve one artifact below the media root, or refuse it.
 
@@ -407,7 +419,13 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return {"query": q.strip(), "version": result.version, "count": len(page),
                 "total": len(result.candidates),
                 "candidates": [candidate.public_representation for candidate in page],
-                "sources": [{"id": status.source_id, "status": status.status, "count": status.count}
+                # Aligned with ``candidates``: which channels stand behind each
+                # row, best first.  One catalogue search answers for every
+                # installed lx source, so a row reached through twelve channels
+                # is one row here, not twelve identical ones.
+                "offers": [list(offered) for offered in result.offers[:len(page)]],
+                "sources": [{"id": status.source_id, "status": status.status, "count": status.count,
+                             "catalogue": _shared_catalogue(service.registry, status.source_id)}
                             for status in result.statuses]}
 
     @router.post("/download")
