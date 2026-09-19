@@ -60,6 +60,41 @@ export type Candidate = {
 
 export type SourceStatus = { id: string; status: string; count: number }
 
+/** How one channel has behaved lately, as `GET /sources/health` rolls it up. */
+export type SourceHealthVerdict = 'ok' | 'degraded' | 'failing' | 'unknown'
+
+export type SourceHealthRow = {
+  id: string
+  name: string | null
+  enabled: boolean
+  priority: number | null
+  /** False for a channel that has traffic but is no longer configured. */
+  configured: boolean
+  status: SourceHealthVerdict
+  attempts: number
+  successes: number
+  failures: number
+  success_rate: number | null
+  searches: number
+  downloads: number
+  refreshes: number
+  last_search: string | null
+  last_download: string | null
+  last_refresh: string | null
+  last_count: number
+  last_error: string | null
+  last_error_stage: string | null
+  last_health: boolean | null
+  last_health_status: string | null
+}
+
+export type SourceHealthReport = {
+  sources: SourceHealthRow[]
+  /** How many recent outcomes the rate is computed from. */
+  window: number
+  total: number
+}
+
 export type SearchReport = {
   query: string
   version: string
@@ -553,6 +588,11 @@ export function downloadCandidate(candidate: Candidate): Promise<DownloadReport>
 
 export function readHealth(): Promise<HealthReport> {
   return request<HealthReport>('/health')
+}
+
+/** What each channel did last, from the panel's own searches and downloads. */
+export function listSourceHealth(): Promise<SourceHealthReport> {
+  return request<SourceHealthReport>('/sources/health')
 }
 
 /** Everything the panel owns, everything the deployment owns, and what is in force. */

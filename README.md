@@ -27,6 +27,7 @@
 | The panel exercises the sources on its own | `GET /admin/search`, `POST /admin/download`, and `GET /admin/media/{path}` run the registry the workers run, so a source is proved out without sending the bot a message. |
 | Dependency health separates "nothing to do" from "broken" | `/admin/health` answers `ok`, `failed`, or `not_required`, so a dependency with nothing to do in this deployment does not turn a working panel red. |
 | The running configuration is editable from the panel | `GET /admin/config` and `PATCH /admin/config` move the WeCom, Redis, Telegram, AI, and worker budgets out of the host's `.env` and into the panel, where a change is saved once and the container is not rebuilt; secrets are write-only, and the settings only Compose owns say so. |
+| Channel health answers "which source is broken" | `GET /admin/sources/health` rolls the panel's own searches and downloads up into one verdict per source (working, flaky, failing, unproven), a success rate over the last handful of attempts, and the last error. Dependency health says whether Redis is up; this says whether one channel can still serve. |
 
 ## Architecture
 
@@ -192,11 +193,14 @@ The panel lives at `/admin` and works on its own: the registry it searches throu
 | `GET /admin/bots`, `POST /admin/bots`, `PATCH /admin/bots/{id}`, `DELETE /admin/bots/{id}` | Define and edit the Telegram Bots that become search sources. |
 | `GET /admin/health` | Aggregated dependency health. |
 | `GET /admin/config`, `PATCH /admin/config` | Read every setting the panel owns with its source and the value in force (a secret only answers whether one is set), then validate and store one batch of changes. |
+| `GET /admin/sources/health` | Per-source roll-up of the last searches and downloads, with the stage and code of the last failure. |
 | `GET /admin/events`, `GET /admin/audit` | Paginated event and audit logs. |
 
 The JSON routes keep answering JSON, so an unauthenticated `GET /admin/sources` is still a `401`, while the two HTML forms double-submit the session's CSRF token in a hidden field, because a form post cannot set the `x-csrf-token` header the API routes use. Form bodies are parsed in-process (`musicdl.admin.forms`) rather than through `request.form()`, so reading two strings does not make `python-multipart` a runtime dependency.
 
 `GET /admin/health` reports four checks — `readyz`, `redis`, `plugin_runner`, and `telegram` — and every one of them answers `ok`, `failed`, or `not_required`. Redis is `not_required` without a WeCom account, and the plugin runner is `not_required` before a runtime needs it, so neither keeps a working deployment red. Telegram readiness is reported here rather than through `/readyz`: an enabled deployment shows `failed` unless a connector is wired, at least one Bot definition is registered, and the session restores as ready, while a disabled one shows `not_required`.
+
+Channel health probes nothing of its own; it rolls up the panel's own searches and downloads. One search from the panel's search page gives every enabled source a row, and a download adds the question a search cannot answer, which is whether the channel can actually hand the audio back. The verdict comes from the last 20 outcomes per source: all successful is `ok`, a failed last attempt is `failing`, a failure followed by a success is `degraded`, and a source nobody has exercised is `unknown` — no evidence is not the same as broken. A source that has traffic but is no longer configured is still listed and marked as removed, because right after a source is deleted is exactly when its last error is worth reading, and the record is a fixed window per source rather than a growing log.
 
 Mutating routes need the double-submit CSRF token. State is written to `MUSICDL_ADMIN__STATE_PATH` and reloaded on start, so an edited source, an edited Bot, and a changed password survive a restart, and a stored entry takes precedence over the value the runtime publishes again on boot. A state file that is unreadable or carries an unsupported version stops startup instead of silently restoring the default password, and a failed write rolls the in-memory change back.
 

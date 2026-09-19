@@ -17,11 +17,14 @@ import {
 import {
   ImportPreview,
   SourceImport,
+  SourceHealthRow,
+  SourceHealthVerdict,
   SourceItem,
   analyzeSource,
   deleteSource,
   errorMessage,
   installSource,
+  listSourceHealth,
   listSources,
   updateSource,
 } from '@/lib/api'
@@ -83,6 +86,41 @@ type AnalysisSummary = {
 }
 
 type Notice = { tone: 'ok' | 'error'; text: string } | null
+
+/** The verdict the health roll-up reaches for one channel, as a badge. */
+const VERDICT_TEXT: Record<SourceHealthVerdict, string> = {
+  ok: '正常',
+  degraded: '不稳定',
+  failing: '异常',
+  unknown: '未验证',
+}
+
+const VERDICT_CLASS: Record<SourceHealthVerdict, string> = {
+  ok: 'bg-success/15 text-success',
+  degraded: 'bg-warning/15 text-warning',
+  failing: 'bg-danger/15 text-danger',
+  unknown: 'bg-neutral-800 text-neutral-500',
+}
+
+/**
+ * The health roll-up's verdict for one row.
+ *
+ * A component rather than an inline expression because the map has no record
+ * for a source that has never been exercised, and the badge has to disappear
+ * rather than advertise a verdict the roll-up never reached.
+ */
+function ChannelBadge({ row }: { row: SourceHealthRow | undefined }) {
+  if (!row) return null
+  const rate = row.success_rate === null ? '—' : `${Math.round(row.success_rate * 100)}%`
+  return (
+    <span
+      className={`text-xs px-2 py-1 rounded-md ${VERDICT_CLASS[row.status]}`}
+      title={`最近 ${row.attempts} 次结果的成功率 ${rate}`}
+    >
+      渠道 {VERDICT_TEXT[row.status]}
+    </span>
+  )
+}
 
 function EgressLine({ source }: { source: SourceItem }) {
   // The stored script is the only authority on what this source may reach, so
@@ -418,6 +456,7 @@ function ImportDialog({
 
 export default function SourcesPage() {
   const [sources, setSources] = useState<SourceItem[]>([])
+  const [channels, setChannels] = useState<Record<string, SourceHealthRow>>({})
   const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState<Notice>(null)
   const [showImport, setShowImport] = useState(false)
@@ -429,6 +468,14 @@ export default function SourcesPage() {
       const report = await listSources()
       setSources(report.items)
       setNotice(null)
+      // The verdict is an addition to this page, not a precondition for it: a
+      // deployment that cannot answer the roll-up still gets its source list.
+      try {
+        const health = await listSourceHealth()
+        setChannels(Object.fromEntries(health.sources.map((row) => [row.id, row])))
+      } catch {
+        setChannels({})
+      }
     } catch (err) {
       setNotice({ tone: 'error', text: errorMessage(err) })
     } finally {
@@ -615,6 +662,9 @@ export default function SourcesPage() {
                       >
                         {source.enabled ? '已启用' : '已停用'}
                       </span>
+                      {channels[source.id] && (
+                        <ChannelBadge row={channels[source.id]} />
+                      )}
                       {!source.plugin && (
                         <span className="text-xs px-2 py-1 rounded-md bg-warning/15 text-warning">
                           脚本未安装

@@ -170,9 +170,23 @@ async function main() {
     `${config.container.length} 项`,
   )
 
+  const channels = await api.listSourceHealth()
+  check('source health lists the channels the panel can use', Array.isArray(channels.sources), `${channels.total} 个渠道`)
+
   if (suite === 'remote') {
     const search = await api.searchCandidates('晴天', 5)
     check('search answers with candidates', Array.isArray(search.candidates), `${search.count}/${search.total} 条，${search.sources.length} 个音源`)
+
+    // The search the panel just ran is also the probe the channel view reads,
+    // so at least one channel has to come back with a verdict rather than
+    // "unknown" after it.
+    const probed = await api.listSourceHealth()
+    const judged = probed.sources.filter((item) => item.status !== 'unknown')
+    check(
+      'a search leaves a verdict on the channels it queried',
+      judged.length > 0,
+      judged.map((item) => `${item.id}: ${item.status}`).join(', ') || '没有任何渠道留下记录',
+    )
 
     // A source that cannot resolve one recording is normal (a platform may want
     // an account), so the check walks the list until one candidate downloads and
