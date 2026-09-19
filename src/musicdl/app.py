@@ -22,7 +22,7 @@ from .wecom.client import WeComClient
 from .ai.client import OpenAICompatibleClient
 from .ai.service import advise_language, advise_ranking
 from .admin import (AdminAuth, AdminStateStore, AuditLogStore, BotManager, EventLogStore,
-                    HealthAggregator, RateLimiter, SourceManager)
+                    ConfigManager, HealthAggregator, RateLimiter, SourceManager)
 from .admin.csrf import CSRFMiddleware
 from .admin.portal import create_admin_router
 from .media import classify_language
@@ -49,13 +49,17 @@ class _AdminState:
     """Mutable administration state mounted once per application instance."""
 
     def __init__(self, settings: AppSettings, app: FastAPI) -> None:
+        self.settings = settings
         self.store = AdminStateStore(settings.admin.state_path)
-        self.plugin_settings = settings.plugin
         self.auth = AdminAuth(on_change=self.persist)
         self.sources = SourceManager(on_change=self.persist)
         self.bots = BotManager(on_change=self.persist)
         self.events = EventLogStore()
         self.audit = AuditLogStore()
+        # The panel's own layer of settings is read and applied before anything
+        # captures a value from the settings object: the rate limiter below, and
+        # the runtime the lifespan assembles on the next line of its own.
+        self.config = ConfigManager(settings, on_change=self.persist, on_adopt=self.retune)
         self.limiter = RateLimiter(limit=settings.admin.login_limit,
                                    window_seconds=settings.admin.login_window_seconds)
         self.health = HealthAggregator(_admin_probes(settings, app))
@@ -63,11 +67,22 @@ class _AdminState:
         app.include_router(create_admin_router(auth=self.auth, sources=self.sources, bots=self.bots,
                                                health=self.health, events=self.events,
                                                audit=self.audit, limiter=self.limiter,
+                                               config=self.config,
                                                plugins=self.plugin_store,
                                                runtime=lambda: getattr(app.state, "runtime", None),
                                                media_root=settings.media.root,
                                                worker=settings.worker))
         app.add_middleware(CSRFMiddleware, auth=self.auth)
+
+    def retune(self) -> None:
+        """Adopt the settings the running process can change without a restart.
+
+        Every other field is picked up by the next start, which is what the
+        panel says on the field itself rather than leaving the operator to
+        guess.
+        """
+        self.limiter.limit = self.settings.admin.login_limit
+        self.limiter.window_seconds = self.settings.admin.login_window_seconds
 
     def plugin_store(self) -> PluginStore:
         """Storage handed to the portal on demand.
@@ -76,20 +91,21 @@ class _AdminState:
         creates the plugin directory, and a deployment that never installs a
         source should not need that volume to exist.
         """
-        return PluginStore(self.plugin_settings.app_data_root)
+        return PluginStore(self.settings.plugin.app_data_root)
 
     def load(self) -> None:
         """Adopt whatever the last run persisted; a first run has no file."""
         payload = self.store.load()
         if not payload:
             return
+        self.config.load(payload)
         self.auth.restore(payload.get("credentials"))
         self.sources.restore(payload.get("sources"))
         self.bots.restore(payload.get("bots"))
 
     def persist(self) -> None:
         self.store.save(credentials=self.auth.snapshot(), sources=self.sources.snapshot(),
-                        bots=self.bots.snapshot())
+                        bots=self.bots.snapshot(), settings=self.config.snapshot())
 
     def publish_sources(self, registry: Any) -> None:
         """Expose the sources the runtime actually assembled.

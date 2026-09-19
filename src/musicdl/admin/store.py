@@ -40,11 +40,11 @@ class AdminStateStore:
             raise AdminStateError(f"unsupported administrator state file: {self.path}")
         return payload
 
-    def save(self, *, credentials: dict, sources: list, bots: list) -> None:
+    def save(self, *, credentials: dict, sources: list, bots: list, settings: dict | None = None) -> None:
         if self.path is None:
             return
         document = {"version": self.VERSION, "credentials": credentials,
-                    "sources": sources, "bots": bots}
+                    "sources": sources, "bots": bots, "settings": settings or {}}
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         temporary = self.path.with_name(self.path.name + ".tmp")
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

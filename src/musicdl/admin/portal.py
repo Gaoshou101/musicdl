@@ -10,12 +10,14 @@ from html import escape
 from pydantic import ValidationError
 from typing import Any, Callable
 
+from musicdl.config import AppSettings
 from musicdl.media import download_candidate
 from musicdl.media.models import MediaError
 from musicdl.plugins.install import install_source, preview_source
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import search_sources
 from .auth import AdminAuth, RateLimiter
+from .config import ConfigManager
 from .forms import form_fields
 from .health import EventLogStore, HealthAggregator
 from .management import BotManager, SourceManager
@@ -54,12 +56,14 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                         health: HealthAggregator | None = None, events: EventLogStore | None = None,
                         limiter: RateLimiter | None = None, bots: SourceManager | None = None,
                         audit: EventLogStore | None = None,
+                        config: ConfigManager | None = None,
                         plugins: Callable[[], Any] | None = None,
                         runtime: Callable[[], Any] | None = None,
                         media_root: str | Path | None = None,
                         worker: Any | None = None) -> APIRouter:
     auth, sources, health, events, limiter = auth or AdminAuth(), sources or SourceManager(), health or HealthAggregator({}), events or EventLogStore(), limiter or RateLimiter()
     bots, audit = bots or BotManager(), audit or EventLogStore()
+    config = config or ConfigManager(AppSettings())
     router = APIRouter(prefix="/admin")
     search_timeout = _positive(getattr(worker, "search_timeout", None), 10.0)
     resolve_timeout = _positive(getattr(worker, "resolve_stream_timeout", None), 30.0)
@@ -417,6 +421,35 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     async def health_report(request: Request):
         require(request)
         return await health.check()
+
+    @router.get("/config")
+    async def read_config(request: Request):
+        """What the panel owns, what the deployment owns, and what is in force.
+
+        A secret is reported as set or unset and never as a value: the screen an
+        operator uses to change a credential is not a screen that can read one
+        back.
+        """
+        require(request)
+        return config.describe()
+
+    @router.patch("/config")
+    async def write_config(body: dict, request: Request):
+        """Store one batch of settings and adopt what this process can.
+
+        A null clears an override and lets the deployment's own value stand
+        again; a blank secret means "leave the stored one alone", so a form that
+        cannot render an existing secret cannot erase it by accident.
+        """
+        mutate(request)
+        values = body.get("values") if isinstance(body, dict) else None
+        try:
+            result = config.update(values)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        audit.append({"action": "update_config", "status": "success",
+                      "keys": sorted(values)})
+        return result
 
     @router.get("/events")
     async def event_page(request: Request, offset: int = 0, limit: int = 50):

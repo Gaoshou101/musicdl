@@ -26,6 +26,7 @@
 | AI 只做辅助，且默认关闭 | `MUSICDL_AI__ENABLED=false` 时排序与语言分类完全确定；即使开启后模型不可用，也会回落到相同的确定性结论。 |
 | 后台自己就能验证音源 | `GET /admin/search`、`POST /admin/download` 与 `GET /admin/media/{path}` 跑的是 worker 用的同一个注册表，不必先给机器人发消息就能确认音源可用。 |
 | 依赖健康度区分“无事可做”与“真的坏了” | `/admin/health` 会给出 `ok`、`failed` 或 `not_required`；在当前部署里本就无事可做的依赖不会把正常工作的后台一直标红。 |
+| 运行配置在后台就能改 | `GET /admin/config` 与 `PATCH /admin/config` 让企微、Redis、Telegram、AI 与任务预算在面板里改完即生效，不必回到宿主机改 `.env` 再重建容器；密钥只写不读，只有 compose 能改的项会被如实标注归属。 |
 
 ## 架构
 
@@ -147,6 +148,8 @@ curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 
 所有配置项都使用 `MUSICDL_` 前缀，并以 `__` 作为嵌套分隔符。把 `.env.example` 复制为 `.env`，只替换占位值；不要提交 `.env` 或真实凭证。
 
+下表中的一部分也可以交给后台：面板把自己的覆盖层写进状态文件，并在启动时叠在部署的环境变量之上。面板只认识自己声明过的那批字段，每项都带着当前来源（面板覆盖、部署变量或默认值）与生效时机（立即生效或重启后生效）；端口、卷挂载、资源上限这类只有 compose 能改的项会单独列出并注明应改的变量名，而不是被伪装成能在面板里修改的开关。
+
 | 变量 | 是否必需 | 用途 |
 |---|---|---|
 | `MUSICDL_REDIS__URL` | 必需 | 外部 Redis 地址，支持 `redis://` 与 `rediss://`。 |
@@ -188,6 +191,7 @@ curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 | `PATCH /admin/sources/{id}`、`DELETE /admin/sources/{id}` | 启用、调整优先级或删除音源。 |
 | `GET /admin/bots`、`POST /admin/bots`、`PATCH /admin/bots/{id}`、`DELETE /admin/bots/{id}` | 维护会成为搜索源的 Telegram Bot。 |
 | `GET /admin/health` | 汇总依赖健康度。 |
+| `GET /admin/config`、`PATCH /admin/config` | 读出面板能改的每一项、它当前的来源与生效值（密钥只回答“是否已设置”），并按批校验后保存一组改动。 |
 | `GET /admin/events`、`GET /admin/audit` | 分页事件与审计日志。 |
 
 JSON 路由继续返回 JSON，因此未认证的 `GET /admin/sources` 仍然是 `401`；两个 HTML 表单则把会话的 CSRF 令牌放进隐藏字段双提交，因为表单提交无法设置 API 路由所用的 `x-csrf-token` 头。表单体在进程内解析（`musicdl.admin.forms`），不走 `request.form()`，因此只为读两个字符串并不会让 `python-multipart` 变成运行时依赖。
@@ -196,9 +200,11 @@ JSON 路由继续返回 JSON，因此未认证的 `GET /admin/sources` 仍然是
 
 所有写操作都需要双提交 CSRF 令牌。状态写入 `MUSICDL_ADMIN__STATE_PATH` 并在启动时重新加载，因此改动过的音源、Bot 与密码都能在重启后保留，并且已存储的条目优先于运行时再次发布的值。状态文件不可读或版本不受支持时会直接中止启动，而不是悄悄恢复默认密码；写入失败会回滚内存中的改动。
 
+同一份状态文件也保存面板自己的配置覆盖层（`settings` 键）：改过的字段记在这里，没改过的仍由部署的环境变量决定，两者都没有的才回落到默认值。一批改动整体校验、整体落盘，任何一项非法都会让整批被拒绝，不会只保存一半；重启后如果某项在新版本里不再合法，它会被丢弃并在面板上列出来。密钥从不回传，留空表示保持原值，只有显式的 `null` 才会清除覆盖、回落到部署值。
+
 ## Web 控制台
 
-`web/` 是一个可选的 Next.js 控制台，只调用上面的这些路由。它把自己的 `/api/*` 请求重写到应用的 `/admin/*` 路由，并且在构建期而不是运行期固定后端地址。
+`web/` 是一个可选的 Next.js 控制台，只调用上面的这些路由，包含仪表板、音源管理、Bot 管理、运行配置、健康监控、日志与设置七个页面。它把自己的 `/api/*` 请求重写到应用的 `/admin/*` 路由，并且在构建期而不是运行期固定后端地址；「运行配置」页同时展示面板能改的字段与只有 compose 能改的容器项，改动会先攒成一批再一起保存。
 
 ```bash
 cd web
