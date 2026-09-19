@@ -100,16 +100,21 @@ EXPECTED_CODES.update({"infinite_cpu": {"timeout", "plugin_failed"}, "memory": {
 # are accepted. The denial assertions themselves are unchanged.
 EXPECTED_CODES.update({"fork": {"timeout", "plugin_error", "plugin_failed"},
                        "pid_exhaustion": {"timeout", "plugin_error", "plugin_failed"}})
-# The memory mode needs room for interpreter startup, otherwise the clock, not the
-# allocation, decides the outcome on a loaded runner.
-MEMORY_BUDGET_MS = 5000
+# The host has to boot before it can deny anything, and the memory mode also has to
+# reach its allocation: on a loaded runner the default 1 s budget is gone before
+# either happens, so the supervisor reports ``timeout`` instead of the host's own
+# verdict.  Both modes are denied within milliseconds of the host starting (Deno
+# refuses the write, the Python host hits its address-space limit), so the extra
+# room removes the race without relaxing the codes expected below.
+STARTUP_HEADROOM_MODES = {"memory", "tmp_exhaustion"}
+STARTUP_HEADROOM_MS = 5000
 
 @pytest.mark.integration
 @pytest.mark.parametrize("language,fixture", [("python", "hostile.py"), ("javascript", "hostile.js")])
 @pytest.mark.parametrize("mode", HOSTILE_MODES)
 def test_hostile_plugin_is_denied_and_runner_recovers(language: str, fixture: str, mode: str):
     status, step = _invoke(language, _source(fixture), {"mode": mode},
-                           timeout_ms=MEMORY_BUDGET_MS if mode == "memory" else 1000)
+                           timeout_ms=STARTUP_HEADROOM_MS if mode in STARTUP_HEADROOM_MODES else 1000)
     assert status in {502, 504}
     assert step["response"]["ok"] is False, step
     assert step["response"]["error"]["code"] in EXPECTED_CODES[mode], step
