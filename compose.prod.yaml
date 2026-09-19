@@ -37,6 +37,42 @@ services:
       retries: 3
       start_period: 10s
 
+  # The administration panel: the same boundaries as the service it manages,
+  # on its own loopback port. It talks to the app over the default network by
+  # service name.
+  admin-panel:
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+      # Read at build time: Next bakes the rewritten origin into the server.
+      args:
+        MUSICDL_API_ORIGIN: "http://musicdl:8000"
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+      - /app/.next/cache:rw,noexec,nosuid,nodev,size=32m
+    ports:
+      - "127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}:3000"
+    networks: [default]
+    depends_on:
+      musicdl:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   plugin-runner:
     build:
       context: .

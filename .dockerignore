@@ -10,3 +10,8 @@ __pycache__
 .pytest_cache
 .mypy_cache
 .ruff_cache
+# The panel's dependencies and build output are rebuilt inside its own image,
+# so they must never travel in the build context.
+web/node_modules
+web/.next
+web/tsconfig.tsbuildinfo

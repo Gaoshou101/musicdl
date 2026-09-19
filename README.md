@@ -38,10 +38,17 @@
            ▼                                        ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                reverse proxy   (deploy/nginx, deploy/caddy)                │
-└─────────────────────────────────────┬──────────────────────────────────────┘
-                                      │
-                                      http://musicdl:8000
-                                      ▼
+└───────────────────────────────────────────────────────┬────────────────────┘
+       │                                                │
+       │                                                │ /admin + /api/*
+       │                                                ▼
+       │                  ┌──────────────────────────────────────────────────┐
+       │                  │       admin-panel   (uid 10001, read-only)       │
+       │                  │      rewrites /api/* to /admin/* on the app      │
+       │                  └─────────────────────────────┬────────────────────┘
+       │                                                │
+       │ /wecom (callback)                              │ http://musicdl:8000
+       ▼                                                ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │            musicdl main service   (uid 10001, read-only rootfs)            │
 │                                                                            │
@@ -58,7 +65,7 @@
 └──────────────────────┘   └──────────────────────┘   └──────────────────────┘
 ```
 
-`compose.yaml` runs two application services and no Redis. The `musicdl` service owns the media, application-data, and Telegram-session volumes; `plugin-runner` is attached only to the internal `plugin-control` network and receives no secrets. Redis stays external and is configured with `MUSICDL_REDIS__URL`. The dashboard in `web/` is not one of those services: it is a separate Next.js build that proxies its own `/api/*` calls to the app's `/admin/*` routes.
+`compose.yaml` runs three application services and no Redis. The `musicdl` service owns the media, application-data, and Telegram-session volumes; `plugin-runner` is attached only to the internal `plugin-control` network and receives no secrets; `admin-panel` is built from `docker/web/Dockerfile`, runs non-root on a read-only root filesystem like the other two, publishes its own loopback port, and reaches the app through the `/api/*` rewrites the build bakes in. Redis stays external and is configured with `MUSICDL_REDIS__URL`.
 
 ## Usage Example
 
@@ -123,9 +130,12 @@ The GitHub repository is private, so cloning requires access to `Gaoshou101/musi
 ```bash
 docker compose ps
 curl http://127.0.0.1:${MUSICDL_PORT:-8000}/healthz
+curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 ```
 
 `/healthz` answers `{"service":"musicdl","status":"ok","config_version":1}` and deliberately contacts neither Redis nor the plugin runner, so it proves the process is up and nothing more. Readiness is separate: with WeCom enabled `/readyz` pings Redis-backed state, and with it disabled there are no workers to lose, but `/readyz` still answers `503` if the source runtime the panel searches through could not be assembled.
+
+The panel answers `{"status":"ok"}` on its own `/healthz`, the one route it serves without a session and the exact route its Compose health check probes. It reports that the panel process is serving requests and touches nothing behind it.
 
 Three more steps take the deployment from running to useful:
 
@@ -141,6 +151,7 @@ All settings use the `MUSICDL_` prefix with `__` as the nesting delimiter. Copy 
 |---|---|---|
 | `MUSICDL_REDIS__URL` | Yes | External Redis endpoint; `redis://` or `rediss://`. |
 | `MUSICDL_PORT` | No | Loopback host port published by Compose. Defaults to `8000`. |
+| `MUSICDL_ADMIN_PORT` | No | Loopback host port Compose publishes for the panel. Defaults to `3000`. |
 | `MUSICDL_WECOM__ENABLED` | To serve users | Turns on the callback boundary. Defaults to `false`. |
 | `MUSICDL_WECOM__CORP_ID`, `__AGENT_ID`, `__TOKEN`, `__SECRET` | When WeCom is enabled | Corporation ID, agent ID, callback token, and application secret. |
 | `MUSICDL_WECOM__ENCODING_AES_KEY` | When WeCom is enabled | The 43-character EncodingAESKey; it must decode to 32 bytes. |
@@ -195,7 +206,7 @@ npm install
 MUSICDL_API_ORIGIN=http://127.0.0.1:8000 npm run build
 ```
 
-`npm run check:api:remote` runs a read-only contract check against a deployed panel, and `npm run check:api:local` runs the full flow against a local app and panel. The panel is not part of `compose.yaml`; `web/STRUCTURE.md` maps the directory.
+`npm run check:api:remote` runs a read-only contract check against a deployed panel, and `npm run check:api:local` runs the full flow against a local app and panel. The panel is one of the Compose services: `docker/web/Dockerfile` builds it, and Compose publishes `127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}`. `web/STRUCTURE.md` maps the directory.
 
 ## Source Plugins
 
@@ -233,7 +244,7 @@ Some incompatibilities are deliberate: a plugin cannot import arbitrary packages
 
 | Gate | What it decides |
 |---|---|
-| `compose` | Two application services, no Redis service, non-root users, read-only root filesystems, hard CPU and memory limits, health probes, and an internal plugin network. |
+| `compose` | Three application services, no Redis service, non-root users, read-only root filesystems, hard CPU and memory limits, health probes, and an internal plugin network. |
 | `proxy` | The Nginx and Caddy templates terminate TLS, keep the callback query string, and keep the callback out of their access logs. |
 | `wecom-callback` | A real WeCom application behind public HTTPS. Human-run, with `--wecom-url` and `--wecom-expected`. |
 | `telegram-session-isolation` | The session volume and its credentials belong to the main service only. |
@@ -242,7 +253,7 @@ Some incompatibilities are deliberate: a plugin cannot import arbitrary packages
 | `admin-auth` | The admin test files pass under `-W error`. |
 | `compose-recovery` | The restart and volume contract holds, the backup script resolves every volume, and an isolated Redis recovery drill passes. |
 
-CI (`.github/workflows/ci.yml`) runs the test suite and `--self-test --dry-run` on every push and pull request. The hosted runner provides a Docker Engine, so `plugin-security` runs for real there; `wecom-callback` and `compose-recovery` stay human-run because no hosted runner can decide them honestly.
+CI (`.github/workflows/ci.yml`) runs the test suite and `--self-test --dry-run` on every push and pull request. The hosted runner provides a Docker Engine, so `plugin-security` runs for real there; `wecom-callback` and `compose-recovery` stay human-run because no hosted runner can decide them honestly. A separate `admin-panel` job type-checks the dashboard, builds its image, and starts the container read-only to smoke-test `/healthz`, so the panel is proven in CI rather than only on an operator's machine.
 
 ## Development
 
@@ -264,8 +275,9 @@ The dashboard in `web/` has its own toolchain: `npm run build` compiles it, `npm
 | Deployment environment | The external Redis URL Compose requires, plus the optional AI block | [.env.example](./.env.example) |
 | Runtime configuration | Every configuration group and its default, declared in one model | [config.py](./src/musicdl/config.py) |
 | Deployment shape | Services, volumes, networks, and security options | [compose.yaml](./compose.yaml) |
-| Production limits | CPU, memory, and restart policy for both services | [compose.prod.yaml](./compose.prod.yaml) |
+| Production limits | CPU, memory, and restart policy for every service | [compose.prod.yaml](./compose.prod.yaml) |
 | Reverse proxies | Nginx and Caddy templates that terminate TLS in front of the portal | [deploy](./deploy) |
+| Admin panel image | How the dashboard is built, where its backend origin is fixed, and how it runs as a container | [docker/web/Dockerfile](./docker/web/Dockerfile) |
 | Web panel layout | The dashboard's directory map and its contract checks | [web/STRUCTURE.md](./web/STRUCTURE.md) |
 | Release gates | The gate runner, its tamper self-test, and the backup drill | [run_gates.py](./scripts/release/run_gates.py) |
 | Dependency inventory | Pinned versions, licences, and supply-chain evidence | [THIRD_PARTY.md](./THIRD_PARTY.md) |
