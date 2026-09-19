@@ -4,7 +4,7 @@
 
 The repository currently contains the Phase 0 foundation, the WeCom callback boundary, deterministic multi-source search, the Phase 3 Telegram user-account connector and its music-Bot adapters now wired into the runtime from the administration portal's Bot definitions, the Phase 4 injected download/media-safety engine, Phase 5 optional advisory ranking and language suggestions, the Phase 6 restricted plugin runtime with main-process streaming for plugin-resolved media, and the injected administration portal. AI is disabled by default and uses deterministic, redacted fallback behavior. Compatibility with a live provider remains deployment validation; no live provider call is claimed here. Concrete provider adapters remain integration work or later phases; the administration portal is mounted at `/admin` by default and can be switched off with `MUSICDL_ADMIN__ENABLED=false`.
 
-`compose.yaml` defines only `musicdl` and `plugin-runner`; Redis remains an external service. Copy `.env.example` to `.env` and set `MUSICDL_REDIS__URL` before starting Compose. Never put credentials in the example file or source tree.
+`compose.yaml` defines three services: `musicdl`, the `plugin-runner` it drives through the restricted runtime, and `admin-panel`, the browser interface to the app's own `/admin` routes. Redis remains an external service. Copy `.env.example` to `.env` and set `MUSICDL_REDIS__URL` before starting Compose. Never put credentials in the example file or source tree.
 
 The main service owns the media, application-data, and Telegram-session volumes. The plugin runner receives no Redis URL, session, environment file, API key, main configuration, Docker socket, or host path.
 
@@ -150,6 +150,7 @@ Copy `.env.example` to `.env` and replace only placeholders with deployment valu
 | --- | --- | --- |
 | `MUSICDL_REDIS__URL` | Yes | External Redis URL; supports `redis://` and `rediss://`. |
 | `MUSICDL_PORT` | No | Host loopback port; defaults to `8000`. |
+| `MUSICDL_ADMIN_PORT` | No | Host loopback port for the administration panel container; defaults to `3000`. |
 | `MUSICDL_CONFIG__VERSION` | Compose-set | Configuration schema version, currently `1`. |
 | `MUSICDL_MEDIA__ROOT` | Compose-set | Main media mount, `/data/music`. |
 | `MUSICDL_TELEGRAM__SESSION_ROOT` | Compose-set | Restricted Telegram session mount, `/data/telegram-sessions`. |
@@ -169,6 +170,8 @@ The connector supports code login, 2FA, restart restoration, invalid-session and
 
 The panel searches and downloads on its own, which is how a music source is exercised without sending the bot a message. `GET /admin/search?q=` runs the same `search_sources` over the same registry the workers use and answers with the candidates plus one status per source; `POST /admin/download` takes one candidate the search returned and downloads it into the media root, answering with the relative path, byte size, media type and SHA-256; and `GET /admin/media/{path}` serves that artifact back so a browser can play what it fetched, refusing any path that does not resolve below the media root. All three require a session, and the download requires the CSRF token. None of this is a WeCom feature: the source registry is assembled whenever either the WeCom workers or the panel is enabled, so a deployment with no WeCom account still gets a working registry, needing neither Redis nor a WeCom client for it. A runtime that cannot be assembled at start-up leaves the panel serving pages and `/readyz` answering 503 rather than reporting a search that would succeed.
 
+The panel is built into an image of its own rather than being served by the Python app, so a browser interface cannot take the service down with it. Next resolves the `/api/*` -> `/admin/*` rewrite while it builds, so `docker/web/Dockerfile` takes the app's address as a build argument and both Compose files pass it the service name `musicdl`; the container itself needs no configuration and publishes one loopback port. The image runs the `standalone` server as uid 10001 on a read-only root filesystem with only `/tmp` and `/app/.next/cache` writable, and Compose probes `/healthz`, which is the one route that answers without a session because every other page needs one.
+
 ## Compose startup and health
 
 ```bash
@@ -179,10 +182,11 @@ docker compose build
 docker compose up -d
 docker compose ps
 curl http://127.0.0.1:${MUSICDL_PORT:-8000}/healthz
-docker compose logs --tail=100 musicdl plugin-runner
+curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
+docker compose logs --tail=100 musicdl plugin-runner admin-panel
 ```
 
-Only `musicdl` publishes a loopback port. `plugin-runner` is attached only to the internal `plugin-control` network; the main service is attached to both the default and plugin-control networks. Plugin execution is enabled only through the restricted runner and main-owned HTTPS action broker described above.
+`musicdl` and `admin-panel` each publish one loopback port, and the panel reaches the app by its Compose service name. `plugin-runner` is attached only to the internal `plugin-control` network; the main service is attached to both the default and plugin-control networks. Plugin execution is enabled only through the restricted runner and main-owned HTTPS action broker described above.
 
 ## Release gates
 

@@ -12,7 +12,7 @@ def _python():
 def report(n,s,d): print(f'[{n}] {s} - {d}'); return s=='PASS'
 def compose_contract(t=None):
  t=t or COMPOSE.read_text()
- cs=[('services:\n  musicdl:' in t and '  plugin-runner:' in t,'two application services'),('redis:' not in t and 'MUSICDL_REDIS__URL: "${MUSICDL_REDIS__URL:?' in t,'external Redis only'),(t.count('user: "10001:10001"')==2,'both services non-root'),(t.count('read_only: true')==2 and t.count('cap_drop: [ALL]')==2 and t.count('no-new-privileges:true')==2,'read-only root and privilege boundary'),(t.count('limits:')==2 and t.count('cpus:')==2 and t.count('memory:')==2,'hard CPU/memory limits'),(t.count('healthcheck:')==2 and 'internal: true' in t,'health probes and internal network')]
+ cs=[('services:\n  musicdl:' in t and '  admin-panel:' in t and '  plugin-runner:' in t,'three application services'),('redis:' not in t and 'MUSICDL_REDIS__URL: "${MUSICDL_REDIS__URL:?' in t,'external Redis only'),(t.count('user: "10001:10001"')==3,'every service non-root'),(t.count('read_only: true')==3 and t.count('cap_drop: [ALL]')==3 and t.count('no-new-privileges:true')==3,'read-only root and privilege boundary'),(t.count('limits:')==3 and t.count('cpus:')==3 and t.count('memory:')==3,'hard CPU/memory limits'),(t.count('healthcheck:')==3 and 'internal: true' in t,'health probes and internal network')]
  return all(report('compose','PASS' if ok else 'FAIL',d) for ok,d in cs)
 def compose(): return compose_contract()
 def proxy_contract(n,c):
