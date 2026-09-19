@@ -174,6 +174,44 @@ class SourceHealthStore:
                                    row["id"]))
         return {"sources": rows, "window": self.window, "total": len(rows)}
 
+    def preference(self, source_id: str) -> int:
+        """One channel's observed standing, as a search tie-break weight.
+
+        Two channels offering the same recording have to be told apart, and an
+        operator's declared priority cannot do it when they never ranked the
+        two. What this process measured can: the recent outcome window says how
+        often the channel answered, and the last search and download say
+        whether it answered just now.
+
+        The scale is deliberately small and bounded. ``0`` is the answer for an
+        unknown channel, an unreadable roll-up and a channel that has not been
+        exercised yet, so a deployment that has run no search keeps the order
+        it had before, and a few points of rate never outweigh a priority an
+        operator set on purpose.
+        """
+        try:
+            return self._preference(source_id)
+        except Exception:
+            # A tie-break must never be the reason a search or a download
+            # fails; a roll-up that cannot be read simply has no opinion.
+            return 0
+
+    def _preference(self, source_id: str) -> int:
+        if not isinstance(source_id, str) or not source_id:
+            return 0
+        record = self._records.get(source_id)
+        if record is None:
+            return 0
+        outcomes = list(record["outcomes"])
+        score = round(10 * sum(1 for ok in outcomes if ok) / len(outcomes)) if outcomes else 0
+        if record["last_download"] == "success":
+            score += 5
+        elif record["last_download"] == "failed":
+            score -= 5
+        if record["last_search"] is not None and record["last_search"] != SEARCH_OK:
+            score -= 5
+        return max(-20, min(20, score))
+
     def _view(self, source_id: str, *, configured: bool, name, enabled: bool, priority) -> dict:
         record = self._records.get(source_id)
         common = {"id": source_id, "name": name, "enabled": enabled, "priority": priority,

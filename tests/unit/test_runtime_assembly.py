@@ -483,3 +483,29 @@ def test_the_plugin_runner_probe_asks_the_client_the_runtime_holds(runtime_fakes
     assert asyncio.run(_check(probes(_settings(), app(SimpleNamespace(plugin_client=Client()))),
                               "plugin_runner")) is False
     assert asked == [True]
+
+def test_build_runtime_publishes_the_refresh_and_preference_the_panel_downloads_with(runtime_fakes, monkeypatch):
+    """The panel needs the worker's refresh to retry on another channel.
+
+    The same preference orders the retry, so a fallback lands on a channel the
+    deployment has actually seen answer, and a runtime built without one keeps
+    working with no opinion about any channel.
+    """
+    _Store.plugins = (_Plugin("first"), _Plugin("second"))
+    calls = []
+
+    async def search_spy(registry, query, **options):
+        calls.append((query, options))
+        return SimpleNamespace(candidates=())
+
+    monkeypatch.setattr(runtime_fakes, "search_sources", search_spy, raising=False)
+    preference = {"second": 10}.get
+    runtime = runtime_fakes._build_runtime(_settings(), preference=preference)
+
+    assert runtime.preference is preference
+    assert runtime.refresh is runtime.job_worker.kwargs["refresh"]
+    asyncio.run(runtime.refresh("needle", frozenset()))
+    assert calls == [("needle", {"timeout": 8.0, "preference": preference})]
+
+    default = runtime_fakes._build_runtime(_settings())
+    assert default.preference is None and default.refresh is not None

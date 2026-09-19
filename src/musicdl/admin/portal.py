@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 from pathlib import Path, PurePosixPath
@@ -11,22 +12,62 @@ from pydantic import ValidationError
 from typing import Any, Callable
 
 from musicdl.config import AppSettings
-from musicdl.media import download_candidate
+from musicdl.media import download_candidate, download_with_fallback
 from musicdl.media.models import MediaError
 from musicdl.plugins.install import install_source, preview_source
-from musicdl.sources.models import Candidate
+from musicdl.sources.models import Candidate, normalize_text
 from musicdl.sources.search import search_sources
 from .auth import AdminAuth, RateLimiter
 from .config import ConfigManager
 from .forms import form_fields
 from .health import EventLogStore, HealthAggregator, SourceHealthStore
+from .logs import LogBuffer
 from .management import BotManager, SourceManager
 from .pages import credentials_form, credentials_page, login_page
+
+
+# The panel's own log lines, which the service-log window reads back. A failed
+# download leaves no event that says why beyond its code, and the operator
+# looking at this window is the person who just clicked the button.
+_LOG = logging.getLogger("musicdl.admin")
 
 
 def _positive(value: Any, default: float) -> float:
     """A usable positive budget, or the default the portal falls back to."""
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else default
+
+
+def _same_recording(wanted: Candidate, other: Candidate) -> bool:
+    """Whether two channels offered the same recording.
+
+    The two disagree about item ids and versions by construction, so only the
+    parts a listener would hear take part. Duration orders two otherwise-equal
+    candidates instead of deciding whether they are equal, because a channel
+    that simply omits it still means the same song.
+    """
+    return (normalize_text(wanted.title) == normalize_text(other.title)
+            and normalize_text(wanted.artist) == normalize_text(other.artist))
+
+
+def _replacement(wanted: Candidate, candidates, resolvers) -> Candidate | None:
+    """The best other channel's copy of a recording that just failed.
+
+    ``candidates`` arrives in the refresh's own ranked order -- the registry
+    already preferred one of them -- so the only preference applied here is
+    closeness in duration: a channel that listed the track at 3:31 is a better
+    guess for the 3:30 that just failed than one that listed some much longer
+    version. A channel that cannot resolve media is skipped, because it would
+    fail for a reason that has nothing to do with the one that just failed.
+    """
+    def distance(other: Candidate) -> int:
+        if wanted.duration is None or other.duration is None:
+            return 0
+        return abs(other.duration - wanted.duration)
+
+    matches = [item for item in candidates or ()
+               if item.source_id != wanted.source_id and item.source_id in resolvers
+               and _same_recording(wanted, item)]
+    return min(matches, key=distance) if matches else None
 
 
 def _media_target(root: str | Path, relative_path: str) -> Path:
@@ -58,6 +99,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                         audit: EventLogStore | None = None,
                         config: ConfigManager | None = None,
                         source_health: SourceHealthStore | None = None,
+                        logs: LogBuffer | None = None,
                         plugins: Callable[[], Any] | None = None,
                         runtime: Callable[[], Any] | None = None,
                         media_root: str | Path | None = None,
@@ -66,9 +108,11 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     bots, audit = bots or BotManager(), audit or EventLogStore()
     config = config or ConfigManager(AppSettings())
     source_health = source_health or SourceHealthStore()
+    logs = logs or LogBuffer()
     router = APIRouter(prefix="/admin")
     search_timeout = _positive(getattr(worker, "search_timeout", None), 10.0)
     resolve_timeout = _positive(getattr(worker, "resolve_stream_timeout", None), 30.0)
+    health_timeout = _positive(getattr(worker, "health_timeout", None), 10.0)
     credential_paths = {"/admin/", "/admin/change-credentials", "/admin/change-credentials-form"}
 
     def start_session(response: Response) -> str:
@@ -373,6 +417,14 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         The body carries the candidate itself rather than an id the server has
         to remember: the portal keeps no per-session state, and a candidate is
         already a complete, validated description of one recording.
+
+        A channel can stop answering between the search that listed a track and
+        the download that fetches it. When the runtime carries the worker's own
+        refresh callback, one failed attempt is followed by a single retry on
+        another channel's copy of the same recording, so a dead aggregator no
+        longer fails every track the panel lists. The retry is bounded at one,
+        and a runtime assembled without the callback keeps the older
+        single-channel behaviour.
         """
         mutate(request)
         service = active_runtime()
@@ -382,29 +434,76 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             candidate = Candidate.model_validate(body.get("candidate"))
         except ValidationError:
             raise HTTPException(422, "invalid candidate") from None
-        source = (getattr(service, "resolvers", None) or {}).get(candidate.source_id)
-        if source is None:
-            raise HTTPException(404, "source cannot resolve media")
+        resolvers = getattr(service, "resolvers", None) or {}
+        refresh = getattr(service, "refresh", None)
         request_id = secrets.token_hex(16)
+        # The operator searched for something; the retry has to search for the
+        # same thing rather than for whatever the candidate happens to be
+        # titled on the channel that failed.
+        handed = body.get("query")
+        query = handed.strip() if isinstance(handed, str) and handed.strip() else candidate.title
 
         def recorded(event) -> None:
             """Keep the attempt in the log and in the channel's roll-up."""
             events.append(event)
             source_health.observe_event(event)
 
-        try:
-            async with asyncio.timeout(resolve_timeout):
-                result = await download_candidate(candidate, source, media_root, request_id=request_id,
-                                                  record=recorded)
-        except MediaError as exc:
-            raise HTTPException(502, exc.code) from None
-        except TimeoutError:
-            raise HTTPException(504, "media_timeout") from None
-        return {"request_id": request_id, "source_id": candidate.source_id,
-                "relative_path": str(result.relative_path).replace(os.sep, "/"),
-                "sha256": result.sha256, "size_bytes": result.size_bytes,
-                "media_type": result.media_type, "extension": result.extension,
-                "language": getattr(result.language, "value", result.language)}
+        def report(source_id: str, fallback_from: str | None, result) -> dict:
+            """One successful download, and which channel actually served it."""
+            return {"request_id": request_id, "source_id": source_id, "fallback_from": fallback_from,
+                    "relative_path": str(result.relative_path).replace(os.sep, "/"),
+                    "sha256": result.sha256, "size_bytes": result.size_bytes,
+                    "media_type": result.media_type, "extension": result.extension,
+                    "language": getattr(result.language, "value", result.language)}
+
+        def failed(code: str) -> HTTPException:
+            """The refusal to return, and one line for the service-log window.
+
+            The event log already holds every attempt the media pipeline made;
+            what it does not hold is why the operator's click ended the way it
+            did, in their words rather than in error codes.
+            """
+            _LOG.warning("panel download failed: query=%s candidate=%s source=%s error=%s",
+                         query, candidate.item_id, candidate.source_id, code)
+            return HTTPException(504 if code == "media_timeout" else 502, code)
+
+        if refresh is None or len(resolvers) < 2:
+            source = resolvers.get(candidate.source_id)
+            if source is None:
+                raise HTTPException(404, "source cannot resolve media")
+            try:
+                async with asyncio.timeout(resolve_timeout):
+                    result = await download_candidate(candidate, source, media_root,
+                                                      request_id=request_id, record=recorded)
+            except MediaError as exc:
+                raise failed(exc.code) from None
+            except TimeoutError:
+                raise failed("media_timeout") from None
+            return report(candidate.source_id, None, result)
+
+        # Each stage below carries its own budget, which is what bounds the
+        # call: one resolve, one refresh, one health probe, and at most one
+        # more resolve when the refresh produced another channel's copy.
+        attempt = await download_with_fallback(
+            candidate, resolvers, media_root, request_id=request_id, query=query, refresh=refresh,
+            resolve_stream_timeout=resolve_timeout, refresh_timeout=search_timeout,
+            health_timeout=health_timeout, record=recorded)
+        if attempt.download is not None:
+            return report(candidate.source_id, None, attempt.download)
+        code = attempt.download_error or "download_failed"
+        replacement = _replacement(candidate, getattr(attempt.refreshed, "candidates", ()), resolvers)
+        if replacement is not None:
+            try:
+                async with asyncio.timeout(resolve_timeout):
+                    result = await download_candidate(replacement, resolvers[replacement.source_id],
+                                                      media_root, request_id=request_id, record=recorded)
+            except MediaError as exc:
+                code = exc.code
+            except TimeoutError:
+                code = "media_timeout"
+            else:
+                return report(replacement.source_id, candidate.source_id, result)
+        raise failed(code)
 
     @router.get("/media/{relative_path:path}")
     async def media(relative_path: str, request: Request):
@@ -492,6 +591,23 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         require(request)
         if offset < 0 or limit < 1 or limit > 200: raise HTTPException(422, "invalid pagination")
         return audit.page(offset=offset, limit=limit)
+
+    @router.get("/logs")
+    async def service_logs(request: Request, limit: int = 200, after: int = 0, level: str | None = None):
+        """What this process logged while the panel was running.
+
+        The two stores beside this one answer questions the portal asked; this
+        one answers what the service printed, which is what an operator needs
+        when something failed for a reason no event carries. It is a cursor
+        rather than a page number, because a window that polls must not
+        reprint what it already shows -- the client passes the last id it has
+        and gets only what came after.
+        """
+        require(request)
+        try:
+            return logs.page(limit=limit, after=after, level=level)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     @router.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):

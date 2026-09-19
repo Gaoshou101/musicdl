@@ -71,7 +71,9 @@ export default function SearchPage() {
     const key = rowKey(candidate)
     setDownloads((current) => ({ ...current, [key]: { status: 'busy' } }))
     try {
-      const result = await downloadCandidate(candidate)
+      // The query goes with the candidate: the backend retries a failed
+      // channel by refreshing the same search, not by guessing from the title.
+      const result = await downloadCandidate(candidate, report?.query ?? query)
       setDownloads((current) => ({ ...current, [key]: { status: 'done', report: result } }))
     } catch (err) {
       setDownloads((current) => ({ ...current, [key]: { status: 'error', error: errorMessage(err) } }))
@@ -263,6 +265,11 @@ export default function SearchPage() {
                       下载成功：{formatBytes(state.report.size_bytes)} · {state.report.media_type} ·
                       语言 {state.report.language} · 请求 {shortHash(state.report.request_id, 12)}
                     </p>
+                    {state.report.fallback_from && (
+                      <p className="text-warning">
+                        原音源 {state.report.fallback_from} 未能取到音频，已改用 {state.report.source_id} 下载
+                      </p>
+                    )}
                     <p className="font-mono">sha256 {state.report.sha256}</p>
                     <a
                       href={mediaUrl(state.report.relative_path)}

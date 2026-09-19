@@ -22,7 +22,8 @@ from .wecom.client import WeComClient
 from .ai.client import OpenAICompatibleClient
 from .ai.service import advise_language, advise_ranking
 from .admin import (AdminAuth, AdminStateStore, AuditLogStore, BotManager, EventLogStore,
-                    ConfigManager, HealthAggregator, RateLimiter, SourceHealthStore, SourceManager)
+                    ConfigManager, HealthAggregator, LogBuffer, RateLimiter, SourceHealthStore,
+                    SourceManager)
 from .admin.csrf import CSRFMiddleware
 from .admin.portal import create_admin_router
 from .media import classify_language
@@ -67,12 +68,17 @@ class _AdminState:
         self.limiter = RateLimiter(limit=settings.admin.login_limit,
                                    window_seconds=settings.admin.login_window_seconds)
         self.health = HealthAggregator(_admin_probes(settings, app))
+        # The window onto what this process logs, created before the router is
+        # mounted so it exists even when the stored configuration below fails
+        # to load -- which is exactly when an operator needs to read it.
+        self.logs = LogBuffer(capacity=500)
         self.load()
         app.include_router(create_admin_router(auth=self.auth, sources=self.sources, bots=self.bots,
                                                health=self.health, events=self.events,
                                                audit=self.audit, limiter=self.limiter,
                                                config=self.config,
                                                source_health=self.source_health,
+                                               logs=self.logs,
                                                plugins=self.plugin_store,
                                                runtime=lambda: getattr(app.state, "runtime", None),
                                                media_root=settings.media.root,
@@ -178,7 +184,7 @@ def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
 class _Runtime:
     def __init__(self, *, redis, state, service, wecom, plugin_client, transport, registry,
                  message_worker, job_worker, telegram=None, plugin_registry=None, telegram_sources=0,
-                 resolvers=None):
+                 resolvers=None, refresh=None, preference=None):
         self.redis, self.state, self.service = redis, state, service
         self.wecom, self.plugin_client, self.registry = wecom, plugin_client, registry
         self.transport = transport
@@ -186,6 +192,11 @@ class _Runtime:
         # Search and resolve are separate capabilities: an lx source resolves
         # media but never searches, so the two maps are not the same one.
         self.resolvers = dict(resolvers or {})
+        # The panel's own download retries through the same refresh the
+        # background worker uses, and orders equal candidates by what the
+        # channel roll-up has observed. Both are optional: a runtime assembled
+        # without them serves the panel exactly as it did before.
+        self.refresh, self.preference = refresh, preference
         self.telegram, self.telegram_sources = telegram, telegram_sources
         # Only plugin sources are published to the portal. A Telegram bot is
         # configured as a bot, so a second copy under "sources" would be a
@@ -259,7 +270,7 @@ def _search_adapter(stored, source: PluginSource, platform_search: PlatformSearc
 
 
 def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
-                   telegram_client_factory=None):
+                   telegram_client_factory=None, preference=None):
     """Build one runtime.
 
     ``bots`` and ``sources`` are the definitions the portal owns.  A stored
@@ -335,9 +346,15 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
         return advice.language
 
     async def refresh(query: str, failed_source_ids=frozenset()):
+        """Re-search everything but the channel that just failed.
+
+        The panel's download uses this too, so it is ordered by the same
+        preference the panel's own search is: a retry should reach the channel
+        that has been answering, not whichever one sorts first.
+        """
         excluded = set(failed_source_ids or ())
         return await search_sources(SourceRegistry(e for e in entries if e.source_id not in excluded),
-                                     query, timeout=search_timeout)
+                                     query, timeout=search_timeout, preference=preference)
 
     message_worker = job_worker = None
     if settings.wecom.enabled:
@@ -359,7 +376,8 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                     plugin_client=plugin_client, transport=transport, registry=registry,
                     message_worker=message_worker, job_worker=job_worker,
                     telegram=telegram, plugin_registry=plugin_registry,
-                    telegram_sources=telegram_sources, resolvers=resolvers)
+                    telegram_sources=telegram_sources, resolvers=resolvers,
+                    refresh=refresh, preference=preference)
 
 
 def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any], Any] | None = None,
@@ -375,6 +393,11 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
         app.state.worker_error = None
         app.state.stopping = False
         app.state.runtime_error = None
+        if admin is not None:
+            # Installed before anything else the lifespan does, so a start-up
+            # that goes wrong is itself readable from the panel afterwards.
+            app.state.logs = admin.logs
+            admin.logs.install()
         if settings.wecom.enabled and state_factory:
             state = state_factory(settings)
             if inspect.isawaitable(state):
@@ -394,9 +417,14 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             # for plugin storage it will never read.
             definitions = tuple(admin.bots.list()) if admin is not None else ()
             source_definitions = tuple(admin.sources.list()) if admin is not None else ()
+            # The panel's own search and download are ordered by what it has
+            # observed about each channel; the workers search through the same
+            # registry, so they inherit the same ordering.
+            preference = None if admin is None else admin.source_health.preference
             factory = runtime_factory or (
                 lambda current: _build_runtime(current, clock, bots=definitions,
-                                               sources=source_definitions))
+                                               sources=source_definitions,
+                                               preference=preference))
             try:
                 runtime = factory(settings)
                 if inspect.isawaitable(runtime):
@@ -451,6 +479,8 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 await _maybe_close(runtime)
             elif redis is not None:
                 await _maybe_close(redis)
+            if admin is not None:
+                admin.logs.uninstall()
 
     app = FastAPI(title="musicdl", docs_url=None, redoc_url=None, lifespan=lifespan)
     admin = _AdminState(settings, app) if settings.admin.enabled else None

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from urllib.parse import quote
 
 import httpx
@@ -19,9 +20,10 @@ from musicdl.admin.csrf import CSRFMiddleware
 from musicdl.admin.health import EventLogStore
 from musicdl.admin.portal import create_admin_router
 from musicdl.config import WorkerSettings
-from musicdl.media.models import DownloadMetadata, _CloseOnce
+from musicdl.media.models import DownloadMetadata, MediaError, _CloseOnce
 from musicdl.sources import SourceEntry, SourceRegistry
 from musicdl.sources.models import Candidate
+from musicdl.sources.search import SearchResult
 
 ID3 = b"ID3\x04\x00\x00\x00\x00\x00\x00"
 AUDIO = ID3 + b"frame-payload"
@@ -31,9 +33,8 @@ LOGIN = {"username": "operator", "password": "new-password"}
 class Source:
     """An lx-shaped source: it answers search with one hit and streams it back."""
 
-    source_id, version = "primary", "1.0.0"
-
-    def __init__(self) -> None:
+    def __init__(self, source_id: str = "primary", version: str = "1.0.0") -> None:
+        self.source_id, self.version = source_id, version
         self.queries: list[str] = []
         self.downloaded: list[str] = []
 
@@ -203,3 +204,144 @@ def test_media_route_stays_inside_the_media_root(tmp_path):
     missing, outside = run(scenario())
     assert missing.status_code == 404
     assert outside.status_code == 404
+
+# -- the cross-channel retry ---------------------------------------------
+#
+# A channel can stop answering between the search that listed a track and the
+# download that fetches it, and one dead aggregator used to fail every track
+# the panel listed. The runtime a deployment assembles carries the same refresh
+# callback the background worker retries with, and the panel's download uses it
+# for exactly one more attempt.
+
+PRIMARY = {"source_id": "primary", "source_version": "1.0.0", "item_id": "1", "title": "稻香",
+           "artist": "周杰伦", "album": "魔杰座", "duration": 210, "format": "mp3"}
+
+
+class BrokenSource(Source):
+    """A channel that lists a track and then cannot serve its audio."""
+
+    def __init__(self, source_id: str = "primary", code: str = "download_failed") -> None:
+        super().__init__(source_id)
+        self.code = code
+
+    async def download(self, candidate: Candidate):
+        self.downloaded.append(candidate.item_id)
+        raise MediaError(self.code)
+
+
+class FallbackRuntime(Runtime):
+    """The runtime a real deployment assembles, refresh callback included."""
+
+    def __init__(self, registry, resolvers, refreshed) -> None:
+        super().__init__(registry, resolvers)
+        self.refreshed, self.queries = refreshed, []
+
+    async def refresh(self, query, failed_source_ids=frozenset()):
+        self.queries.append(query)
+        return self.refreshed
+
+
+def copy_of(source: Source, *, duration: int = 210) -> Candidate:
+    """One channel's listing of the recording every retry test is about."""
+    return Candidate(source_id=source.source_id, source_version=source.version, item_id="1",
+                     title="稻香", artist="周杰伦", album="魔杰座", duration=duration, format="mp3")
+
+
+def fallback_app(tmp_path, sources, refreshed):
+    """Mount the panel over a runtime whose download can fall back."""
+    registry = SourceRegistry([SourceEntry(s.source_id, s.version, s) for s in sources])
+    service = FallbackRuntime(registry, {s.source_id: s for s in sources}, refreshed)
+    auth = AdminAuth()
+    auth.change_credentials("admin", "operator", "new-password")
+    app = FastAPI()
+    app.include_router(create_admin_router(auth=auth, events=EventLogStore(), runtime=lambda: service,
+                                           media_root=tmp_path, worker=WorkerSettings()))
+    app.add_middleware(CSRFMiddleware, auth=auth)
+    return app, service
+
+
+def fetch(app, body: dict):
+    """Sign in and press the panel's download button once."""
+    async def scenario():
+        async with client_for(app) as client:
+            token = await signed_in(client)
+            return await client.post("/admin/download", json=body, headers={"x-csrf-token": token})
+
+    return run(scenario())
+
+
+def test_download_retries_on_another_channel_that_has_the_same_track(tmp_path):
+    broken, backup = BrokenSource(), Source("backup")
+    app, service = fallback_app(tmp_path, [broken, backup], SearchResult((copy_of(backup),), (), "v"))
+
+    response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["source_id"] == "backup" and payload["fallback_from"] == "primary"
+    assert broken.downloaded == ["1"] and backup.downloaded == ["1"]
+    assert service.queries == ["稻香 周杰伦"]
+    assert (tmp_path / payload["relative_path"]).read_bytes() == AUDIO
+
+
+def test_the_retry_searches_the_title_when_the_panel_hands_no_query(tmp_path):
+    broken, backup = BrokenSource(), Source("backup")
+    app, service = fallback_app(tmp_path, [broken, backup], SearchResult((copy_of(backup),), (), "v"))
+
+    assert fetch(app, {"candidate": PRIMARY}).status_code == 200
+    assert service.queries == ["稻香"]
+
+
+def test_download_reports_the_failure_when_no_other_channel_has_the_track(tmp_path):
+    broken = BrokenSource()
+    app, service = fallback_app(tmp_path, [broken, Source("backup")], SearchResult((), (), "v"))
+
+    response = fetch(app, {"candidate": PRIMARY})
+
+    assert response.status_code == 502 and response.json()["detail"] == "download_failed"
+    assert service.queries == ["稻香"]
+    assert broken.downloaded == ["1"]
+
+
+def test_a_failed_retry_is_reported_and_no_third_channel_is_tried(tmp_path):
+    broken, also_broken, third = BrokenSource(), BrokenSource("backup", "media_url_denied"), Source("third")
+    refreshed = SearchResult((copy_of(also_broken), copy_of(third)), (), "v")
+    app, _ = fallback_app(tmp_path, [broken, also_broken, third], refreshed)
+
+    response = fetch(app, {"candidate": PRIMARY})
+
+    assert response.status_code == 502 and response.json()["detail"] == "media_url_denied"
+    assert also_broken.downloaded == ["1"] and third.downloaded == []
+
+
+def test_a_candidate_whose_own_channel_cannot_resolve_still_downloads(tmp_path):
+    """A search-only channel lists tracks it can never serve; another one can."""
+    backup = Source("backup")
+    app, _ = fallback_app(tmp_path, [BrokenSource(), backup], SearchResult((copy_of(backup),), (), "v"))
+
+    response = fetch(app, {"candidate": dict(PRIMARY, source_id="searcher")})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["source_id"] == "backup" and payload["fallback_from"] == "searcher"
+
+
+def test_a_closer_duration_wins_when_two_channels_offer_the_track(tmp_path):
+    broken, short, long = BrokenSource(), Source("short"), Source("long")
+    refreshed = SearchResult((copy_of(long, duration=260), copy_of(short, duration=212)), (), "v")
+    app, _ = fallback_app(tmp_path, [broken, short, long], refreshed)
+
+    response = fetch(app, {"candidate": PRIMARY})
+
+    assert response.status_code == 200
+    assert response.json()["source_id"] == "short" and long.downloaded == []
+
+
+def test_a_failed_download_leaves_a_warning_in_the_service_log(tmp_path, caplog):
+    app, _ = fallback_app(tmp_path, [BrokenSource()], SearchResult((), (), "v"))
+
+    with caplog.at_level(logging.WARNING, logger="musicdl.admin"):
+        response = fetch(app, {"candidate": PRIMARY})
+
+    assert response.status_code == 502
+    assert any("panel download failed" in record.getMessage() for record in caplog.records)

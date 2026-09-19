@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 import inspect
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,7 +58,20 @@ async def _invoke(entry: SourceEntry, query: str, timeout: float, max_results: i
         return SourceStatus(entry.source_id, entry.version, "error"), []
 
 
-async def search_sources(registry: SourceRegistry, query: str, *, timeout: float = 10.0, max_results_per_source: int = 100) -> SearchResult:
+async def search_sources(registry: SourceRegistry, query: str, *, timeout: float = 10.0,
+                         max_results_per_source: int = 100,
+                         preference: Mapping[str, int] | Callable[[str], int] | None = None) -> SearchResult:
+    """Search every enabled source, and answer with one candidate per recording.
+
+    Two channels offering the same recording are the normal case, so one of
+    them has to be chosen.  The declared priority decides first; when two
+    channels were never told apart, ``preference`` breaks the tie with what the
+    deployment actually observed -- the administration portal passes its own
+    per-channel health as a ``{source_id: weight}`` mapping, and this module
+    stays ignorant of where that came from.  A preference that raises, names a
+    channel nothing observed, or is absent entirely is simply no preference,
+    and then the stable ``(source, item)`` order decides as before.
+    """
     query = normalize_text(query)
     if not query or len(query) > 500:
         raise ValueError("invalid_query")
@@ -73,12 +86,19 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
         for candidate in candidates:
             key = candidate.canonical_version_key
             incumbent = by_identity.get(key)
-            # Prefer registry priority, completeness/size, then stable identity.
+            # Prefer registry priority, completeness/size, the channel the
+            # panel last saw working, then stable identity. Priority is part of
+            # the quality key, so a channel an operator ranked higher still
+            # outranks one that merely answered a search recently.
             rank = quality_key(candidate, entry.priority)
             incumbent_rank = quality_key(incumbent[0], incumbent[1].priority) if incumbent else None
+            prefer = _preference_weight(preference, candidate.source_id)
+            incumbent_prefer = _preference_weight(preference, incumbent[0].source_id) if incumbent else None
             stable = (candidate.source_id.casefold(), candidate.item_id.casefold())
             incumbent_stable = (incumbent[0].source_id.casefold(), incumbent[0].item_id.casefold()) if incumbent else None
-            if incumbent is None or rank > incumbent_rank or (rank == incumbent_rank and stable < incumbent_stable):
+            if incumbent is None or rank > incumbent_rank or (
+                    rank == incumbent_rank
+                    and (prefer > incumbent_prefer or (prefer == incumbent_prefer and stable < incumbent_stable))):
                 by_identity[key] = (candidate, entry)
     q = query.casefold()
     retained = [(v[0], v[1]) for v in by_identity.values()]
@@ -97,3 +117,22 @@ def quality_key(candidate: Candidate, priority: int) -> tuple:
     lossless = (candidate.format or "").casefold() in {"flac", "alac", "ape", "wav", "aiff"}
     completeness = sum(value is not None for value in (candidate.album, candidate.duration, candidate.bitrate, candidate.format, candidate.size))
     return (int(lossless), candidate.bitrate if candidate.bitrate is not None else -1, completeness, candidate.size if candidate.size is not None else -1, -priority)
+
+
+def _preference_weight(preference: Mapping[str, int] | Callable[[str], int] | None, source_id: str) -> int:
+    """How strongly an observed channel argues for keeping its copy of a track.
+
+    A missing preference, an unobserved channel and a preference that raises
+    all mean the same thing here: nothing was observed, so there is nothing to
+    say.  A search must not fail because the bookkeeping behind one of its
+    tie-breaks did.
+    """
+    if preference is None:
+        return 0
+    try:
+        value = preference(source_id) if callable(preference) else preference[source_id]
+    except Exception:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)

@@ -157,3 +157,84 @@ def test_public_search_result_version_matches_search_output():
     assert search_result_version(result.candidates) == result.version
     assert search_result_version(tuple(reversed(result.candidates))) != result.version
     assert result.candidates == original
+
+# -- what the deployment observed, and what it may override ---------------
+#
+# Two channels offering the same recording are the normal case. The declared
+# priority decides first, because that is a decision somebody made; when two
+# channels were never ranked apart, what the panel has observed about them
+# decides, because an alphabetical tie-break is not a decision at all.
+
+
+def test_a_preference_breaks_a_tie_the_declared_priority_cannot():
+    async def a(query):
+        return [candidate("a-source", "1")]
+    async def z(query):
+        return [candidate("z-source", "1")]
+    registry = SourceRegistry([SourceEntry("a-source", "1", a), SourceEntry("z-source", "1", z)])
+
+    observed = asyncio.run(search_sources(registry, "q", preference={"z-source": 10, "a-source": -10}))
+    unobserved = asyncio.run(search_sources(registry, "q"))
+
+    assert [c.source_id for c in observed.candidates] == ["z-source"]
+    assert [c.source_id for c in unobserved.candidates] == ["a-source"]
+
+
+def test_a_preference_callable_is_asked_about_every_channel():
+    async def a(query):
+        return [candidate("a-source", "1")]
+    async def z(query):
+        return [candidate("z-source", "1")]
+    registry = SourceRegistry([SourceEntry("a-source", "1", a), SourceEntry("z-source", "1", z)])
+    asked = []
+
+    def preference(source_id):
+        asked.append(source_id)
+        return {"z-source": 3}.get(source_id, 0)
+
+    result = asyncio.run(search_sources(registry, "q", preference=preference))
+
+    assert [c.source_id for c in result.candidates] == ["z-source"]
+    assert set(asked) == {"a-source", "z-source"}
+
+
+def test_a_declared_priority_outranks_the_observed_preference():
+    """A ranking an operator set is a decision; a rate is only a measurement."""
+    async def ranked(query):
+        return [candidate("ranked", "1")]
+    async def popular(query):
+        return [candidate("popular", "1")]
+    registry = SourceRegistry([SourceEntry("ranked", "1", ranked, priority=1),
+                               SourceEntry("popular", "1", popular, priority=2)])
+
+    result = asyncio.run(search_sources(registry, "q", preference={"popular": 20, "ranked": -20}))
+
+    assert [c.source_id for c in result.candidates] == ["ranked"]
+
+
+def test_a_preference_that_raises_or_names_nothing_leaves_the_order_alone():
+    async def a(query):
+        return [candidate("a-source", "1")]
+    async def z(query):
+        return [candidate("z-source", "1")]
+    registry = SourceRegistry([SourceEntry("a-source", "1", a), SourceEntry("z-source", "1", z)])
+
+    def broken(source_id):
+        raise RuntimeError("roll-up unavailable")
+
+    assert [c.source_id for c in asyncio.run(search_sources(registry, "q", preference=broken)).candidates] == ["a-source"]
+    assert [c.source_id for c in asyncio.run(search_sources(registry, "q", preference={"ghost": 10})).candidates] == ["a-source"]
+
+
+def test_a_preference_does_not_change_what_is_returned_or_the_version():
+    async def a(query):
+        return [candidate("a-source", "1"), candidate("a-source", "2", "Other")]
+    async def z(query):
+        return [candidate("z-source", "1")]
+    registry = SourceRegistry([SourceEntry("a-source", "1", a), SourceEntry("z-source", "1", z)])
+
+    first = asyncio.run(search_sources(registry, "q", preference={"z-source": 10}))
+    second = asyncio.run(search_sources(registry, "q", preference={"z-source": 10}))
+
+    assert len(first.candidates) == 2
+    assert first.version == second.version == search_result_version(first.candidates)

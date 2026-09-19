@@ -246,3 +246,25 @@ def test_runtime_factory_failure_fails_closed_without_redis_fallback():
         assert raised.value is failure
 
     run(scenario())
+
+def test_the_running_app_keeps_a_log_window_the_panel_can_read():
+    """The service's own log records have to be readable while the app runs.
+
+    The panel shows them from the same buffer the application installs, so the
+    handler has to be attached for the life of the process and detached again
+    when it stops -- a handler left behind would keep recording into a stopped
+    application's window, and would leak into every later test in this process.
+    """
+    import logging
+
+    async def scenario():
+        app = create_app(AppSettings(), runtime_factory=lambda _settings: None)
+        async with app.router.lifespan_context(app):
+            window = app.state.logs
+            assert window in logging.getLogger().handlers
+            logging.getLogger("musicdl.worker").warning("hywmusic-beta answered 502")
+            return window.page(level="warning")["items"], app
+
+    items, app = run(scenario())
+    assert [item["logger"] for item in items] == ["musicdl.worker"]
+    assert app.state.logs not in logging.getLogger().handlers

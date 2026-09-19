@@ -107,6 +107,8 @@ export type SearchReport = {
 export type DownloadReport = {
   request_id: string
   source_id: string
+  /** The channel that failed first, when another one served the file. */
+  fallback_from: string | null
   relative_path: string
   sha256: string
   size_bytes: number
@@ -145,6 +147,26 @@ export type AuditEntry = {
   action?: string
   status?: string
   [key: string]: unknown
+}
+
+/** One line this service process logged, as `GET /logs` hands it back. */
+export type ServiceLogEntry = {
+  id: number
+  /** ISO-8601 UTC; the page renders it in the viewer's own time zone. */
+  time: string
+  level: string
+  logger: string
+  message: string
+  traceback: string | null
+}
+
+export type ServiceLogPage = {
+  items: ServiceLogEntry[]
+  total: number
+  /** The cursor to pass back as `after`; unchanged when nothing new arrived. */
+  last_id: number
+  /** How many lines have rolled out of the window since the process started. */
+  dropped: number
 }
 
 export type Page<T> = { items: T[]; total: number; offset: number; limit: number }
@@ -264,6 +286,7 @@ const DETAIL_TEXT: Record<string, string> = {
   'language must be javascript or python': '语言必须是 javascript 或 python',
   'invalid pagination': '分页参数无效',
   'invalid limit': '条数取值范围为 1-200',
+  'invalid level': '日志级别无效',
   'invalid_bot_username': 'Bot 用户名无效：以字母开头，长度 5-32，只能包含字母、数字和下划线，且不含 @',
   'invalid_command_template': '命令模板必须包含且只能包含一个 {query} 占位符',
   'duplicate id': '该 ID 已存在',
@@ -581,9 +604,18 @@ export function searchCandidates(query: string, limit = 50): Promise<SearchRepor
   return request<SearchReport>('/search', { query: { q: query, limit } })
 }
 
-/** Download the candidate the search just listed, into the service's media root. */
-export function downloadCandidate(candidate: Candidate): Promise<DownloadReport> {
-  return request<DownloadReport>('/download', { method: 'POST', body: { candidate } })
+/**
+ * Download the candidate the search just listed, into the service's media root.
+ *
+ * The query the operator searched for goes along, because the backend retries
+ * a failed channel by refreshing that same query: the candidate's own title is
+ * only a fallback for a caller that has no query to hand.
+ */
+export function downloadCandidate(candidate: Candidate, query?: string): Promise<DownloadReport> {
+  return request<DownloadReport>('/download', {
+    method: 'POST',
+    body: query ? { candidate, query } : { candidate },
+  })
 }
 
 export function readHealth(): Promise<HealthReport> {
@@ -617,4 +649,18 @@ export function readEvents(offset = 0, limit = 100): Promise<Page<DownloadEvent>
 
 export function readAudit(offset = 0, limit = 100): Promise<Page<AuditEntry>> {
   return request<Page<AuditEntry>>('/audit', { query: { offset, limit } })
+}
+
+/**
+ * The service's own log window: what the process printed, not what it stored.
+ *
+ * `after` is a cursor rather than a page offset, so a window that polls gets
+ * only the lines it has not shown yet; `0` asks for the newest ones.
+ */
+export function readServiceLogs(
+  limit = 200,
+  after = 0,
+  level: 'info' | 'warning' | 'error' = 'info',
+): Promise<ServiceLogPage> {
+  return request<ServiceLogPage>('/logs', { query: { limit, after, level } })
 }

@@ -28,6 +28,8 @@
 | Dependency health separates "nothing to do" from "broken" | `/admin/health` answers `ok`, `failed`, or `not_required`, so a dependency with nothing to do in this deployment does not turn a working panel red. |
 | The running configuration is editable from the panel | `GET /admin/config` and `PATCH /admin/config` move the WeCom, Redis, Telegram, AI, and worker budgets out of the host's `.env` and into the panel, where a change is saved once and the container is not rebuilt; secrets are write-only, and the settings only Compose owns say so. |
 | Channel health answers "which source is broken" | `GET /admin/sources/health` rolls the panel's own searches and downloads up into one verdict per source (working, flaky, failing, unproven), a success rate over the last handful of attempts, and the last error. Dependency health says whether Redis is up; this says whether one channel can still serve. |
+| One broken channel no longer sinks the whole panel | The panel's own search prefers the channel it has observed answering when two channels tie, and a failed download refreshes the same query once and retries a single time on another channel's copy of the same recording. |
+| The panel can read the service's own log | `GET /admin/logs` serves the most recent lines this process logged -- level, logger, message, exception text -- with a cursor and a level filter; URL query strings and credential-shaped fields are redacted before a line enters the window. |
 
 ## Architecture
 
@@ -195,6 +197,7 @@ The panel lives at `/admin` and works on its own: the registry it searches throu
 | `GET /admin/config`, `PATCH /admin/config` | Read every setting the panel owns with its source and the value in force (a secret only answers whether one is set), then validate and store one batch of changes. |
 | `GET /admin/sources/health` | Per-source roll-up of the last searches and downloads, with the stage and code of the last failure. |
 | `GET /admin/events`, `GET /admin/audit` | Paginated event and audit logs. |
+| `GET /admin/logs` | The in-memory window onto this process's own log records: cursor (`after`) paging and a `level` filter, for "what did the service print" rather than "what did the panel ask". |
 
 The JSON routes keep answering JSON, so an unauthenticated `GET /admin/sources` is still a `401`, while the two HTML forms double-submit the session's CSRF token in a hidden field, because a form post cannot set the `x-csrf-token` header the API routes use. Form bodies are parsed in-process (`musicdl.admin.forms`) rather than through `request.form()`, so reading two strings does not make `python-multipart` a runtime dependency.
 
