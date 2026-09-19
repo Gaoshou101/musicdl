@@ -81,8 +81,25 @@ export default function SearchPage() {
   }
 
   const candidates = report?.candidates ?? []
-  const visible = sourceFilter === 'all' ? candidates : candidates.filter((item) => item.source_id === sourceFilter)
-  const sourceIds = Array.from(new Set(candidates.map((item) => item.source_id))).sort()
+  const offers = report?.offers ?? []
+  // Which channels stand behind one row, in the order a download tries them.
+  const offeredBy = (index: number, candidate: Candidate) =>
+    offers[index] && offers[index].length ? offers[index] : [candidate.source_id]
+  // Filtering by channel means "which channel can serve this row", not "which
+  // channel happened to win the pick": twelve channels answering from one
+  // catalogue search would otherwise each show the same list under a different
+  // name, which is what made the old filter useless.
+  // One row per recording, each carrying the channels that can serve it.
+  const rows = candidates.map((candidate, index) => ({ candidate, channels: offeredBy(index, candidate) }))
+  const visible = sourceFilter === 'all' ? rows : rows.filter((row) => row.channels.includes(sourceFilter))
+  const sourceIds = Array.from(new Set(candidates.flatMap((item, index) => offeredBy(index, item)))).sort()
+  // One catalogue search answers for every installed lx source, so its count is
+  // one answer rather than one answer per channel.
+  const shared = (report?.sources ?? []).filter((status) => status.catalogue)
+  const independent = (report?.sources ?? []).filter((status) => !status.catalogue)
+  // A shared channel that failed is still worth naming: the operator has to fix
+  // that one channel, not the shared search it answers from.
+  const sharedFailures = shared.filter((status) => status.status !== 'ok')
 
   return (
     <div className="p-8 max-w-5xl mx-auto">
@@ -160,7 +177,18 @@ export default function SearchPage() {
           </div>
           {report.sources.length > 0 && (
             <div className="flex flex-wrap gap-2 mt-3">
-              {report.sources.map((status) => (
+              {shared.length > 0 && (
+                <span
+                  className={`text-xs px-2 py-1 rounded-md ${
+                    sharedFailures.length ? 'bg-warning/15 text-warning' : 'bg-neutral-800/70 text-neutral-300'
+                  }`}
+                  title={shared.map((status) => `${status.id}: ${status.status}`).join('、')}
+                >
+                  共享主进程目录检索 · {shared.length} 个渠道共用同一份结果（各 {shared[0].count} 条）
+                  {sharedFailures.length ? ` · 异常 ${sharedFailures.map((status) => status.id).join('、')}` : ''}
+                </span>
+              )}
+              {independent.map((status) => (
                 <span
                   key={status.id}
                   className={`text-xs px-2 py-1 rounded-md font-mono ${
@@ -186,10 +214,11 @@ export default function SearchPage() {
             <select
               value={sourceFilter}
               onChange={(e) => setSourceFilter(e.target.value)}
-              aria-label="按音源筛选"
+             aria-label="按音源筛选"
+              title="只显示这个渠道能下载到的结果"
               className="px-3 py-2 rounded-lg bg-neutral-900 border border-neutral-800 text-sm focus:border-accent-500 focus:outline-none"
             >
-              <option value="all">全部音源</option>
+              <option value="all">全部渠道</option>
               {sourceIds.map((id) => (
                 <option key={id} value={id}>
                   {id}
@@ -202,7 +231,7 @@ export default function SearchPage() {
 
       {visible.length > 0 && (
         <div className="space-y-3">
-          {visible.map((candidate) => {
+          {visible.map(({ candidate, channels }) => {
             const state = downloads[rowKey(candidate)] ?? { status: 'idle' as const }
             const details = [
               candidate.album,
@@ -222,6 +251,14 @@ export default function SearchPage() {
                     <div className="flex-1 min-w-0">
                       <h4 className="font-medium truncate">{candidate.title}</h4>
                       <div className="flex items-center gap-2 text-neutral-400 text-sm mt-1 flex-wrap">
+                        {candidate.platform && (
+                          <span
+                            className="text-xs px-1.5 py-0.5 rounded bg-accent-500/15 text-accent-300 font-mono uppercase"
+                            title="这条结果来自该平台的目录"
+                          >
+                            {candidate.platform}
+                          </span>
+                        )}
                         <span className="truncate">{candidate.artist}</span>
                         {details.length > 0 && (
                           <>
@@ -234,8 +271,14 @@ export default function SearchPage() {
                         )}
                       </div>
                       <p className="text-neutral-500 text-xs mt-1 font-mono">
-                        来源 {candidate.source_id} v{candidate.source_version} · {shortHash(candidate.item_id, 20)}
+                        优先 {candidate.source_id} v{candidate.source_version} · {shortHash(candidate.item_id, 20)}
                       </p>
+                      {channels.length > 1 && (
+                        <p className="text-neutral-500 text-xs mt-1" title={channels.join('、')}>
+                          {channels.length} 个渠道可下载：{channels.slice(0, 4).join('、')}
+                          {channels.length > 4 ? ` 等 ${channels.length} 个` : ''}
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -290,9 +333,9 @@ export default function SearchPage() {
       {!report && !error && (
         <div className="glass rounded-xl p-12 text-center">
           <MagnifyingGlass size={48} weight="duotone" className="text-neutral-600 mx-auto mb-4" />
-          <h3 className="font-semibold mb-2">开始搜索音乐</h3>
+         <h3 className="font-semibold mb-2">开始搜索音乐</h3>
           <p className="text-neutral-400 text-sm">
-            输入歌曲名称或艺术家；结果里的每一首都来自当前启用的音源
+            输入歌曲名称或艺术家；结果按录音去重，每行标注平台与可以下载它的渠道
           </p>
         </div>
       )}

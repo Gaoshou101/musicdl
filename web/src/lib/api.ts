@@ -56,9 +56,22 @@ export type Candidate = {
   bitrate?: number | null
   format?: string | null
   size?: number | null
+  /**
+   * Which catalogue a row came from, when the channel that listed it did not
+   * answer out of an index of its own. Every installed lx source resolves
+   * against the same four catalogues, so this is what tells a kuwo listing
+   * apart from the netease one; `null` for a channel that answered itself.
+   */
+  platform?: string | null
 }
 
-export type SourceStatus = { id: string; status: string; count: number }
+export type SourceStatus = {
+  id: string
+  status: string
+  count: number
+  /** True when this channel answers from the one shared catalogue search. */
+  catalogue?: boolean
+}
 
 /** How one channel has behaved lately, as `GET /sources/health` rolls it up. */
 export type SourceHealthVerdict = 'ok' | 'degraded' | 'failing' | 'unknown'
@@ -102,6 +115,12 @@ export type SearchReport = {
   total: number
   candidates: Candidate[]
   sources: SourceStatus[]
+  /**
+   * Aligned with `candidates`: the channels behind each row, best first. A
+   * candidate names the channel a download starts with; this names what a
+   * retry may reach when that one cannot serve the bytes.
+   */
+  offers?: string[][]
 }
 
 export type DownloadReport = {

@@ -113,7 +113,9 @@ def test_search_answers_with_candidates_and_a_status_per_source(tmp_path):
     assert response.status_code == 200
     assert payload["query"] == "稻香 周杰伦" and payload["count"] == 1 and payload["total"] == 1
     assert payload["candidates"][0]["artist"] == "周杰伦"
-    assert payload["sources"] == [{"id": "primary", "status": "ok", "count": 1}]
+    assert payload["sources"] == [{"id": "primary", "status": "ok", "count": 1, "catalogue": False}]
+    # Which channels stand behind each row, in the order a download tries them.
+    assert payload["offers"] == [["primary"]]
     assert len(payload["version"]) == 64
 
 

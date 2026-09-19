@@ -29,6 +29,13 @@ class SearchResult:
     candidates: tuple[Candidate, ...]
     statuses: tuple[SourceStatus, ...]
     version: str
+    # One entry per candidate, aligned by index: the channels that offered
+    # that recording, best first.  A candidate names the one channel a
+    # download starts with; this names the rest of what a retry may reach, so
+    # a panel can say which channels stand behind a row instead of showing the
+    # same row once per installed source.  Defaulted and last, so every
+    # existing positional construction keeps meaning what it did.
+    offers: tuple[tuple[str, ...], ...] = ()
 
 
 def search_result_version(candidates: Sequence[Candidate]) -> str:
@@ -82,9 +89,15 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     entries = registry.enabled()
     outcomes = await asyncio.gather(*(_invoke(e, query, timeout, max_results_per_source) for e in entries))
     by_identity: dict[tuple, tuple[Candidate, SourceEntry]] = {}
+    # Every channel that offered a recording, grouped by the identity they all
+    # agree on.  A group is kept whole while the winner is picked from it,
+    # because the channels that lost the pick are exactly what a download falls
+    # back to when the winner cannot serve the bytes.
+    offered: dict[tuple, list[tuple[Candidate, SourceEntry]]] = {}
     for entry, (status, candidates) in zip(entries, outcomes):
         for candidate in candidates:
             key = candidate.canonical_version_key
+            offered.setdefault(key, []).append((candidate, entry))
             incumbent = by_identity.get(key)
             # Prefer registry priority, completeness/size, the channel the
             # panel last saw working, then stable identity. Priority is part of
@@ -109,7 +122,9 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
         quality = quality_key(c, entry.priority)
         return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], entry.priority, title, c.artist.casefold(), c.source_id.casefold(), c.item_id.casefold())
     ordered = tuple(c for c, _ in sorted(retained, key=ordering))
-    return SearchResult(ordered, tuple(s for s, _ in outcomes), search_result_version(ordered))
+    offers = tuple(_offers_of(offered[candidate.canonical_version_key], preference)
+                   for candidate in ordered)
+    return SearchResult(ordered, tuple(s for s, _ in outcomes), search_result_version(ordered), offers)
 
 
 def quality_key(candidate: Candidate, priority: int) -> tuple:
@@ -117,6 +132,29 @@ def quality_key(candidate: Candidate, priority: int) -> tuple:
     lossless = (candidate.format or "").casefold() in {"flac", "alac", "ape", "wav", "aiff"}
     completeness = sum(value is not None for value in (candidate.album, candidate.duration, candidate.bitrate, candidate.format, candidate.size))
     return (int(lossless), candidate.bitrate if candidate.bitrate is not None else -1, completeness, candidate.size if candidate.size is not None else -1, -priority)
+
+
+def _offers_of(group: Sequence[tuple[Candidate, SourceEntry]],
+               preference: Mapping[str, int] | Callable[[str], int] | None) -> tuple[str, ...]:
+    """The channels that offered one recording, best first, once each.
+
+    The order is the order a download reaches them in: the same quality key the
+    pick uses, then the panel's own observation, then the stable channel name.
+    It answers the question a single ``source_id`` cannot -- with twelve
+    channels all listing the same catalogue entry, which of them stand behind
+    the row, and which one is tried first.
+    """
+    def order(pair: tuple[Candidate, SourceEntry]) -> tuple:
+        candidate, entry = pair
+        lossless, bitrate, completeness, size, priority = quality_key(candidate, entry.priority)
+        return (-lossless, -bitrate, -completeness, -size, -priority,
+                -_preference_weight(preference, candidate.source_id),
+                candidate.source_id.casefold(), candidate.item_id.casefold())
+    names: list[str] = []
+    for candidate, _ in sorted(group, key=order):
+        if candidate.source_id not in names:
+            names.append(candidate.source_id)
+    return tuple(names)
 
 
 def _preference_weight(preference: Mapping[str, int] | Callable[[str], int] | None, source_id: str) -> int:

@@ -238,3 +238,57 @@ def test_a_preference_does_not_change_what_is_returned_or_the_version():
 
     assert len(first.candidates) == 2
     assert first.version == second.version == search_result_version(first.candidates)
+
+
+def _catalogue_row(source: str, platform: str, item: str = "x") -> Candidate:
+    return Candidate(source_id=source, source_version="1", item_id=item, title="Song",
+                     artist="Artist", platform=platform, size=1024)
+
+
+def test_one_catalogue_entry_is_one_row_that_names_every_channel_behind_it():
+    """Twelve channels answer from one catalogue search; the panel shows one row.
+
+    The channels that lost the pick are not noise -- they are what a download
+    falls back to -- so the row reports them in the order they would be tried
+    instead of the search answering with twelve copies of itself.
+    """
+    async def first(query):
+        return [_catalogue_row("a", "tx")]
+    async def second(query):
+        return [_catalogue_row("b", "tx")]
+    async def other_platform(query):
+        return [_catalogue_row("c", "wy")]
+    registry = SourceRegistry([SourceEntry("a", "1", first), SourceEntry("b", "1", second),
+                               SourceEntry("c", "1", other_platform)])
+
+    result = asyncio.run(search_sources(registry, "song"))
+
+    assert [(candidate.platform, candidate.source_id) for candidate in result.candidates] == [
+        ("tx", "a"), ("wy", "c")]
+    assert result.offers == (("a", "b"), ("c",))
+
+
+def test_the_offer_order_is_the_order_the_panel_last_saw_working():
+    async def first(query):
+        return [_catalogue_row("a", "tx")]
+    async def second(query):
+        return [_catalogue_row("b", "tx")]
+    registry = SourceRegistry([SourceEntry("a", "1", first), SourceEntry("b", "1", second)])
+
+    result = asyncio.run(search_sources(registry, "song", preference={"b": 7}))
+
+    assert len(result.candidates) == 1 and result.candidates[0].source_id == "b"
+    assert result.offers == (("b", "a"),)
+
+
+def test_two_platforms_listing_one_song_are_two_rows():
+    """A kuwo file and a netease file of one song are different downloads."""
+    async def platform_rows(query):
+        return [_catalogue_row("a", "tx"), _catalogue_row("a", "wy"),
+                _catalogue_row("a", "kw")]
+    registry = SourceRegistry([SourceEntry("a", "1", platform_rows)])
+
+    result = asyncio.run(search_sources(registry, "song"))
+
+    assert [candidate.platform for candidate in result.candidates] == ["tx", "wy", "kw"]
+    assert all(offered == ("a",) for offered in result.offers)
