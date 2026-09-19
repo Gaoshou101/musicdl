@@ -22,7 +22,7 @@ from .wecom.client import WeComClient
 from .ai.client import OpenAICompatibleClient
 from .ai.service import advise_language, advise_ranking
 from .admin import (AdminAuth, AdminStateStore, AuditLogStore, BotManager, EventLogStore,
-                    ConfigManager, HealthAggregator, RateLimiter, SourceManager)
+                    ConfigManager, HealthAggregator, RateLimiter, SourceHealthStore, SourceManager)
 from .admin.csrf import CSRFMiddleware
 from .admin.portal import create_admin_router
 from .media import classify_language
@@ -56,6 +56,10 @@ class _AdminState:
         self.bots = BotManager(on_change=self.persist)
         self.events = EventLogStore()
         self.audit = AuditLogStore()
+        # One roll-up per process, fed by the panel's own search and download so
+        # the channel health view has something to answer with from the first
+        # search an operator runs.
+        self.source_health = SourceHealthStore()
         # The panel's own layer of settings is read and applied before anything
         # captures a value from the settings object: the rate limiter below, and
         # the runtime the lifespan assembles on the next line of its own.
@@ -68,6 +72,7 @@ class _AdminState:
                                                health=self.health, events=self.events,
                                                audit=self.audit, limiter=self.limiter,
                                                config=self.config,
+                                               source_health=self.source_health,
                                                plugins=self.plugin_store,
                                                runtime=lambda: getattr(app.state, "runtime", None),
                                                media_root=settings.media.root,

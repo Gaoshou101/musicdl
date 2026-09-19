@@ -27,6 +27,7 @@
 | 后台自己就能验证音源 | `GET /admin/search`、`POST /admin/download` 与 `GET /admin/media/{path}` 跑的是 worker 用的同一个注册表，不必先给机器人发消息就能确认音源可用。 |
 | 依赖健康度区分“无事可做”与“真的坏了” | `/admin/health` 会给出 `ok`、`failed` 或 `not_required`；在当前部署里本就无事可做的依赖不会把正常工作的后台一直标红。 |
 | 运行配置在后台就能改 | `GET /admin/config` 与 `PATCH /admin/config` 让企微、Redis、Telegram、AI 与任务预算在面板里改完即生效，不必回到宿主机改 `.env` 再重建容器；密钥只写不读，只有 compose 能改的项会被如实标注归属。 |
+| 渠道健康度回答“哪个音源坏了” | `GET /admin/sources/health` 把后台自己发起的搜索与下载汇总成每个音源的结论（正常 / 不稳定 / 异常 / 未验证）、最近若干次结果的成功率与最后一次报错。依赖健康度说的是 Redis 通不通，它说的是某一个渠道还能不能用。 |
 
 ## 架构
 
@@ -192,11 +193,14 @@ curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 | `GET /admin/bots`、`POST /admin/bots`、`PATCH /admin/bots/{id}`、`DELETE /admin/bots/{id}` | 维护会成为搜索源的 Telegram Bot。 |
 | `GET /admin/health` | 汇总依赖健康度。 |
 | `GET /admin/config`、`PATCH /admin/config` | 读出面板能改的每一项、它当前的来源与生效值（密钥只回答“是否已设置”），并按批校验后保存一组改动。 |
+| `GET /admin/sources/health` | 每个音源最近若干次搜索与下载的成败汇总，附最后一次报错的阶段与代码。 |
 | `GET /admin/events`、`GET /admin/audit` | 分页事件与审计日志。 |
 
 JSON 路由继续返回 JSON，因此未认证的 `GET /admin/sources` 仍然是 `401`；两个 HTML 表单则把会话的 CSRF 令牌放进隐藏字段双提交，因为表单提交无法设置 API 路由所用的 `x-csrf-token` 头。表单体在进程内解析（`musicdl.admin.forms`），不走 `request.form()`，因此只为读两个字符串并不会让 `python-multipart` 变成运行时依赖。
 
 `GET /admin/health` 汇报四项检查——`readyz`、`redis`、`plugin_runner` 与 `telegram`——每一项都有 `ok`、`failed`、`not_required` 三种结论。没有企业微信账号时 Redis 是 `not_required`，运行时还没需要插件运行器时它也是 `not_required`，因此两者都不会让一个正常工作的部署一直标红。Telegram 的就绪状态在这里汇报而不是放进 `/readyz`：开启后，只有在连接器已接线、至少注册了一个 Bot 定义、且 session 恢复为就绪时才是 `ok`，否则是 `failed`；关闭时则是 `not_required`。
+
+渠道健康度不做任何主动探测，它只汇总后台自己发起的搜索与下载：在「搜索测试」里跑一次，所有启用的音源都会得到一行；下载则补上搜索答不了的那一问——这个渠道到底能不能把音频取回来。结论按每个音源最近 20 次结果计算：全部成功是「正常」，最近一次失败是「异常」，失败之后又成功是「不稳定」，一次都没跑过则是「未验证」——没有证据不等于故障。已经被移除但留下过记录的音源仍会列出并标记「已移除」，因为刚删掉一个音源时，恰恰是它最后的报错最值得看一眼；记录只保留最近的固定窗口，占用与流量无关。
 
 所有写操作都需要双提交 CSRF 令牌。状态写入 `MUSICDL_ADMIN__STATE_PATH` 并在启动时重新加载，因此改动过的音源、Bot 与密码都能在重启后保留，并且已存储的条目优先于运行时再次发布的值。状态文件不可读或版本不受支持时会直接中止启动，而不是悄悄恢复默认密码；写入失败会回滚内存中的改动。
 

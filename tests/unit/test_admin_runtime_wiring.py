@@ -149,6 +149,42 @@ def test_admin_csrf_gate_does_not_block_the_wecom_callback():
     run(scenario())
 
 
+def test_the_deployed_app_exposes_channel_health():
+    """The roll-up is mounted by the application, and a search feeds it.
+
+    The router is tested on its own elsewhere; what this covers is the wiring
+    the tests around it cannot see -- that a deployment which really serves
+    ``/admin`` answers for its channels, and that the search box is what fills
+    the answer in.
+    """
+
+    async def scenario():
+        runtime = Runtime(SourceRegistry([SourceEntry("primary", "1.0.0", StubSource())]))
+        app = build(runtime=runtime)
+        async with app.router.lifespan_context(app):
+            async with client_for(app) as client:
+                payload = (await client.post("/admin/login", json=DEFAULT_LOGIN)).json()
+                assert payload["must_change"] is True
+                changed = await client.post(
+                    "/admin/change-credentials",
+                    json={"password": DEFAULT_LOGIN["password"], "username": CHANGED_LOGIN["username"],
+                          "new_password": CHANGED_LOGIN["password"]},
+                    headers={"x-csrf-token": payload["csrf_token"]})
+                assert changed.status_code == 200
+                search = await client.get("/admin/search", params={"q": "稻香"})
+                health = await client.get("/admin/sources/health")
+                return search.status_code, health.status_code, health.json()
+
+    search, status, report = run(scenario())
+    assert search == 200 and status == 200
+    # The source the runtime exposed is the one the search queried, so it is the
+    # one carrying a verdict -- and the roll-up reached a verdict rather than
+    # reporting unknown only because the search ran through the real route.
+    assert [item["id"] for item in report["sources"]] == ["primary"]
+    assert report["sources"][0]["status"] == "ok"
+    assert report["sources"][0]["configured"] is True
+
+
 def test_admin_lists_the_sources_assembled_by_the_runtime():
     async def scenario():
         registry = SourceRegistry([SourceEntry("primary", "1", StubSource()),

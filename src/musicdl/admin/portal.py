@@ -19,7 +19,7 @@ from musicdl.sources.search import search_sources
 from .auth import AdminAuth, RateLimiter
 from .config import ConfigManager
 from .forms import form_fields
-from .health import EventLogStore, HealthAggregator
+from .health import EventLogStore, HealthAggregator, SourceHealthStore
 from .management import BotManager, SourceManager
 from .pages import credentials_form, credentials_page, login_page
 
@@ -57,6 +57,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                         limiter: RateLimiter | None = None, bots: SourceManager | None = None,
                         audit: EventLogStore | None = None,
                         config: ConfigManager | None = None,
+                        source_health: SourceHealthStore | None = None,
                         plugins: Callable[[], Any] | None = None,
                         runtime: Callable[[], Any] | None = None,
                         media_root: str | Path | None = None,
@@ -64,6 +65,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     auth, sources, health, events, limiter = auth or AdminAuth(), sources or SourceManager(), health or HealthAggregator({}), events or EventLogStore(), limiter or RateLimiter()
     bots, audit = bots or BotManager(), audit or EventLogStore()
     config = config or ConfigManager(AppSettings())
+    source_health = source_health or SourceHealthStore()
     router = APIRouter(prefix="/admin")
     search_timeout = _positive(getattr(worker, "search_timeout", None), 10.0)
     resolve_timeout = _positive(getattr(worker, "resolve_stream_timeout", None), 30.0)
@@ -232,6 +234,23 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         index = installed(open_store())
         return {"items": [with_plugin(index, item) for item in sources.list()]}
 
+    @router.get("/sources/health")
+    async def read_source_health(request: Request):
+        """What each channel did last, and how it went.
+
+        The panel's own search and download are the two paths that exercise a
+        source outside the message pipeline, so both report here: one search in
+        the panel is enough to make every enabled channel answer with something
+        other than ``unknown``, and a download adds what the search cannot say,
+        which is whether the channel can actually serve the audio.
+
+        This is a roll-up, not a log: the individual attempts stay in
+        ``GET /admin/events``, and this answers the question an operator asks
+        while looking at a source -- is this one working.
+        """
+        require(request)
+        return source_health.snapshot(sources.list())
+
     @router.post("/sources/analyze")
     async def analyze_import(body: dict, request: Request):
         """Preview one import, and store nothing.
@@ -336,6 +355,10 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             result = await search_sources(service.registry, q, timeout=search_timeout)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+        # A search the panel ran is also the cheapest health probe every enabled
+        # source can get, so each answer is recorded against its channel.
+        for status in result.statuses:
+            source_health.observe_search(status.source_id, status.status, count=status.count)
         page = result.candidates[:limit]
         return {"query": q.strip(), "version": result.version, "count": len(page),
                 "total": len(result.candidates),
@@ -363,10 +386,16 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         if source is None:
             raise HTTPException(404, "source cannot resolve media")
         request_id = secrets.token_hex(16)
+
+        def recorded(event) -> None:
+            """Keep the attempt in the log and in the channel's roll-up."""
+            events.append(event)
+            source_health.observe_event(event)
+
         try:
             async with asyncio.timeout(resolve_timeout):
                 result = await download_candidate(candidate, source, media_root, request_id=request_id,
-                                                  record=events.append)
+                                                  record=recorded)
         except MediaError as exc:
             raise HTTPException(502, exc.code) from None
         except TimeoutError:
