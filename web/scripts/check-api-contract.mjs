@@ -153,6 +153,23 @@ async function main() {
   const health = await api.readHealth()
   check('health reports the four checks', Object.keys(health.checks).length === 4, JSON.stringify(health))
 
+  // The panel's own settings layer: every group it owns is listed, and a
+  // secret is described without ever carrying a value back.
+  const config = await api.listConfig()
+  check('config lists the groups the panel owns', config.groups.length >= 6, `${config.groups.length} 组`)
+  const configFields = config.groups.flatMap((group) => group.fields)
+  const secrets = configFields.filter((field) => field.secret)
+  check(
+    'a secret is reported as set or unset, never as a value',
+    secrets.length > 0 && secrets.every((field) => field.value === null && typeof field.set === 'boolean'),
+    `${secrets.length} 只密钥`,
+  )
+  check(
+    'the fields only the deployment owns are listed apart',
+    config.container.length > 0 && config.container.every((knob) => typeof knob.label === 'string'),
+    `${config.container.length} 项`,
+  )
+
   if (suite === 'remote') {
     const search = await api.searchCandidates('晴天', 5)
     check('search answers with candidates', Array.isArray(search.candidates), `${search.count}/${search.total} 条，${search.sources.length} 个音源`)
@@ -206,6 +223,20 @@ async function main() {
   if (suite === 'local') {
     const created = await api.createBot({ id: 'check-bot', username: 'checkbot_one', priority: 5, timeout: 9.5 })
     check('bot create round-trips', created.username === 'checkbot_one' && created.priority === 5, JSON.stringify(created))
+
+    // A hot setting is adopted by the running process and reported as coming
+    // from the panel's layer; a null hands the field back to the deployment.
+    const flatten = (report) => report.groups.flatMap((group) => group.fields)
+    const raised = await api.updateConfig({ 'admin.login_limit': 7 })
+    const limiter = flatten(raised).find((field) => field.key === 'admin.login_limit')
+    check('a hot setting round-trips through the panel layer', limiter?.value === 7 && limiter?.source === 'panel', JSON.stringify(limiter))
+
+    const restored = await api.updateConfig({ 'admin.login_limit': null })
+    const cleared = flatten(restored).find((field) => field.key === 'admin.login_limit')
+    check('a null hands the field back to the deployment', cleared?.source !== 'panel', JSON.stringify(cleared))
+
+    await expectApiError('an unknown setting is refused', () => api.updateConfig({ 'nope.nope': 1 }), 422, '未知配置项')
+
     const updated = await api.updateBot('check-bot', { enabled: false, command_template: '/search {query}' })
     check('bot update round-trips', updated.enabled === false && updated.command_template === '/search {query}')
     const botList = await api.listBots()

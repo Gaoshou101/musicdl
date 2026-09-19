@@ -139,6 +139,52 @@ export type ImportPreview = {
   analysis: Record<string, unknown>
 }
 
+/** How the panel should render one setting it is allowed to write. */
+export type ConfigKind = 'bool' | 'int' | 'float' | 'text' | 'list' | 'secret'
+
+/** `hot` is adopted by the running process; `restart` waits for the next start. */
+export type ConfigScope = 'hot' | 'restart'
+
+/** Where the value in force came from: the panel's layer, the deployment, or a default. */
+export type ConfigSource = 'panel' | 'env' | 'default'
+
+export type ConfigFieldView = {
+  key: string
+  /** The environment variable that sets the same thing from outside the process. */
+  env: string
+  label: string
+  kind: ConfigKind
+  scope: ConfigScope
+  help: string
+  secret: boolean
+  source: ConfigSource
+  /** The value in force; always `null` for a secret, which is never read back. */
+  value: unknown
+  set: boolean
+}
+
+export type ConfigGroupView = {
+  id: string
+  label: string
+  help: string
+  fields: ConfigFieldView[]
+}
+
+/** A setting only the deployment can change; the panel can name it, not move it. */
+export type ContainerKnob = {
+  key: string
+  label: string
+  env: string | null
+  help: string
+}
+
+export type ConfigReport = {
+  groups: ConfigGroupView[]
+  container: ContainerKnob[]
+  /** Stored values this build refused at startup, with the reason each was dropped. */
+  rejected: Record<string, string>
+}
+
 export type LoginReport = { ok: boolean; must_change: boolean; csrf_token: string }
 
 const CSRF_HEADER = 'x-csrf-token'
@@ -187,6 +233,7 @@ const DETAIL_TEXT: Record<string, string> = {
   'invalid_command_template': '命令模板必须包含且只能包含一个 {query} 占位符',
   'duplicate id': '该 ID 已存在',
   'too_many_bot_results': '搜索结果过多',
+  'no configuration was provided': '没有需要保存的改动',
   // The media pipeline's own codes, which the download route returns verbatim.
   download_failed: '音源没能取到音频，可能该平台需要会员或链接已失效',
   empty_download: '音源返回了空文件',
@@ -215,6 +262,7 @@ const DETAIL_PREFIX_TEXT: [string, string][] = [
   ['lx source needs an explicit operator grant: ', '该音源需要显式授权：'],
   ['an lx custom source is JavaScript', 'lx 自定义音源只能是 JavaScript'],
   ['allowed_hosts for an lx source must be the hosts the script declares', '允许的域名必须是脚本自己声明的域名'],
+  ['unknown setting: ', '未知配置项：'],
 ]
 
 export class ApiError extends Error {
@@ -505,6 +553,22 @@ export function downloadCandidate(candidate: Candidate): Promise<DownloadReport>
 
 export function readHealth(): Promise<HealthReport> {
   return request<HealthReport>('/health')
+}
+
+/** Everything the panel owns, everything the deployment owns, and what is in force. */
+export function listConfig(): Promise<ConfigReport> {
+  return request<ConfigReport>('/config')
+}
+
+/**
+ * Save one batch of settings.
+ *
+ * A value of `null` clears the panel's own override and lets the deployment's
+ * value stand again; a blank secret keeps whatever is already stored, because
+ * the panel can never render an existing one for the operator to confirm.
+ */
+export function updateConfig(values: Record<string, unknown>): Promise<ConfigReport> {
+  return request<ConfigReport>('/config', { method: 'PATCH', body: { values } })
 }
 
 export function readEvents(offset = 0, limit = 100): Promise<Page<DownloadEvent>> {

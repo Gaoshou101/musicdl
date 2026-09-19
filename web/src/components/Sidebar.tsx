@@ -10,6 +10,7 @@ import {
   Article,
   Gear,
   Palette,
+  Sliders,
 } from '@phosphor-icons/react'
 import { THEMES, themeSwatch, useThemeStore } from '@/lib/store'
 
@@ -17,6 +18,7 @@ const navItems = [
   { href: '/dashboard', icon: House, label: '仪表板' },
   { href: '/dashboard/sources', icon: MusicNotes, label: '音源管理' },
   { href: '/dashboard/bots', icon: Robot, label: 'Bot 管理' },
+  { href: '/dashboard/config', icon: Sliders, label: '运行配置' },
   { href: '/dashboard/health', icon: Pulse, label: '健康监控' },
   { href: '/dashboard/logs', icon: Article, label: '日志查看' },
   { href: '/dashboard/settings', icon: Gear, label: '设置' },

@@ -26,6 +26,7 @@
 | AI only advises, and ships disabled | With `MUSICDL_AI__ENABLED=false`, ranking and language classification stay deterministic. An enabled advisor that fails leaves the deterministic verdict in place. |
 | The panel exercises the sources on its own | `GET /admin/search`, `POST /admin/download`, and `GET /admin/media/{path}` run the registry the workers run, so a source is proved out without sending the bot a message. |
 | Dependency health separates "nothing to do" from "broken" | `/admin/health` answers `ok`, `failed`, or `not_required`, so a dependency with nothing to do in this deployment does not turn a working panel red. |
+| The running configuration is editable from the panel | `GET /admin/config` and `PATCH /admin/config` move the WeCom, Redis, Telegram, AI, and worker budgets out of the host's `.env` and into the panel, where a change is saved once and the container is not rebuilt; secrets are write-only, and the settings only Compose owns say so. |
 
 ## Architecture
 
@@ -147,6 +148,8 @@ Three more steps take the deployment from running to useful:
 
 All settings use the `MUSICDL_` prefix with `__` as the nesting delimiter. Copy `.env.example` to `.env` and replace only the placeholders; never commit `.env` or real credentials.
 
+Part of the table below can also be moved into the panel: it keeps its own layer of overrides in the state file and applies them over the deployment's variables at startup. The panel only knows the fields it declares, and each one carries where its value came from (panel override, deployment variable, or default) and when it takes effect (immediately, or on the next start). The settings only Compose can change — published ports, volume mounts, resource limits — are listed separately with the variable to set, instead of being offered as a control that would lie.
+
 | Variable | Required | Purpose |
 |---|---|---|
 | `MUSICDL_REDIS__URL` | Yes | External Redis endpoint; `redis://` or `rediss://`. |
@@ -188,6 +191,7 @@ The panel lives at `/admin` and works on its own: the registry it searches throu
 | `PATCH /admin/sources/{id}`, `DELETE /admin/sources/{id}` | Enable, reprioritise, or remove a source. |
 | `GET /admin/bots`, `POST /admin/bots`, `PATCH /admin/bots/{id}`, `DELETE /admin/bots/{id}` | Define and edit the Telegram Bots that become search sources. |
 | `GET /admin/health` | Aggregated dependency health. |
+| `GET /admin/config`, `PATCH /admin/config` | Read every setting the panel owns with its source and the value in force (a secret only answers whether one is set), then validate and store one batch of changes. |
 | `GET /admin/events`, `GET /admin/audit` | Paginated event and audit logs. |
 
 The JSON routes keep answering JSON, so an unauthenticated `GET /admin/sources` is still a `401`, while the two HTML forms double-submit the session's CSRF token in a hidden field, because a form post cannot set the `x-csrf-token` header the API routes use. Form bodies are parsed in-process (`musicdl.admin.forms`) rather than through `request.form()`, so reading two strings does not make `python-multipart` a runtime dependency.
@@ -196,9 +200,11 @@ The JSON routes keep answering JSON, so an unauthenticated `GET /admin/sources` 
 
 Mutating routes need the double-submit CSRF token. State is written to `MUSICDL_ADMIN__STATE_PATH` and reloaded on start, so an edited source, an edited Bot, and a changed password survive a restart, and a stored entry takes precedence over the value the runtime publishes again on boot. A state file that is unreadable or carries an unsupported version stops startup instead of silently restoring the default password, and a failed write rolls the in-memory change back.
 
+That same state file carries the panel's own layer of settings under a `settings` key: a field the panel changed is recorded there, a field it did not is still decided by the deployment's environment, and only a field neither layer sets falls back to a default. A batch is validated and written as a whole, so one illegal value refuses the whole batch rather than storing half of it; a stored value this build can no longer accept is dropped at startup and listed on the page. Secrets never come back out — leaving one blank keeps the stored value, and only an explicit `null` clears the override and lets the deployment's value stand again.
+
 ## Web Panel
 
-`web/` holds an optional Next.js dashboard that talks only to the routes above. It rewrites its own `/api/*` calls to the app's `/admin/*` routes, and it fixes the app's origin while it builds rather than when it runs.
+`web/` holds an optional Next.js dashboard that talks only to the routes above, with pages for the overview, sources, Bots, the running configuration, health, logs, and credentials. It rewrites its own `/api/*` calls to the app's `/admin/*` routes, and it fixes the app's origin while it builds rather than when it runs. The configuration page shows the fields the panel owns next to the container settings only Compose owns, and saves the whole batch of edits at once.
 
 ```bash
 cd web
