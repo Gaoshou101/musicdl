@@ -21,9 +21,9 @@ from .worker.workers import MessageWorker, JobWorker
 from .wecom.client import WeComClient
 from .ai.client import OpenAICompatibleClient
 from .ai.service import advise_language, advise_ranking
-from .admin import (AdminAuth, AdminStateStore, AuditLogStore, BotManager, EventLogStore,
-                    ConfigManager, HealthAggregator, LogBuffer, RateLimiter, SourceHealthStore,
-                    SourceManager)
+from .admin import (DEFAULT_BOTS, AdminAuth, AdminStateStore, AuditLogStore, BotManager,
+                    ConfigManager, EventLogStore, HealthAggregator, LogBuffer, RateLimiter,
+                    SourceHealthStore, SourceManager)
 from .admin.csrf import CSRFMiddleware
 from .admin.portal import create_admin_router
 from .media import classify_language
@@ -107,6 +107,13 @@ class _AdminState:
     def load(self) -> None:
         """Adopt whatever the last run persisted; a first run has no file."""
         payload = self.store.load()
+        if "bots" not in payload:
+            # A deployment that has never stored a bot list starts from the
+            # built-in definitions, so a fresh install can search through the
+            # project's own bot without defining one. A stored list -- even the
+            # empty one an operator leaves behind by deleting every entry --
+            # wins, so removing the built-in bot is not undone by a restart.
+            self.bots.restore(list(DEFAULT_BOTS))
         if not payload:
             return
         self.config.load(payload)

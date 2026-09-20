@@ -144,7 +144,7 @@ The panel answers `{"status":"ok"}` on its own `/healthz`, the one route it serv
 Three more steps take the deployment from running to useful:
 
 1. Reach `/admin/` through an HTTPS reverse proxy, or through a loopback tunnel where browsers treat the host as trustworthy. Every cookie is marked `Secure`, so the panel is unreachable over plain HTTP. An unauthenticated visit is answered with the login page itself, and until the default credentials change every route except `/admin/`, `/admin/change-credentials`, and `/admin/change-credentials-form` answers `403`.
-2. Install a source plugin with `POST /admin/sources`, or define a Telegram Bot with `POST /admin/bots`, and then search and download from the panel to prove the source answers. A deployment with no enabled source has nothing to search.
+2. Install a source plugin with `POST /admin/sources`, or define a Telegram Bot with `POST /admin/bots`, and then search and download from the panel to prove the source answers. A deployment with no enabled source has nothing to search. The image ships a `music_v1bot` definition (the default `/search {query}` contract), so a fresh install already has one; rename, disable or delete it from the Bot page and the deletion sticks across restarts.
 3. Enable the WeCom boundary with `MUSICDL_WECOM__ENABLED=true` and the credentials listed below, then send `/search <query>` from WeCom. The boundary is optional: the panel works without it.
 
 ## Configuration
@@ -168,7 +168,7 @@ Part of the table below can also be moved into the panel: it keeps its own layer
 | `MUSICDL_PLUGIN__SERVICE_URL` | Compose-set | Internal endpoint of the runner, `http://plugin-runner:8080`. |
 | `MUSICDL_PLUGIN__APP_DATA_ROOT` | No | Where installed plugin code is stored. Defaults to `/data/app`. |
 | `MUSICDL_MEDIA__ROOT` | Compose-set | Media mount for the main service, `/data/music`. |
-| `MUSICDL_TELEGRAM__ENABLED` | No | Registers the Telegram connector and the Bot definitions the portal owns. Defaults to `false`. |
+| `MUSICDL_TELEGRAM__ENABLED` | No | Registers the Telegram connector and the Bot definitions the portal owns. Defaults to `false`; with the connector off the built-in `music_v1bot` definition still shows up in the portal, it just registers no source. |
 | `MUSICDL_TELEGRAM__API_ID`, `__API_HASH` | When Telegram is enabled | Telegram application credentials. |
 | `MUSICDL_TELEGRAM__PROFILE`, `__SESSION_ROOT` | No | Restricted session profile and mount. Default to `default` and `/data/telegram-sessions`. |
 | `MUSICDL_AI__ENABLED` | No | Advisory ranking and language classification. Defaults to `false`. |
@@ -192,7 +192,7 @@ The panel lives at `/admin` and works on its own: the registry it searches throu
 | `GET /admin/sources`, `POST /admin/sources` | List and install source plugins. |
 | `POST /admin/sources/analyze` | Previews one import and stores nothing. |
 | `PATCH /admin/sources/{id}`, `DELETE /admin/sources/{id}` | Enable, reprioritise, or remove a source. |
-| `GET /admin/bots`, `POST /admin/bots`, `PATCH /admin/bots/{id}`, `DELETE /admin/bots/{id}` | Define and edit the Telegram Bots that become search sources. |
+| `GET /admin/bots`, `POST /admin/bots`, `PATCH /admin/bots/{id}`, `DELETE /admin/bots/{id}` | Define and edit the Telegram Bots that become search sources; a deployment that never stored a bot list starts from the built-in `music_v1bot`. |
 | `GET /admin/health` | Aggregated dependency health. |
 | `GET /admin/config`, `PATCH /admin/config` | Read every setting the panel owns with its source and the value in force (a secret only answers whether one is set), then validate and store one batch of changes. |
 | `GET /admin/sources/health` | Per-source roll-up of the last searches and downloads, with the stage and code of the last failure. |
@@ -289,7 +289,7 @@ The dashboard in `web/` has its own toolchain: `npm run build` compiles it, `npm
 | Runtime configuration | Every configuration group and its default, declared in one model | [config.py](./src/musicdl/config.py) |
 | Deployment shape | Services, volumes, networks, and security options | [compose.yaml](./compose.yaml) |
 | Production limits | CPU, memory, and restart policy for every service | [compose.prod.yaml](./compose.prod.yaml) |
-| Reverse proxies | Nginx and Caddy templates that terminate TLS in front of the portal | [deploy](./deploy) |
+| Reverse proxies | Nginx and Caddy templates that terminate TLS in front of the portal; `deploy/caddy/panel-edge.Caddyfile` is the panel-only deployment, which sends `/wecom/*` back to the product process and everything else to the console | [deploy](./deploy) |
 | Admin panel image | How the dashboard is built, where its backend origin is fixed, and how it runs as a container | [docker/web/Dockerfile](./docker/web/Dockerfile) |
 | Web panel layout | The dashboard's directory map and its contract checks | [web/STRUCTURE.md](./web/STRUCTURE.md) |
 | Release gates | The gate runner, its tamper self-test, and the backup drill | [run_gates.py](./scripts/release/run_gates.py) |

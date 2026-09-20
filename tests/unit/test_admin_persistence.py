@@ -133,8 +133,34 @@ def test_bot_edits_survive_a_restart(tmp_path):
         second = create_app(persisted(tmp_path))
         return second.state.admin.bots.list()
 
+    # The operator's entry keeps its edits; the built-in bot is written beside
+    # it the first time the deployment stores a list of its own.
     assert run(scenario()) == [{"id": "custom", "enabled": False, "priority": 0, "timeout": 4.0,
-                                "username": "MusicBot", "command_template": "/get {query}"}]
+                                "username": "MusicBot", "command_template": "/get {query}"},
+                               {"id": "music_v1bot", "enabled": True, "priority": 0, "timeout": 10.0,
+                                "username": "music_v1bot", "command_template": None}]
+
+
+def test_a_fresh_deployment_starts_with_the_built_in_bot(tmp_path):
+    """The image ships one searchable bot, so a new install searches by default."""
+    app = create_app(persisted(tmp_path))
+
+    assert app.state.admin.bots.list() == [{"id": "music_v1bot", "enabled": True, "priority": 0,
+                                            "timeout": 10.0, "username": "music_v1bot",
+                                            "command_template": None}]
+    # Seeding is memory-only: a deployment that changed nothing keeps no file.
+    assert not (tmp_path / "admin-state.json").exists()
+
+
+def test_deleting_the_built_in_bot_keeps_it_deleted(tmp_path):
+    """An operator who removes the entry owns that decision across restarts."""
+    async def scenario():
+        first = create_app(persisted(tmp_path))
+        first.state.admin.bots.remove("music_v1bot")
+        second = create_app(persisted(tmp_path))
+        return second.state.admin.bots.list()
+
+    assert run(scenario()) == []
 
 
 def test_runtime_sources_are_not_written_to_disk(tmp_path):

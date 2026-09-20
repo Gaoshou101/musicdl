@@ -116,6 +116,16 @@ class SourceManager:
             self._on_change()
 
 
+# The bots a deployment starts with. ``music_v1bot`` is the public Telegram bot
+# this project is built around, so a fresh install can search through it without
+# the operator defining anything first. The seed only covers a deployment that
+# has never stored a bot list: an operator who deletes or renames the entry owns
+# the stored list from the first save on, and that decision survives a restart.
+DEFAULT_BOTS: tuple[dict[str, Any], ...] = (
+    {"id": "music_v1bot", "username": "music_v1bot", "timeout": 10.0},
+)
+
+
 class BotManager(SourceManager):
     """Registered Telegram bots: the bounded controls plus a Bot definition.
 

@@ -196,5 +196,9 @@ def test_the_runtime_receives_the_definitions_the_portal_owns(tmp_path, monkeypa
     with pytest.raises(RuntimeError, match="stop after capture"):
         asyncio.run(_enter(app))
 
+    # The built-in bot ships with every deployment; the operator's own entry
+    # rides alongside it, ordered by priority and then id.
     assert captured["bots"] == ({"id": "custom", "enabled": True, "priority": 0, "timeout": 10.0,
-                                 "username": "MyBot", "command_template": "/get {query}"},)
+                                 "username": "MyBot", "command_template": "/get {query}"},
+                                {"id": "music_v1bot", "enabled": True, "priority": 0, "timeout": 10.0,
+                                 "username": "music_v1bot", "command_template": None})
