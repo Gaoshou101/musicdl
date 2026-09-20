@@ -182,7 +182,10 @@ def test_an_aac_link_is_declared_as_the_container_it_actually_carries():
     # Measured 2026-09-17: `car-bj.kuwo.cn/.../1904613985.aac` answers with an
     # ISO base media file whose brands are `M4A `, `mp42`, `isom`.  Declared as
     # a guessed mp3, the transport refused four sources' downloads of a real
-    # song as `media_response_invalid`; the suffix names an m4a.
+    # song as `media_response_invalid`; the suffix names an m4a.  Measured
+    # 2026-09-20 the same shape of link answers with raw ADTS instead, which is
+    # why this declaration is the better of two guesses: the transport
+    # publishes the container the bytes it read announce, not this one.
     candidate = dict(CANDIDATE, item_id="lx:wy:1904613985", source_id="wy")
     step = _run(_invocation(AAC_LINK_SOURCE, operation="resolve",
                             payload={"candidate": candidate, "quality": "320k"}))

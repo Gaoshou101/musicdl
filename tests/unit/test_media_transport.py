@@ -10,6 +10,18 @@ from musicdl.contracts.plugin import EgressPolicy, ResolvedMedia
 from musicdl.media.models import MediaError
 from musicdl.media.transport import SecureMediaTransport
 
+# A body that really is an mp3: a version-4 ID3 header with no tag frames.  The
+# transport classifies the head of every response now, so the fixture has to
+# carry a container the product supports rather than merely being labelled as
+# one.
+ID3_BODY = b"ID3\x04\x00\x00\x00\x00\x00\x00"
+# Raw ADTS frames, 44.1 kHz stereo with a 136-byte first frame -- what kuwo's
+# car CDN served on 2026-09-20 for a `.aac` link whose bytes were an ISO base
+# media file on 2026-09-17.  The suffix cannot name the container; these can.
+ADTS_BODY = bytes.fromhex("fff1508011") + b"\x00" * 8
+# An error page is what the signature table has to keep out of the media tree.
+NOT_AUDIO_BODY = b"<html>404 not found</html>"
+
 
 class FakeSocket:
     def __init__(self, raw: bytes):
@@ -47,7 +59,7 @@ def media(url="https://täst.example/song.mp3", *, size=None):
     return ResolvedMedia(candidate_id="1", url=url, extension="mp3", media_type="audio/mpeg", declared_size=size)
 
 
-def transport(raw=b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\nID3payload"):
+def transport(raw=b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY):
     sock = FakeSocket(raw)
     tls = FakeTLS()
     seen = {}
@@ -76,7 +88,7 @@ def test_transport_pins_idna_host_and_streams_with_fixed_request():
     async def read():
         return b"".join([chunk async for chunk in metadata.chunks])
 
-    assert asyncio.run(read()) == b"ID3payload"
+    assert asyncio.run(read()) == ID3_BODY
     asyncio.run(metadata.aclose())
     assert seen["resolve"] == ("xn--tst-qla.example", 443)
     assert seen["connect"][0] == ("93.184.216.34", 443)
@@ -127,7 +139,7 @@ def test_transport_rejects_redirect_and_non_success():
         error_code(transport_instance.open(media(), policy=("xn--tst-qla.example",)), code)
 
 
-MEDIA_OK = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\nID3payload"
+MEDIA_OK = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
 
 
 def redirect_transport(responses, *, addresses=None, **kwargs):
@@ -166,7 +178,7 @@ def test_transport_follows_a_redirect_to_a_policy_approved_host():
     async def read():
         return b"".join([chunk async for chunk in metadata.chunks])
 
-    assert asyncio.run(read()) == b"ID3payload"
+    assert asyncio.run(read()) == ID3_BODY
     asyncio.run(metadata.aclose())
     assert resolved == [("xn--tst-qla.example", 443), ("cdn.example", 443)]
     assert hostnames == ["xn--tst-qla.example", "cdn.example"]
@@ -281,19 +293,61 @@ def test_transport_rejects_header_limits_and_encoding():
         (b"Content-Length: nope\r\n", "media_response_invalid"),
     ]
     for header, code in cases:
-        raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n" + header + b"\r\nID3payload"
+        raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n" + header + b"\r\n" + ID3_BODY
         transport_instance, *_ = transport(raw)
         error_code(transport_instance.open(media(), policy=("xn--tst-qla.example",)), code)
 
 
-def test_transport_rejects_content_type_and_size_mismatch():
-    wrong_mime = b"HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: 10\r\n\r\nID3payload"
-    instance, *_ = transport(wrong_mime)
-    error_code(instance.open(media(), policy=("xn--tst-qla.example",)), "media_response_invalid")
-
-    wrong_size = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\nID3payload"
+def test_transport_rejects_a_size_mismatch():
+    # The resolve answer declared ten bytes and the response header says nine,
+    # which is refused before any body is written.  The body is a real mp3 so
+    # the refusal comes from the declared size and not from the signature.
+    frame = b"\xff\xfb\x90\x64" + b"\x00" * 5
+    wrong_size = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\n" + frame
     instance, *_ = transport(wrong_size)
     error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_publishes_the_container_the_bytes_name_over_a_disagreeing_label():
+    # Measured 2026-09-17 on iot202.music.126.net: a real FLAC stream -- `fLaC`
+    # magic, a `.flac` path -- arrived as `Content-Type: audio/mpeg`.  The label
+    # is written by whichever CDN answered, so it is evidence and not the
+    # verdict: these bytes are an mp3, and that is what the download is
+    # published as.  `validate_media` re-checks the written file against the
+    # same signature table, so nothing here admits a container the download
+    # path would have rejected anyway.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ID3_BODY
+    asyncio.run(metadata.aclose())
+    assert (metadata.extension, metadata.media_type) == ("mp3", "audio/mpeg")
+
+
+def test_transport_publishes_aac_frames_as_the_container_they_are():
+    # Measured 2026-09-20: the `.aac` link shape that carried an ISO base media
+    # file on 2026-09-17 answered with raw ADTS frames.  The source declared the
+    # link an m4a -- the better of the two guesses its suffix allows -- and the
+    # bytes say ADTS, which is what the file is published as.
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: "
+           + str(len(ADTS_BODY)).encode("ascii") + b"\r\n\r\n" + ADTS_BODY)
+    instance, *_ = transport(raw)
+    m4a = ResolvedMedia(candidate_id="1", url="https://täst.example/song.aac",
+                        extension="m4a", media_type="audio/mp4", declared_size=None)
+
+    metadata = asyncio.run(instance.open(m4a, policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ADTS_BODY
+    asyncio.run(metadata.aclose())
+    assert (metadata.extension, metadata.media_type) == ("aac", "audio/aac")
 
 
 def test_transport_accepts_the_vendor_alias_of_the_container_it_expected():
@@ -329,11 +383,13 @@ def test_transport_lets_the_bytes_override_a_wrong_content_type():
     asyncio.run(metadata.aclose())
 
 
-def test_transport_refuses_bytes_that_contradict_the_extension_too():
-    # The same override must not become a licence to accept anything: a body
-    # that names a different container than the resolved extension is still a
-    # refusal, and it is the refusal `validate_media` would have raised later.
-    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\nID3payload"
+def test_transport_refuses_a_body_that_names_no_container():
+    # Publishing what the bytes name must not become a licence to accept
+    # anything: bytes that match no signature in the table are refused however
+    # the answer labels them, and that is the refusal `validate_media` would
+    # have raised later.
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: "
+           + str(len(NOT_AUDIO_BODY)).encode("ascii") + b"\r\n\r\n" + NOT_AUDIO_BODY)
     instance, *_ = transport(raw)
     flac = ResolvedMedia(candidate_id="1", url="https://täst.example/song.flac",
                          extension="flac", media_type="audio/flac", declared_size=None)
@@ -386,7 +442,7 @@ def test_transport_finishes_an_mp4_box_longer_than_the_prefix():
 
 
 def test_transport_bounds_stream_and_closes_on_read_error():
-    instance, sock, _, _ = transport(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\nID3payload")
+    instance, sock, _, _ = transport(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n" + ID3_BODY)
     instance.max_bytes = 3
     metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
 

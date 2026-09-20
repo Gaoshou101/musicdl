@@ -51,6 +51,10 @@ RESOLVED_MEDIA_TYPES = {
     # and `validate_media` still sniffs the bytes.
     "flac": frozenset({"audio/flac", "audio/x-flac"}),
     "m4a": frozenset({"audio/mp4", "audio/x-m4a"}),
+    # Raw ADTS, which is what a `.aac` link carries when it is not an ISO base
+    # media file: the transport publishes the container the bytes announce, so
+    # both readings of the same answer are legal declarations.
+    "aac": frozenset({"audio/aac", "audio/x-aac"}),
     "ogg": frozenset({"audio/ogg", "application/ogg"}),
 }
 PluginLanguage = Literal["python", "javascript"]

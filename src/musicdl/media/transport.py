@@ -11,14 +11,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
-from musicdl.contracts.plugin import RESOLVED_MEDIA_TYPES, ResolvedMedia
+from musicdl.contracts.plugin import ResolvedMedia
 from musicdl.plugins.broker import (
     ActionDenied, EgressPolicy, EgressTarget, PluginManifest, _parse_action_url,
     _resolve_global_addresses, coerce_egress_policy,
 )
 
 from .models import MAX_MEDIA_BYTES, DownloadMetadata, MediaError, _CloseOnce
-from .validation import detect_container
+from .validation import detect_media
 
 MAX_RESPONSE_HEADER_COUNT = 64
 MAX_RESPONSE_HEADER_FIELD_BYTES = 8 * 1024
@@ -392,22 +392,22 @@ class SecureMediaTransport:
                 raw = wrapped = response = None
             if not 200 <= hop.status < 300:
                 raise MediaTransportError("media_response_invalid")
-            expected_types = RESOLVED_MEDIA_TYPES[media.extension]
-            declared_type = (hop.content_type.split(";", 1)[0].strip().casefold()
-                             if hop.content_type else None)
-            prefix = b""
-            if declared_type is None or declared_type not in expected_types:
-                # The label is evidence, not proof.  Measured 2026-09-17 on
-                # iot202.music.126.net: a real FLAC stream -- `fLaC` magic, a
-                # `.flac` path -- arrived as `Content-Type: audio/mpeg`, and
-                # trusting the label refused a song the bytes agreed with.
-                # When the label disagrees, the first bytes decide, through the
-                # same signature table `validate_media` re-checks the written
-                # file with, so this cannot admit anything the download path
-                # would have rejected anyway.
-                prefix = await self._run(lambda: self._read_prefix(wrapped, response, deadline), deadline)
-                if detect_container(prefix) != "." + media.extension:
-                    raise MediaTransportError("media_response_invalid")
+            # Neither the answer's extension nor its Content-Type label is the
+            # verdict; both are written by whichever CDN answered, and the same
+            # link shape has been measured carrying two different containers
+            # (`car-bj.kuwo.cn/.../1904613985.aac` was an ISO base media file on
+            # 2026-09-17 and plain ADTS frames on 2026-09-20, while
+            # iot202.music.126.net served real FLAC as `audio/mpeg`).  The
+            # bytes go through the same signature table `validate_media`
+            # re-checks the written file with, so they decide what the file is
+            # published as -- and bytes that name no container this product
+            # supports are still a refusal, which is what keeps an error page
+            # from being written to disk as audio.
+            prefix = await self._run(lambda: self._read_prefix(wrapped, response, deadline), deadline)
+            detected = detect_media(prefix)
+            if detected is None:
+                raise MediaTransportError("media_response_invalid")
+            extension, media_type = detected[0].lstrip("."), detected[1]
             content_length = hop.content_length
             if content_length is not None and content_length > self.max_bytes:
                 raise MediaError("file_too_large")
@@ -473,8 +473,8 @@ class SecureMediaTransport:
                         if primary is None:
                             raise
 
-            return DownloadMetadata(chunks=chunks(), extension=media.extension,
-                                    media_type=media.media_type, declared_size=media.declared_size,
+            return DownloadMetadata(chunks=chunks(), extension=extension,
+                                    media_type=media_type, declared_size=media.declared_size,
                                     _close_once=close_once)
         except asyncio.CancelledError:
             if close_once is not None:

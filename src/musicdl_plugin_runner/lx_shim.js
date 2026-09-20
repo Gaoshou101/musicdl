@@ -47,14 +47,16 @@ const LX_MEDIA_TYPES = Object.freeze({
   m4a: "audio/mp4",
   ogg: "audio/ogg",
 });
-// A link's suffix is what the CDN chose to call the file, and the contract
-// publishes four containers.  Measured 2026-09-17: kuwo's car CDN answers
-// `car-bj.kuwo.cn/.../1904613985.aac` with an ISO base media file -- ftyp/mp42
-// with the brands `M4A `, `mp42`, `isom` -- so `.aac` on these links names an
-// m4a and is declared as one.  Declared as a guessed mp3 instead, four sources
-// resolved a real song and the transport refused the bytes as the wrong
-// container.  Every other suffix still falls through to the quality guess, and
-// the transport still fails loudly on bytes that disagree with the answer.
+// A link's suffix is what the CDN chose to call the file, and that is all it
+// is: measured 2026-09-17, kuwo's car CDN answers `car-bj.kuwo.cn/.../1904613985.aac`
+// with an ISO base media file -- ftyp/mp42 with the brands `M4A `, `mp42`,
+// `isom` -- and measured 2026-09-20 the same shape of link answered with plain
+// ADTS frames.  Declared as a guessed mp3 instead, four sources resolved a real
+// song and the transport refused the bytes as the wrong container, so `.aac`
+// stays declared as an m4a here as the better of the two guesses.  The
+// declaration is a hint either way: the transport classifies the bytes it reads
+// and publishes the file under the container they announce.  Every other suffix
+// falls through to the quality guess.
 const LX_SUFFIX_EXTENSIONS = Object.freeze({ aac: "m4a" });
 // The main process writes the request line and the framing headers itself, so
 // a source may not supply one of them.
