@@ -14,6 +14,13 @@ _EXTENSIONS: Final[dict[str, tuple[str, frozenset[str]]]] = {
     ".flac": ("audio/flac", frozenset({"flac"})),
     ".m4a": ("audio/mp4", frozenset({"m4a"})),
     ".ogg": ("audio/ogg", frozenset({"ogg"})),
+    # Raw ADTS is what a `.aac` link sometimes carries, and the suffix cannot
+    # settle which of the two it is: on 2026-09-17 kuwo's car CDN answered
+    # `car-bj.kuwo.cn/.../1904613985.aac` with an ISO base media file, and on
+    # 2026-09-20 the same shape of link answered with plain ADTS frames.  Only
+    # the bytes can name the container, which is why the transport classifies
+    # what it reads instead of trusting the answer's own extension.
+    ".aac": ("audio/aac", frozenset({"aac"})),
 }
 
 
@@ -73,21 +80,52 @@ def _detected(header: bytes) -> tuple[str, str] | None:
         return ".flac", "audio/flac"
     if _valid_m4a(header):
         return ".m4a", "audio/mp4"
+    if _valid_adts(header):
+        return ".aac", "audio/aac"
     if header.startswith(b"OggS"):
         return ".ogg", "audio/ogg"
     return None
 
 
-def detect_container(header: bytes) -> str | None:
-    """The container these bytes announce, as a leading-dot extension.
+def detect_media(header: bytes) -> tuple[str, str] | None:
+    """The container these bytes announce, as ``(extension, media type)``.
 
-    `validate_media` uses this on a finished download.  It is also what decides
-    when a response *label* disagrees with the response *body*: an upstream that
-    serves a real FLAC stream as `audio/mpeg` is common enough that the label
-    alone cannot settle which container arrived.
+    `validate_media` uses this on a finished download, and the transport uses it
+    on the head of a response: neither the answer's extension nor its
+    `Content-Type` label settles which container arrived, because the same link
+    shape has been measured carrying two different containers and upstream CDNs
+    have served a real FLAC stream as `audio/mpeg`.  What was read therefore
+    decides both the extension the file is published under and the media type
+    reported for it, so the two cannot disagree with each other or with the
+    bytes.
     """
-    detected = _detected(header)
+    return _detected(header)
+
+
+def detect_container(header: bytes) -> str | None:
+    """The same answer as `detect_media`, as a leading-dot extension alone."""
+    detected = detect_media(header)
     return detected[0] if detected is not None else None
+
+
+def _valid_adts(header: bytes) -> bool:
+    """Whether these bytes start with a well-formed ADTS frame header.
+
+    0xFFF is the frame sync, the layer bits are 00 for AAC, the sampling
+    frequency index has to name one of the 13 defined rates, the channel
+    configuration cannot be 0 (that is the in-band PCE case this product has
+    never seen), and the frame cannot be shorter than the 7-byte header it just
+    declared.  A 4-byte MPEG frame that merely looks like a sync is rejected by
+    ``_valid_mpeg`` and stays rejected here because the header is truncated.
+    """
+    if len(header) < 7 or header[0] != 0xFF or header[1] & 0xF0 != 0xF0 or header[1] & 0x06:
+        return False
+    if (header[2] >> 2) & 0x0F >= 13:
+        return False
+    if (((header[2] & 0x01) << 2) | (header[3] >> 6)) == 0:
+        return False
+    frame_length = ((header[3] & 0x03) << 11) | (header[4] << 3) | (header[5] >> 5)
+    return frame_length >= 7
 
 
 def _valid_id3(h: bytes) -> bool:
@@ -137,6 +175,8 @@ def validate_media(header: bytes, metadata: DownloadMetadata, candidate_format: 
         accepted = {media_type}
         if extension == ".m4a":
             accepted.add("audio/x-m4a")
+        if extension == ".aac":
+            accepted.add("audio/x-aac")
         if extension == ".ogg":
             accepted.add("application/ogg")
         if metadata.media_type.lower() not in accepted:

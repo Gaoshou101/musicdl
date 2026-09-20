@@ -13,6 +13,9 @@ from musicdl.media.models import _CloseOnce
 
 ID3 = b"ID3\x04\x00\x00\x00\x00\x00\x00"
 M4A = b"\x00\x00\x00\x14ftypM4A \x00\x00\x00\x00M4A "
+# Raw ADTS frames, 44.1 kHz stereo with a 136-byte first frame -- the container
+# the transport publishes for kuwo's `.aac` links, measured 2026-09-20.
+ADTS = bytes.fromhex("fff1508011") + b"\x00" * 8
 from musicdl.sources.models import Candidate
 
 
@@ -133,7 +136,7 @@ def test_download_failures_cleanup(tmp_path, metadata, code):
 
 
 def test_download_collision_and_formats(tmp_path):
-    for fmt, header, mime in [("mp3", ID3, "audio/mpeg"), ("flac", b"fLaC", "audio/flac"), ("m4a", M4A, "audio/mp4"), ("ogg", b"OggS", "audio/ogg")]:
+    for fmt, header, mime in [("mp3", ID3, "audio/mpeg"), ("flac", b"fLaC", "audio/flac"), ("m4a", M4A, "audio/mp4"), ("aac", ADTS, "audio/aac"), ("ogg", b"OggS", "audio/ogg")]:
         c = candidate(fmt, fmt)
         base = tmp_path / "华语" / "Artist" / f"Song - Artist.{fmt}"
         base.parent.mkdir(parents=True, exist_ok=True); base.write_bytes(b"original")
@@ -143,7 +146,7 @@ def test_download_collision_and_formats(tmp_path):
         assert first.relative_path.stem.endswith(" (2)") and second.relative_path.stem.endswith(" (3)")
         assert base.read_bytes() == b"original"
     files = sorted((tmp_path / "华语" / "Artist").glob("Song*"))
-    assert len(files) == 12
+    assert len(files) == 15
 
 
 def test_concurrent_publication_has_unique_targets(tmp_path):
@@ -224,7 +227,7 @@ def test_fsync_failure_closes_and_cleans(tmp_path, monkeypatch):
     assert not list(tmp_path.rglob("*.mp3")) and not list(tmp_path.glob(".musicdl-*.part"))
 
 
-@pytest.mark.parametrize("fmt,header,mime", [("mp3", ID3, "audio/mpeg"), ("flac", b"fLaC", "audio/flac"), ("m4a", M4A, "audio/mp4"), ("ogg", b"OggS", "audio/ogg")])
+@pytest.mark.parametrize("fmt,header,mime", [("mp3", ID3, "audio/mpeg"), ("flac", b"fLaC", "audio/flac"), ("m4a", M4A, "audio/mp4"), ("aac", ADTS, "audio/aac"), ("ogg", b"OggS", "audio/ogg")])
 def test_parametrized_collision_matrix(tmp_path, fmt, header, mime):
     base = tmp_path / "华语" / "Artist" / f"Song - Artist.{fmt}"
     base.parent.mkdir(parents=True); base.write_bytes(b"original")
