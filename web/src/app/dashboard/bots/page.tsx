@@ -8,8 +8,10 @@ import {
   deleteBot,
   errorMessage,
   listBots,
+  reloadNote,
   updateBot,
 } from '@/lib/api'
+import TelegramAccountCard from '@/components/TelegramAccountCard'
 
 type Notice = { tone: 'ok' | 'error'; text: string } | null
 
@@ -79,7 +81,7 @@ export default function BotsPage() {
       setBots((current) => [...current, created])
       setShowAdd(false)
       setAddDraft(BLANK_DRAFT)
-      setNotice({ tone: 'ok', text: `已添加 ${created.id}` })
+      setNotice({ tone: 'ok', text: `已添加 ${created.id}${reloadNote(created.reload)}` })
     } catch (err) {
       setNotice({ tone: 'error', text: errorMessage(err) })
     } finally {
@@ -106,18 +108,17 @@ export default function BotsPage() {
     }
     setBusy(true)
     try {
-      replace(
-        await updateBot(bot.id, {
-          username: editDraft.username.trim(),
-          // An empty template is how an operator switches back to the built-in
-          // public `/search {query}` contract.
-          command_template: editDraft.command_template.trim() || null,
-          priority: parsed.value.priority,
-          timeout: parsed.value.timeout,
-        }),
-      )
+      const saved = await updateBot(bot.id, {
+        username: editDraft.username.trim(),
+        // An empty template is how an operator switches back to the built-in
+        // public `/search {query}` contract.
+        command_template: editDraft.command_template.trim() || null,
+        priority: parsed.value.priority,
+        timeout: parsed.value.timeout,
+      })
+      replace(saved)
       setEditing(null)
-      setNotice({ tone: 'ok', text: `已更新 ${bot.id}` })
+      setNotice({ tone: 'ok', text: `已更新 ${bot.id}${reloadNote(saved.reload)}` })
     } catch (err) {
       setNotice({ tone: 'error', text: errorMessage(err) })
     } finally {
@@ -127,7 +128,9 @@ export default function BotsPage() {
 
   const toggleEnabled = async (bot: BotItem) => {
     try {
-      replace(await updateBot(bot.id, { enabled: !bot.enabled }))
+      const saved = await updateBot(bot.id, { enabled: !bot.enabled })
+      replace(saved)
+      setNotice({ tone: 'ok', text: `${saved.enabled ? '已启用' : '已停用'} ${bot.id}${reloadNote(saved.reload)}` })
     } catch (err) {
       setNotice({ tone: 'error', text: errorMessage(err) })
     }
@@ -136,9 +139,9 @@ export default function BotsPage() {
   const remove = async (bot: BotItem) => {
     if (!window.confirm(`确定删除 Bot「${bot.id}」吗？`)) return
     try {
-      await deleteBot(bot.id)
+      const removed = await deleteBot(bot.id)
       setBots((current) => current.filter((entry) => entry.id !== bot.id))
-      setNotice({ tone: 'ok', text: `已删除 ${bot.id}` })
+      setNotice({ tone: 'ok', text: `已删除 ${bot.id}${reloadNote(removed.reload)}` })
     } catch (err) {
       setNotice({ tone: 'error', text: errorMessage(err) })
     }
@@ -183,6 +186,8 @@ export default function BotsPage() {
           {notice.text}
         </p>
       )}
+
+      <TelegramAccountCard />
 
       <div className="grid gap-4">
         {bots.map((bot) => (

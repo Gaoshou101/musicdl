@@ -79,7 +79,24 @@ def test_every_field_names_the_environment_variable_that_sets_it(tmp_path):
     assert fields["worker.search_timeout"]["env"] == "MUSICDL_WORKER__SEARCH_TIMEOUT"
     assert fields["admin.login_limit"]["env"] == "MUSICDL_ADMIN__LOGIN_LIMIT"
     assert fields["admin.login_limit"]["scope"] == "hot"
-    assert fields["worker.search_timeout"]["scope"] == "restart"
+    assert fields["worker.search_timeout"]["scope"] == "hot"
+
+
+def test_no_editable_field_waits_for_a_restart(tmp_path):
+    """Every field the panel offers is adopted by the running process.
+
+    A field the panel can write but the process cannot adopt is a restart
+    dressed up as a setting; the scopes exist so that stays visible, and the
+    only two answers the panel may show are "now" and "next start".
+    """
+    fields = fields_of(ConfigManager(settings_for(tmp_path)).describe())
+    assert {field["scope"] for field in fields.values()} == {"hot"}
+    # The runtime groups are the ones a write has to rebuild for; the login
+    # limiter belongs to the process, which retunes it in place.
+    assert ConfigManager.affects_runtime("worker.search_timeout") is True
+    assert ConfigManager.affects_runtime("wecom.enabled") is True
+    assert ConfigManager.affects_runtime("admin.login_limit") is False
+    assert ConfigManager.affects_runtime("not.a.setting") is False
 
 
 def test_a_value_reports_the_layer_it_came_from(tmp_path, monkeypatch):
@@ -203,7 +220,7 @@ def test_the_wecom_message_proxy_is_editable_and_a_blank_means_the_official_api(
     manager = ConfigManager(settings_for(tmp_path))
     field = fields_of(manager.describe())["wecom.api_base"]
     assert field["env"] == "MUSICDL_WECOM__API_BASE"
-    assert field["scope"] == "restart"
+    assert field["scope"] == "hot"
     assert field["secret"] is False
     assert str(field["value"]).rstrip("/") == "https://qyapi.weixin.qq.com"
 

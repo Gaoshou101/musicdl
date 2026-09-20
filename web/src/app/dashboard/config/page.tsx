@@ -17,6 +17,7 @@ import {
   ConfigReport,
   errorMessage,
   listConfig,
+  reloadNote,
   updateConfig,
 } from '@/lib/api'
 
@@ -274,7 +275,7 @@ export default function ConfigPage() {
       setDrafts(initialDrafts(next))
       setCleared([])
       setError('')
-      setMessage({ type: 'success', text: `已保存 ${count} 项；标注「重启后生效」的字段会在下次启动时采用` })
+      setMessage({ type: 'success', text: `已保存 ${count} 项${reloadNote(next.reload) || '，已立即生效'}` })
     } catch (err) {
       setMessage({ type: 'error', text: errorMessage(err) })
     } finally {

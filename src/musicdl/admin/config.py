@@ -18,10 +18,12 @@ Three rules keep that layer safe:
   blank value keeps whatever is already stored.
 
 Every field carries the scope it takes effect in: ``hot`` when the running
-process adopts the new value immediately, ``restart`` when the next start picks
-it up. Settings this process cannot change at all -- the published ports, the
-volumes, the resource limits -- are listed separately as container knobs, so
-the panel can say who owns them rather than offering a control that would lie.
+process adopts the new value immediately -- either by retuning what it owns
+directly or by rebuilding the runtime the setting feeds -- and ``restart`` for
+the rare field the next start has to pick up. Settings this process cannot
+change at all -- the published ports, the volumes, the resource limits -- are
+listed separately as container knobs, so the panel can say who owns them
+rather than offering a control that would lie.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ class ConfigField:
     label: str
     kind: str
     help: str
-    scope: str = "restart"
+    scope: str = "hot"
 
     @property
     def env(self) -> str:
@@ -150,9 +152,9 @@ GROUPS: tuple[ConfigGroup, ...] = (
         help="登录失败预算；改动立即对新的尝试生效，不需要重启。",
         fields=(
             ConfigField("admin.login_limit", "窗口内失败次数上限", "int",
-                        "默认 5 次，超出后该来源被限速。", scope="hot"),
+                        "默认 5 次，超出后该来源被限速。"),
             ConfigField("admin.login_window_seconds", "限速窗口（秒）", "float",
-                        "默认 60 秒。", scope="hot"),
+                        "默认 60 秒。"),
         ),
     ),
 )
@@ -165,6 +167,12 @@ EDITABLE: dict[str, ConfigField] = {item.key: item for group in GROUPS for item 
 # deployment assigned outside the validator must not make the panel unable to
 # save anything at all.
 OWNED_GROUPS: tuple[str, ...] = ("wecom", "redis", "telegram", "ai", "worker", "admin")
+
+# The groups the assembled runtime reads, and therefore the ones a write has to
+# rebuild it for. ``admin`` is deliberately absent: the login limiter belongs to
+# the process itself, which adopts a new budget in place, and bouncing the
+# workers to change it would be a lie about what the change costs.
+RUNTIME_GROUPS: tuple[str, ...] = ("wecom", "redis", "telegram", "ai", "worker")
 
 # What only the deployment can change. The panel reports these so an operator
 # reads one page instead of two places, and names the exact variable to set.
@@ -280,6 +288,22 @@ class ConfigManager:
 
     def snapshot(self) -> dict:
         return deepcopy(self._overrides)
+
+    # -- what a change costs --------------------------------------------
+
+    @staticmethod
+    def affects_runtime(key: str) -> bool:
+        """Whether the assembled runtime reads this setting at all."""
+        return key.split(".", 1)[0] in RUNTIME_GROUPS
+
+    def effective(self, keys) -> dict[str, Any]:
+        """The values in force right now, secrets unwrapped for comparison.
+
+        The portal diffs this before and after a write, so a save that repeats
+        what was already stored -- or clears an override the deployment's own
+        value already matched -- does not bounce the workers for nothing.
+        """
+        return {key: unwrap(self._value(key)) for key in keys if key in EDITABLE}
 
     # -- reading --------------------------------------------------------
     def describe(self) -> dict:

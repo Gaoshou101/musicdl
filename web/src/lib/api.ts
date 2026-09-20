@@ -261,6 +261,43 @@ export type ConfigReport = {
   rejected: Record<string, string>
 }
 
+/**
+ * What a save cost the running process: the runtime it rebuilt in place, or
+ * why it could not. A reply without one means nothing had to be rebuilt.
+ */
+export type ReloadReport = {
+  status: 'reloaded' | 'failed' | 'skipped'
+  reason?: string
+  error?: string
+  /** Which runtime the change produced; the first one is 1. */
+  generation?: number
+  sources?: number
+  workers?: number
+}
+
+/** A mutation reply that may carry the rebuild it caused. */
+export type MutationReport<T> = T & { reload?: ReloadReport }
+
+export type ConfigWriteReport = ConfigReport & { reload?: ReloadReport }
+
+/**
+ * One clause about what a save cost the running process, for a notice line.
+ *
+ * Nothing to say is the common case: a mutation that changed nothing the
+ * runtime reads carries no report at all, and the caller falls back to saying
+ * the change is in force.
+ */
+export function reloadNote(report?: ReloadReport): string {
+  if (!report) return ''
+  if (report.status === 'reloaded') {
+    return `，运行配置已热重载（第 ${report.generation ?? 1} 代，${report.sources ?? 0} 个音源）`
+  }
+  if (report.status === 'failed') {
+    return `，但热重载失败：${report.error ?? '原因未知'}；改动已保存，重启后生效`
+  }
+  return ''
+}
+
 export type LoginReport = { ok: boolean; must_change: boolean; csrf_token: string }
 
 const CSRF_HEADER = 'x-csrf-token'
@@ -289,6 +326,10 @@ const DETAIL_TEXT: Record<string, string> = {
   // sessionStorage) has to sign in again rather than reload.
   'CSRF validation failed': '安全校验失败，请重新登录后重试',
   'too many login attempts': '登录尝试过于频繁，请稍后再试',
+  'telegram connector is disabled': 'Telegram 连接器未启用：先在运行配置里打开并保存',
+  'a phone number is required': '请填写手机号（含国家区号）',
+  'the login code is required': '请填写 Telegram 发来的登录码',
+  'the two-step password is required': '请填写两步验证密码',
   'plugin storage is unavailable': '插件存储不可用，无法安装或删除音源',
   'search runtime is unavailable': '搜索运行环境不可用，请确认音源已就绪',
   'media root is unavailable': '媒体目录不可用',
@@ -572,19 +613,21 @@ export function analyzeSource(source: SourceImport): Promise<ImportPreview> {
   return request<ImportPreview>('/sources/analyze', { method: 'POST', body: source })
 }
 
-export function installSource(source: SourceImport): Promise<SourceItem> {
-  return request<SourceItem>('/sources', { method: 'POST', body: source })
+export function installSource(source: SourceImport): Promise<MutationReport<SourceItem>> {
+  return request<MutationReport<SourceItem>>('/sources', { method: 'POST', body: source })
 }
 
 export function updateSource(
   id: string,
   changes: { enabled?: boolean; priority?: number; timeout?: number; name?: string | null },
-): Promise<SourceItem> {
-  return request<SourceItem>(`/sources/${encodeURIComponent(id)}`, { method: 'PATCH', body: changes })
+): Promise<MutationReport<SourceItem>> {
+  return request<MutationReport<SourceItem>>(`/sources/${encodeURIComponent(id)}`,
+                                             { method: 'PATCH', body: changes })
 }
 
-export function deleteSource(id: string): Promise<SourceItem & { uninstalled: string[] }> {
-  return request<SourceItem & { uninstalled: string[] }>(`/sources/${encodeURIComponent(id)}`, { method: 'DELETE' })
+export function deleteSource(id: string): Promise<MutationReport<SourceItem & { uninstalled: string[] }>> {
+  return request<MutationReport<SourceItem & { uninstalled: string[] }>>(
+    `/sources/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export function listBots(): Promise<{ items: BotItem[] }> {
@@ -598,8 +641,8 @@ export function createBot(bot: {
   enabled?: boolean
   priority?: number
   timeout?: number
-}): Promise<BotItem> {
-  return request<BotItem>('/bots', { method: 'POST', body: bot })
+}): Promise<MutationReport<BotItem>> {
+  return request<MutationReport<BotItem>>('/bots', { method: 'POST', body: bot })
 }
 
 export function updateBot(
@@ -611,12 +654,13 @@ export function updateBot(
     username?: string
     command_template?: string | null
   },
-): Promise<BotItem> {
-  return request<BotItem>(`/bots/${encodeURIComponent(id)}`, { method: 'PATCH', body: changes })
+): Promise<MutationReport<BotItem>> {
+  return request<MutationReport<BotItem>>(`/bots/${encodeURIComponent(id)}`,
+                                          { method: 'PATCH', body: changes })
 }
 
-export function deleteBot(id: string): Promise<BotItem> {
-  return request<BotItem>(`/bots/${encodeURIComponent(id)}`, { method: 'DELETE' })
+export function deleteBot(id: string): Promise<MutationReport<BotItem>> {
+  return request<MutationReport<BotItem>>(`/bots/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export function searchCandidates(query: string, limit = 50): Promise<SearchReport> {
@@ -658,8 +702,57 @@ export function listConfig(): Promise<ConfigReport> {
  * value stand again; a blank secret keeps whatever is already stored, because
  * the panel can never render an existing one for the operator to confirm.
  */
-export function updateConfig(values: Record<string, unknown>): Promise<ConfigReport> {
-  return request<ConfigReport>('/config', { method: 'PATCH', body: { values } })
+export function updateConfig(values: Record<string, unknown>): Promise<ConfigWriteReport> {
+  return request<ConfigWriteReport>('/config', { method: 'PATCH', body: { values } })
+}
+
+/**
+ * Whether the stored Telegram session can talk to bots right now.
+ *
+ * `invalid_session` is the one an operator meets after filling in api_id and
+ * api_hash: those wire the client, they do not authorise an account, so the
+ * first login has to be finished here before any bot can answer.
+ */
+export type TelegramStatus =
+  | 'code_required'
+  | 'password_required'
+  | 'ready'
+  | 'invalid_session'
+  | 'rate_limited'
+  | 'error'
+
+export type TelegramReport = {
+  enabled: boolean
+  profile: string
+  /** Whether the running runtime assembled a connector at all. */
+  available: boolean
+  status: TelegramStatus | null
+  retry_after: number | null
+  error: string | null
+  /** The masked number a half-finished login is waiting on, if there is one. */
+  pending_phone: string | null
+}
+
+export function readTelegram(): Promise<TelegramReport> {
+  return request<TelegramReport>('/telegram')
+}
+
+/** Ask Telegram to send a login code to this number. */
+export function beginTelegramLogin(phone: string): Promise<TelegramReport> {
+  return request<TelegramReport>('/telegram/login', { method: 'POST', body: { phone } })
+}
+
+export function verifyTelegramLogin(code: string): Promise<TelegramReport> {
+  return request<TelegramReport>('/telegram/login/verify', { method: 'POST', body: { code } })
+}
+
+export function submitTelegramPassword(password: string): Promise<TelegramReport> {
+  return request<TelegramReport>('/telegram/login/password', { method: 'POST', body: { password } })
+}
+
+/** Forget the stored session; the next login starts from a fresh code. */
+export function logoutTelegram(): Promise<TelegramReport> {
+  return request<TelegramReport>('/telegram/logout', { method: 'POST' })
 }
 
 export function readEvents(offset = 0, limit = 100): Promise<Page<DownloadEvent>> {

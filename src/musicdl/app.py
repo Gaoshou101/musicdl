@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import inspect
+import logging
 import math
 from typing import Any, Callable
 import time
@@ -36,6 +37,9 @@ try:
     from redis.asyncio import Redis
 except ImportError:  # pragma: no cover
     Redis = None
+
+
+logger = logging.getLogger("musicdl.app")
 
 
 async def _maybe_close(value: Any) -> None:
@@ -81,6 +85,7 @@ class _AdminState:
                                                logs=self.logs,
                                                plugins=self.plugin_store,
                                                runtime=lambda: getattr(app.state, "runtime", None),
+                                               reloader=lambda: getattr(app.state, "reload_runtime", None),
                                                media_root=settings.media.root,
                                                worker=settings.worker))
         app.add_middleware(CSRFMiddleware, auth=self.auth)
@@ -394,35 +399,38 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        state = None
-        redis = None
-        runtime = None
-        tasks: list[asyncio.Task] = []
         app.state.worker_error = None
         app.state.stopping = False
         app.state.runtime_error = None
+        app.state.runtime_generation = 0
+        # One reload at a time: a save that arrives while another is still
+        # swapping runtimes waits for it instead of building on top of a
+        # half-stopped one.
+        reload_lock = asyncio.Lock()
+        live: dict[str, Any] = {"runtime": None, "tasks": []}
         if admin is not None:
             # Installed before anything else the lifespan does, so a start-up
             # that goes wrong is itself readable from the panel afterwards.
             app.state.logs = admin.logs
             admin.logs.install()
-        if settings.wecom.enabled and state_factory:
-            state = state_factory(settings)
-            if inspect.isawaitable(state):
-                state = await state
-            app.state.wecom_state = state
-            app.state.wecom_service = WeComService(settings.wecom, state, clock or time.time)
-        elif state_factory:
-            # An injected state boundary means the caller owns the WeCom half;
-            # assembling the source runtime on top of it is not what it asked
-            # for, and nothing here needs the plugin volume then.
-            pass
-        elif settings.wecom.enabled or settings.admin.enabled:
-            # The one registry answers both surfaces -- the WeCom workers and
-            # the panel's own search box -- so it is assembled whenever either
-            # is on.  A deployment that runs only the panel must not be left
-            # with nothing to search, and one that runs neither is not asked
-            # for plugin storage it will never read.
+
+        def worker_finished(task: asyncio.Task) -> None:
+            if app.state.stopping or task.cancelled():
+                return
+            try:
+                error = task.exception()
+            except asyncio.CancelledError:
+                return
+            app.state.worker_error = error or RuntimeError("worker exited")
+
+        async def assemble() -> Any:
+            """Build one runtime from whatever the settings say right now.
+
+            The portal owns the bot and source definitions, so the next runtime
+            is assembled from the stored list rather than from the copy the
+            running one closed over: a source installed a moment ago is part of
+            the runtime built a moment later.
+            """
             definitions = tuple(admin.bots.list()) if admin is not None else ()
             source_definitions = tuple(admin.sources.list()) if admin is not None else ()
             # The panel's own search and download are ordered by what it has
@@ -433,60 +441,137 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 lambda current: _build_runtime(current, clock, bots=definitions,
                                                sources=source_definitions,
                                                preference=preference))
+            built = factory(settings)
+            if inspect.isawaitable(built):
+                built = await built
+            return built
+
+        async def observe(worker) -> None:
+            await worker.run_forever()
+
+        def start_workers(instance) -> list[asyncio.Task]:
+            """Run one runtime's workers, or none when it has no message half."""
+            if instance is None or instance.message_worker is None or instance.job_worker is None:
+                return []
+            app.state.message_worker = instance.message_worker
+            app.state.job_worker = instance.job_worker
+            started = [asyncio.create_task(observe(instance.message_worker)),
+                       asyncio.create_task(observe(instance.job_worker))]
+            for task in started:
+                task.add_done_callback(worker_finished)
+            return started
+
+        async def stop_workers(tasks) -> None:
+            """Cancel the running workers and wait for them to let go.
+
+            A worker cancelled mid-message leaves it pending in its Redis
+            stream, which is where the next runtime's ``XAUTOCLAIM`` finds it:
+            a reload costs a retry, never a message.
+            """
+            if not tasks:
+                return
+            previous = app.state.stopping
+            app.state.stopping = True
             try:
-                runtime = factory(settings)
-                if inspect.isawaitable(runtime):
-                    runtime = await runtime
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                app.state.stopping = previous
+
+        def adopt(instance, tasks) -> None:
+            """Point the application at the runtime that is now in force."""
+            live["runtime"], live["tasks"] = instance, tasks
+            app.state.runtime = instance
+            if tasks:
+                app.state.worker_tasks = tasks
+            elif hasattr(app.state, "worker_tasks"):
+                # A runtime with no message half must not leave the previous
+                # one's finished tasks behind: /readyz reads this list.
+                del app.state.worker_tasks
+            if instance is None:
+                return
+            if instance.state is not None:
+                app.state.wecom_state = instance.state
+                app.state.wecom_service = instance.service
+                app.state.service = instance.service
+            if admin is not None:
+                admin.publish_sources(getattr(instance, "plugin_registry", None)
+                                      or getattr(instance, "registry", None))
+
+        async def reload_runtime(reason: str = "manual") -> dict[str, Any]:
+            """Adopt the settings in force without restarting the process.
+
+            The next runtime is built before the running one is touched, so a
+            build that fails leaves a working deployment alone and the operator
+            reads the reason in the panel instead of meeting a dead service.
+            """
+            if state_factory is not None:
+                return {"status": "skipped", "reason": "injected state boundary"}
+            if admin is None and not settings.wecom.enabled:
+                return {"status": "skipped", "reason": "no runtime is assembled"}
+            async with reload_lock:
+                previous, tasks = live["runtime"], live["tasks"]
+                try:
+                    built = await assemble()
+                except Exception as error:  # noqa: BLE001 - reported, not raised
+                    logger.warning("runtime reload failed: %s", error, exc_info=True)
+                    return {"status": "failed", "error": str(error)}
+                await stop_workers(tasks)
+                started = start_workers(built)
+                adopt(built, started)
+                if previous is not None:
+                    await _maybe_close(previous)
+                app.state.runtime_error = None
+                app.state.runtime_generation += 1
+                registry = getattr(built, "registry", None)
+                sources = len(registry.enabled()) if registry is not None else 0
+                logger.info("runtime reloaded (%s): generation %d, %d sources",
+                            reason, app.state.runtime_generation, sources)
+                return {"status": "reloaded", "reason": reason,
+                        "generation": app.state.runtime_generation, "sources": sources,
+                        "workers": len(started)}
+
+        # Set before the first assembly, so a start-up that fails to build a
+        # runtime still leaves the panel able to ask for another one.
+        app.state.reload_runtime = reload_runtime
+
+        if settings.wecom.enabled and state_factory:
+            boundary = state_factory(settings)
+            if inspect.isawaitable(boundary):
+                boundary = await boundary
+            app.state.wecom_state = boundary
+            app.state.wecom_service = WeComService(settings.wecom, boundary, clock or time.time)
+        elif state_factory:
+            # An injected state boundary means the caller owns the WeCom half;
+            # assembling the source runtime on top of it is not what it asked
+            # for, and nothing here needs the plugin volume then.
+            pass
+        elif settings.wecom.enabled or admin is not None:
+            # The one registry answers both surfaces -- the WeCom workers and
+            # the panel's own search box -- so it is assembled whenever either
+            # is on.  A deployment that runs only the panel must not be left
+            # with nothing to search, and one that runs neither is not asked
+            # for plugin storage it will never read.
+            try:
+                built = await assemble()
             except Exception as error:
                 # A WeCom deployment cannot serve its callback without workers;
                 # the panel can still start and report what is missing.
                 if settings.wecom.enabled:
                     raise
-                runtime = None
                 app.state.runtime_error = error
-            if runtime is not None:
-                app.state.runtime = runtime
-                state = runtime.state
-                if state is not None:
-                    app.state.wecom_state = state
-                    app.state.wecom_service = runtime.service
-                    app.state.service = runtime.service
-                if admin is not None:
-                    admin.publish_sources(getattr(runtime, "plugin_registry", None)
-                                          or getattr(runtime, "registry", None))
-                if runtime.message_worker is not None and runtime.job_worker is not None:
-                    app.state.message_worker = runtime.message_worker
-                    app.state.job_worker = runtime.job_worker
-
-                    async def observe(worker):
-                        await worker.run_forever()
-
-                    def completed(task: asyncio.Task) -> None:
-                        if app.state.stopping or task.cancelled():
-                            return
-                        try:
-                            error = task.exception()
-                        except asyncio.CancelledError:
-                            return
-                        app.state.worker_error = error or RuntimeError("worker exited")
-
-                    tasks = [asyncio.create_task(observe(runtime.message_worker)),
-                             asyncio.create_task(observe(runtime.job_worker))]
-                    for task in tasks:
-                        task.add_done_callback(completed)
-                    app.state.worker_tasks = tasks
+            else:
+                adopt(built, start_workers(built))
         try:
             yield
         finally:
             app.state.stopping = True
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            if runtime is not None:
-                await _maybe_close(runtime)
-            elif redis is not None:
-                await _maybe_close(redis)
+            await stop_workers(live["tasks"])
+            live["tasks"] = []
+            if live["runtime"] is not None:
+                await _maybe_close(live["runtime"])
+                live["runtime"] = None
             if admin is not None:
                 admin.logs.uninstall()
 

@@ -26,6 +26,8 @@ import {
   installSource,
   listSourceHealth,
   listSources,
+  MutationReport,
+  reloadNote,
   updateSource,
 } from '@/lib/api'
 import { formatBytes, shortHash } from '@/lib/format'
@@ -142,7 +144,7 @@ function ImportDialog({
   onInstalled,
 }: {
   onClose: () => void
-  onInstalled: (item: SourceItem) => void
+  onInstalled: (result: MutationReport<SourceItem>) => void
 }) {
   const [script, setScript] = useState('')
   const [filename, setFilename] = useState('')
@@ -519,9 +521,10 @@ export default function SourcesPage() {
       return
     }
     try {
-      replace(await updateSource(source.id, { name: form.name.trim() || null, priority, timeout }))
+      const saved = await updateSource(source.id, { name: form.name.trim() || null, priority, timeout })
+      replace(saved)
       setEditing(null)
-      setNotice({ tone: 'ok', text: `已更新 ${source.name || source.id}` })
+      setNotice({ tone: 'ok', text: `已更新 ${source.name || source.id}${reloadNote(saved.reload)}` })
     } catch (err) {
       setNotice({ tone: 'error', text: errorMessage(err) })
     }
@@ -534,7 +537,7 @@ export default function SourcesPage() {
       setSources((current) => current.filter((entry) => entry.id !== source.id))
       setNotice({
         tone: 'ok',
-        text: `已删除 ${source.id}${removed.uninstalled?.length ? `，并卸载 ${removed.uninstalled.length} 个脚本版本` : ''}`,
+        text: `已删除 ${source.id}${removed.uninstalled?.length ? `，并卸载 ${removed.uninstalled.length} 个脚本版本` : ''}${reloadNote(removed.reload)}`,
       })
     } catch (err) {
       setNotice({ tone: 'error', text: errorMessage(err) })
@@ -740,7 +743,7 @@ export default function SourcesPage() {
           onClose={() => setShowImport(false)}
           onInstalled={(item) => {
             setShowImport(false)
-            setNotice({ tone: 'ok', text: `已导入 ${item.id}` })
+            setNotice({ tone: 'ok', text: `已导入 ${item.id}${reloadNote(item.reload)}` })
             void load()
           }}
         />

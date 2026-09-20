@@ -18,7 +18,7 @@ from musicdl.plugins.install import install_source, preview_source
 from musicdl.sources.models import Candidate, normalize_text
 from musicdl.sources.search import search_sources
 from .auth import AdminAuth, RateLimiter
-from .config import ConfigManager
+from .config import EDITABLE, ConfigManager
 from .forms import form_fields
 from .health import EventLogStore, HealthAggregator, SourceHealthStore
 from .logs import LogBuffer
@@ -105,6 +105,20 @@ def _media_target(root: str | Path, relative_path: str) -> Path:
     return resolved
 
 
+def _mask_phone(number: str | None) -> str | None:
+    """A phone number shown back as "the one ending in those digits".
+
+    A login in progress has to be identifiable -- an operator who mistyped one
+    digit needs to see which number is waiting -- without the panel becoming a
+    place a number can simply be read out of.
+    """
+    if not isinstance(number, str) or not number:
+        return None
+    if len(number) <= 7:
+        return number[:2] + "*" * max(len(number) - 2, 0)
+    return f"{number[:4]}****{number[-4:]}"
+
+
 def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager | None = None,
                         health: HealthAggregator | None = None, events: EventLogStore | None = None,
                         limiter: RateLimiter | None = None, bots: SourceManager | None = None,
@@ -114,6 +128,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                         logs: LogBuffer | None = None,
                         plugins: Callable[[], Any] | None = None,
                         runtime: Callable[[], Any] | None = None,
+                        reloader: Callable[[], Any] | None = None,
                         media_root: str | Path | None = None,
                         worker: Any | None = None) -> APIRouter:
     auth, sources, health, events, limiter = auth or AdminAuth(), sources or SourceManager(), health or HealthAggregator({}), events or EventLogStore(), limiter or RateLimiter()
@@ -147,6 +162,70 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         if service is None or getattr(service, "registry", None) is None:
             raise HTTPException(503, "search runtime is unavailable")
         return service
+
+    async def rebuild_runtime(action: str) -> dict[str, Any]:
+        """Ask the process to rebuild the runtime a change just reached.
+
+        The write has already happened by the time this is called, so a rebuild
+        that fails is reported rather than raised: the stored value is in force
+        either way, the running runtime keeps serving, and the operator reads
+        the reason where they made the change instead of meeting a dead panel.
+
+        ``None`` means nothing was asked -- a router mounted on its own, with no
+        application behind it to rebuild anything -- and leaves the reply in the
+        shape it had before this report existed.
+        """
+        service = reloader() if reloader is not None else None
+        if service is None:
+            return None
+        try:
+            return await service(action)
+        except Exception as error:  # noqa: BLE001 - reported, not raised
+            _LOG.exception("runtime reload failed (%s)", action)
+            return {"status": "failed", "error": str(error)}
+
+    def with_reload_report(payload: dict, report: dict[str, Any] | None) -> dict:
+        """One mutation reply, carrying what the rebuild cost when it ran.
+
+        Every mutation that can ask for a rebuild reports it under the same
+        key, so one field tells the screen whether what it just saved is in
+        force already or still waiting for the next start.
+        """
+        return payload if report is None else dict(payload, reload=report)
+
+    def telegram_boundary():
+        """The Telegram connector the runtime assembled, or a refusal.
+
+        A disabled connector is not a missing feature: the operator can turn it
+        on one screen above, which rebuilds the runtime in place, so the refusal
+        says which of the two they are looking at.
+        """
+        service = runtime() if runtime is not None else None
+        connector = getattr(service, "telegram", None) if service is not None else None
+        if connector is None:
+            raise HTTPException(409, "telegram connector is disabled")
+        return connector
+
+    def telegram_profile() -> str:
+        configured = getattr(config.settings, "telegram", None)
+        profile = getattr(configured, "profile", None)
+        return profile if isinstance(profile, str) and profile else "default"
+
+    def telegram_view(result=None) -> dict[str, Any]:
+        """What the login screen needs: is it wired, and what is the next step."""
+        configured = getattr(config.settings, "telegram", None)
+        service = runtime() if runtime is not None else None
+        connector = getattr(service, "telegram", None) if service is not None else None
+        view: dict[str, Any] = {"enabled": bool(getattr(configured, "enabled", False)),
+                                "profile": telegram_profile(), "available": connector is not None,
+                                "status": None, "retry_after": None, "error": None,
+                                "pending_phone": None}
+        if connector is None:
+            return view
+        view["pending_phone"] = _mask_phone(connector.pending_phone(telegram_profile()))
+        if result is not None:
+            view.update(result.to_dict())
+        return view
 
     def plugin_store():
         """The plugin storage this portal may install into; absent means no code."""
@@ -360,19 +439,26 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             raise HTTPException(422, str(exc)) from None
         audit.append({"action": "create_source", "source_id": source_id, "status": "success",
                       "sha256": stored.manifest.sha256, "replaced": sorted(replaced)})
-        return dict(row, plugin={"sha256": stored.manifest.sha256, "version": stored.manifest.version,
-                                 "language": stored.manifest.language,
-                                 "egress": stored.manifest.egress.model_dump(mode="json")})
+        return with_reload_report(
+            dict(row, plugin={"sha256": stored.manifest.sha256, "version": stored.manifest.version,
+                              "language": stored.manifest.language,
+                              "egress": stored.manifest.egress.model_dump(mode="json")}),
+            await rebuild_runtime("create_source"))
 
     @router.patch("/sources/{source_id}")
     async def update_source(source_id: str, body: dict, request: Request):
         mutate(request)
+        values = body if isinstance(body, dict) else {}
+        before = next((item for item in sources.list() if item["id"] == source_id), None)
         try:
-            result = sources.update(source_id, enabled=body.get("enabled"), priority=body.get("priority"), timeout=body.get("timeout"), name=body.get("name")); audit.append({"action": "update_source", "source_id": source_id, "status": "success"}); return result
+            result = sources.update(source_id, enabled=values.get("enabled"), priority=values.get("priority"), timeout=values.get("timeout"), name=values.get("name"))
         except KeyError:
             raise HTTPException(404, "source not found") from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+        audit.append({"action": "update_source", "source_id": source_id, "status": "success"})
+        report = await rebuild_runtime("update_source") if result != before else None
+        return with_reload_report(result, report)
 
     @router.delete("/sources/{source_id}")
     async def delete_source(source_id: str, request: Request):
@@ -393,7 +479,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         removed = sources.remove(source_id)
         audit.append({"action": "delete_source", "source_id": source_id, "status": "success",
                       "versions": uninstalled})
-        return {**removed, "uninstalled": uninstalled}
+        return with_reload_report({**removed, "uninstalled": uninstalled},
+                                  await rebuild_runtime("delete_source"))
 
     @router.get("/search")
     async def search(request: Request, q: str = "", limit: int = 50):
@@ -543,15 +630,19 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         audit.append({"action": "create_bot", "bot_id": created["id"], "status": "success"})
-        return created
+        return with_reload_report(created, await rebuild_runtime("create_bot"))
 
     @router.patch("/bots/{bot_id}")
     async def update_bot(bot_id: str, body: dict, request: Request):
         mutate(request)
-        try: result = bots.update(bot_id, enabled=body.get("enabled"), priority=body.get("priority"), timeout=body.get("timeout"), username=body.get("username"), command_template=body.get("command_template"))
+        values = body if isinstance(body, dict) else {}
+        before = next((item for item in bots.list() if item["id"] == bot_id), None)
+        try: result = bots.update(bot_id, enabled=values.get("enabled"), priority=values.get("priority"), timeout=values.get("timeout"), username=values.get("username"), command_template=values.get("command_template"))
         except KeyError: raise HTTPException(404, "bot not found") from None
         except ValueError as exc: raise HTTPException(422, str(exc)) from None
-        audit.append({"action": "update_bot", "bot_id": bot_id, "status": "success"}); return result
+        audit.append({"action": "update_bot", "bot_id": bot_id, "status": "success"})
+        report = await rebuild_runtime("update_bot") if result != before else None
+        return with_reload_report(result, report)
 
     @router.delete("/bots/{bot_id}")
     async def delete_bot(bot_id: str, request: Request):
@@ -561,12 +652,80 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         except KeyError:
             raise HTTPException(404, "bot not found") from None
         audit.append({"action": "delete_bot", "bot_id": bot_id, "status": "success"})
-        return removed
+        return with_reload_report(removed, await rebuild_runtime("delete_bot"))
 
     @router.get("/health")
     async def health_report(request: Request):
         require(request)
         return await health.check()
+
+    @router.get("/telegram")
+    async def read_telegram(request: Request):
+        """Whether the stored Telegram session can talk to bots right now.
+
+        The answer is the session's own state rather than a configuration
+        mirror: an operator who filled in api_id and api_hash still has to
+        authorise the account once, and this is the line that says whether
+        that has happened.
+        """
+        require(request)
+        service = runtime() if runtime is not None else None
+        connector = getattr(service, "telegram", None) if service is not None else None
+        if connector is None:
+            return telegram_view()
+        result = await connector.restore(telegram_profile())
+        return telegram_view(result)
+
+    @router.post("/telegram/login")
+    async def begin_telegram_login(body: dict, request: Request):
+        """Ask Telegram for the code that authorises this account.
+
+        The code hash is kept beside the number it belongs to, so the second
+        step survives a runtime rebuilt in between -- an operator who fixes the
+        api_id after asking for a code does not have to ask for a second one.
+        """
+        mutate(request)
+        values = body if isinstance(body, dict) else {}
+        phone = values.get("phone")
+        if not isinstance(phone, str) or not phone.strip():
+            raise HTTPException(422, "a phone number is required")
+        connector = telegram_boundary()
+        result = await connector.begin_login(telegram_profile(), phone.strip())
+        audit.append({"action": "telegram_login", "step": "begin", "status": result.status.value})
+        return telegram_view(result)
+
+    @router.post("/telegram/login/verify")
+    async def verify_telegram_login(body: dict, request: Request):
+        mutate(request)
+        values = body if isinstance(body, dict) else {}
+        code = values.get("code")
+        if not isinstance(code, str) or not code.strip():
+            raise HTTPException(422, "the login code is required")
+        connector = telegram_boundary()
+        result = await connector.complete_code(telegram_profile(), code=code.strip())
+        audit.append({"action": "telegram_login", "step": "verify", "status": result.status.value})
+        return telegram_view(result)
+
+    @router.post("/telegram/login/password")
+    async def confirm_telegram_password(body: dict, request: Request):
+        mutate(request)
+        values = body if isinstance(body, dict) else {}
+        password = values.get("password")
+        if not isinstance(password, str) or not password:
+            raise HTTPException(422, "the two-step password is required")
+        connector = telegram_boundary()
+        result = await connector.complete_password(telegram_profile(), password)
+        audit.append({"action": "telegram_login", "step": "password", "status": result.status.value})
+        return telegram_view(result)
+
+    @router.post("/telegram/logout")
+    async def forget_telegram_session(request: Request):
+        """Forget the stored session, so the next login starts clean."""
+        mutate(request)
+        connector = telegram_boundary()
+        result = await connector.logout(telegram_profile())
+        audit.append({"action": "telegram_logout", "status": result.status.value})
+        return telegram_view(result)
 
     @router.get("/config")
     async def read_config(request: Request):
@@ -589,13 +748,25 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         """
         mutate(request)
         values = body.get("values") if isinstance(body, dict) else None
+        watched = (sorted(key for key in values
+                          if key in EDITABLE and config.affects_runtime(key))
+                   if isinstance(values, dict) else [])
+        before = config.effective(watched)
         try:
             result = config.update(values)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+        after = config.effective(watched)
+        changed = [key for key in watched if before.get(key) != after.get(key)]
         audit.append({"action": "update_config", "status": "success",
                       "keys": sorted(values)})
-        return result
+        if not changed:
+            return with_reload_report(result, None)
+        report = await rebuild_runtime("update_config")
+        if report is not None:
+            audit.append({"action": "update_config_reload", "status": report["status"],
+                          "keys": changed})
+        return with_reload_report(result, report)
 
     @router.get("/events")
     async def event_page(request: Request, offset: int = 0, limit: int = 50):
