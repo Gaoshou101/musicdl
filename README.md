@@ -160,6 +160,7 @@ Part of the table below can also be moved into the panel: it keeps its own layer
 | `MUSICDL_ADMIN_PORT` | No | Loopback host port Compose publishes for the panel. Defaults to `3000`. |
 | `MUSICDL_WECOM__ENABLED` | To serve users | Turns on the callback boundary. Defaults to `false`. |
 | `MUSICDL_WECOM__CORP_ID`, `__AGENT_ID`, `__TOKEN`, `__SECRET` | When WeCom is enabled | Corporation ID, agent ID, callback token, and application secret. |
+| `MUSICDL_WECOM__API_BASE` | Optional | Where outbound API calls go; defaults to the official `https://qyapi.weixin.qq.com`. A deployment outside mainland China can point it at a reverse proxy (for example `ddsderek/wxchat` on `http://host:9080`), so `gettoken` and message sends leave from a trusted address. Plain HTTP on a public link exposes the application secret, so prefer HTTPS where the proxy offers it. |
 | `MUSICDL_WECOM__ENCODING_AES_KEY` | When WeCom is enabled | The 43-character EncodingAESKey; it must decode to 32 bytes. |
 | `MUSICDL_WECOM__ALLOWED_USERS` | When WeCom is enabled | The allowlist. Startup fails on an empty list. |
 | `MUSICDL_ADMIN__ENABLED` | No | Mounts `/admin`. Defaults to `true`. |

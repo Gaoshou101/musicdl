@@ -199,6 +199,26 @@ def test_a_write_survives_a_restart_through_the_api(tmp_path):
     assert restarted.wecom.allowed_users == ["alice"]
 
 
+def test_the_wecom_message_proxy_is_editable_and_a_blank_means_the_official_api(tmp_path):
+    manager = ConfigManager(settings_for(tmp_path))
+    field = fields_of(manager.describe())["wecom.api_base"]
+    assert field["env"] == "MUSICDL_WECOM__API_BASE"
+    assert field["scope"] == "restart"
+    assert field["secret"] is False
+    assert str(field["value"]).rstrip("/") == "https://qyapi.weixin.qq.com"
+
+    manager.update({"wecom.api_base": "http://115.159.107.211:9080"})
+    assert str(manager.settings.wecom.api_base).rstrip("/") == "http://115.159.107.211:9080"
+
+    # Clearing the box asks for the official endpoint rather than failing the
+    # write: an operator who removes the proxy must not be locked out.
+    manager.update({"wecom.api_base": ""})
+    assert str(manager.settings.wecom.api_base).rstrip("/") == "https://qyapi.weixin.qq.com"
+
+    with pytest.raises(ValueError):
+        manager.update({"wecom.api_base": "115.159.107.211:9080"})
+
+
 def test_config_routes_need_a_session_and_a_csrf_token(tmp_path):
     app = prepared_app(settings_for(tmp_path))
 
