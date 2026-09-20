@@ -290,12 +290,59 @@ def test_transport_rejects_header_limits_and_encoding():
         (b"X-Header: x\r\n" * 65, "media_response_invalid"),
         (b"Content-Type: " + b"x" * 8193 + b"\r\n", "media_response_invalid"),
         (b"Content-Encoding: gzip\r\n", "media_response_invalid"),
+        (b"Content-Encoding: identity\r\nContent-Encoding: gzip\r\n", "media_response_invalid"),
         (b"Content-Length: nope\r\n", "media_response_invalid"),
     ]
     for header, code in cases:
         raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n" + header + b"\r\n" + ID3_BODY
         transport_instance, *_ = transport(raw)
         error_code(transport_instance.open(media(), policy=("xn--tst-qla.example",)), code)
+
+
+def downloaded(raw):
+    """Open one canned response and return the body the transport published."""
+    transport_instance, *_ = transport(raw)
+    metadata = asyncio.run(transport_instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    body = asyncio.run(read())
+    asyncio.run(metadata.aclose())
+    return body
+
+
+def test_transport_reads_a_field_that_repeats_in_a_cdn_head():
+    # Measured 2026-09-20 on Tencent's NWS proxy in front of `car-*.kuwo.cn`:
+    # one 200 answer for a correct 1,052,562-byte mp4 carried
+    # `X-Cache-Lookup: Cache Hit` and then `X-Cache-Lookup: Cache Miss`, the
+    # edge reporting its hit and the tier behind it the miss.  A repeated field
+    # the download does not act on is a list, so refusing the whole answer for
+    # it lost real downloads at random -- five of six in a row in one run.
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n"
+           b"X-Cache-Lookup: Cache Hit\r\nX-Cache-Lookup: Cache Miss\r\n\r\n" + ID3_BODY)
+    assert downloaded(raw) == ID3_BODY
+
+
+def test_transport_reads_an_identical_repeat_of_a_single_value_field():
+    # `Content-Length` decides how many bytes the body has, so a repeat is only
+    # readable while every reading agrees with itself.
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n"
+           b"Content-Length: 10\r\n\r\n" + ID3_BODY)
+    assert downloaded(raw) == ID3_BODY
+
+
+def test_transport_refuses_a_repeated_single_value_field_that_disagrees():
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n"
+           b"Content-Length: 11\r\n\r\n" + ID3_BODY)
+    transport_instance, *_ = transport(raw)
+    error_code(transport_instance.open(media(), policy=("xn--tst-qla.example",)), "media_response_invalid")
+
+
+def test_transport_reads_a_content_encoding_that_repeats_identity():
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n"
+           b"Content-Encoding: identity\r\nContent-Encoding: identity\r\n\r\n" + ID3_BODY)
+    assert downloaded(raw) == ID3_BODY
 
 
 def test_transport_rejects_a_size_mismatch():
