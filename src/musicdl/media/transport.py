@@ -23,6 +23,9 @@ from .validation import detect_media
 MAX_RESPONSE_HEADER_COUNT = 64
 MAX_RESPONSE_HEADER_FIELD_BYTES = 8 * 1024
 MAX_RESPONSE_HEADERS_BYTES = 64 * 1024
+# The response fields whose single reading this product acts on, so a repeat
+# has to agree with itself instead of being combined into a list.
+_SINGLE_VALUE_HEADERS = frozenset({"content-length", "location"})
 # Enough bytes for every signature `detect_container` knows, except the one that
 # states its own length: an ISO base media file is a 4-byte size, `ftyp`, a
 # major brand, a minor version, and then the brand list -- 16 bytes before the
@@ -213,13 +216,34 @@ class SecureMediaTransport:
             if any(ord(char) < 32 or ord(char) == 127 for char in key + value):
                 raise MediaTransportError("media_response_invalid")
             name = key.casefold()
-            if name in selected:
-                raise MediaTransportError("media_response_invalid")
-            selected[name] = value.strip()
+            # A response head may legally repeat a field, and the CDNs this
+            # product talks to do: measured 2026-09-20 on Tencent's NWS proxy in
+            # front of `car-*.kuwo.cn`, one 200 answer for a correct
+            # 1,052,562-byte mp4 carried `X-Cache-Lookup: Cache Hit` and then
+            # `X-Cache-Lookup: Cache Miss` -- the edge reported its hit and the
+            # tier behind it reported the miss.  Treating every repeat as a
+            # malformed head refused those downloads at random, so a repeat is
+            # combined the way RFC 9110 reads a list-valued field, and only the
+            # fields whose value decides what happens next stay single-valued:
+            # a repeated `Content-Length` or `Location` must agree with itself,
+            # and a combined `Content-Encoding` must still name nothing but
+            # `identity`.
+            previous = selected.get(name)
+            if previous is None:
+                selected[name] = value.strip()
+                continue
+            candidate = value.strip()
+            if name in _SINGLE_VALUE_HEADERS:
+                if candidate != previous:
+                    raise MediaTransportError("media_response_invalid")
+                continue
+            selected[name] = previous + ", " + candidate
 
         encoding = selected.get("content-encoding")
-        if encoding is not None and encoding.casefold() != "identity":
-            raise MediaTransportError("media_response_invalid")
+        if encoding is not None:
+            encodings = [part.strip().casefold() for part in encoding.split(",")]
+            if not all(part == "identity" for part in encodings):
+                raise MediaTransportError("media_response_invalid")
         length_header = selected.get("content-length")
         content_length: int | None = None
         if length_header is not None:
