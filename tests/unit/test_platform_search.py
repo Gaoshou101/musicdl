@@ -54,6 +54,10 @@ KG_PAYLOAD = {"status": 1, "data": {"total": 480, "lists": [
      "Singers": [{"id": 3520, "name": "周杰伦"}]},
 ]}}
 
+# The same host's other answer: a well-formed envelope that states no results
+# at all for a query it holds hundreds of rows for.
+EMPTY_KG_PAYLOAD = {"status": 1, "data": {"total": 0, "lists": []}}
+
 
 def observation(payload, *, status: int = 200, action_id: str = "search-kw") -> HttpObservation:
     text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
@@ -72,6 +76,11 @@ class _Broker:
         self.calls.append({"action": action, "policy": policy, "timeout": timeout})
         platform = action.action_id.split("-", 1)[1]
         answer = self.answers.get(platform)
+        if isinstance(answer, list):
+            # A platform the module draws more than once answers with the next
+            # scripted reply, and keeps repeating the last one once the script
+            # is spent.
+            answer = answer.pop(0) if len(answer) > 1 else answer[0]
         if answer is None:
             raise ActionDenied("dns_error", "no answer scripted")
         if isinstance(answer, BaseException):
@@ -237,6 +246,64 @@ def test_the_search_policy_is_the_four_hosts_and_a_bare_policy_object():
 
     assert broker.calls[0]["policy"] == SEARCH_HOSTS
     assert broker.calls[0]["timeout"] == search.timeout
+
+
+def test_the_platform_that_answers_empty_by_accident_is_drawn_again():
+    # Measured 2026-09-20: kugou's search host answers ``status: 1`` with
+    # ``total: 0`` and no rows for about half the queries it holds results for,
+    # so one empty envelope from it is not a finding about the catalogue.
+    search, broker = search_of({"kg": [observation(EMPTY_KG_PAYLOAD, action_id="search-kg"),
+                                       observation(KG_PAYLOAD, action_id="search-kg")]})
+
+    hits = asyncio.run(search.hits("kg", "夜曲"))
+
+    assert [hit.song_id for hit in hits] == ["0824176CC451611E819B3071F951589C"]
+    assert len(broker.calls) == 2
+    assert {call["action"].url for call in broker.calls} == {
+        "https://songsearch.kugou.com/song_search_v2?keyword=%E5%A4%9C%E6%9B%B2&page=1&pagesize=20"}
+
+
+def test_a_query_every_draw_of_which_is_empty_is_empty_rather_than_a_failure():
+    search, broker = search_of({"kg": observation(EMPTY_KG_PAYLOAD, action_id="search-kg")})
+
+    hits = asyncio.run(search.hits("kg", "no such song"))
+
+    assert hits == ()
+    assert len(broker.calls) == 3
+
+
+def test_a_draw_that_runs_out_of_time_leaves_the_next_one_to_answer():
+    search, broker = search_of({"kg": [ActionDenied("timeout", "action timed out"),
+                                       observation(KG_PAYLOAD, action_id="search-kg")]})
+
+    hits = asyncio.run(search.hits("kg", "夜曲"))
+
+    assert [hit.song_id for hit in hits] == ["0824176CC451611E819B3071F951589C"]
+    assert len(broker.calls) == 2
+
+
+def test_a_platform_that_answers_what_it_was_asked_is_drawn_once():
+    # Kuwo, NetEase, and QQ answered six of six queries and never answered
+    # empty, so a second request there would be load on the upstream and
+    # nothing else.  Kuwo answering an empty catalogue is a real answer.
+    search, broker = search_of({"kw": observation({"abslist": []})})
+
+    hits = asyncio.run(search.hits("kw", "no such song"))
+
+    assert hits == ()
+    assert len(broker.calls) == 1
+
+
+def test_every_draw_of_one_platform_stays_inside_the_platforms_own_budget():
+    search, broker = search_of({"kg": [ActionDenied("timeout", "action timed out"),
+                                       ActionDenied("timeout", "action timed out"),
+                                       observation(KG_PAYLOAD, action_id="search-kg")]}, timeout=6.0)
+
+    asyncio.run(search.hits("kg", "夜曲"))
+
+    # Three draws split one six-second budget rather than taking six seconds
+    # each, so the platform cannot outlive what its caller allowed it.
+    assert [call["timeout"] for call in broker.calls] == pytest.approx([2.0, 3.0, 6.0], abs=0.05)
 
 
 def test_the_real_broker_refuses_a_host_or_a_scheme_the_search_never_uses():
