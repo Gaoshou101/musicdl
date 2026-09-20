@@ -1,0 +1,22 @@
+# Reverse proxy for a panel-first deployment: the browser reaches the Next.js
+# console, and the one path the product process owns -- the WeCom callback --
+# goes to the product instead. The console only rewrites /api/* through to
+# /admin/*, so without the callback block a WeCom URL verification ends as this
+# console's 404 page instead of an answer from the product.
+#
+# Replace the site address with a name that resolves to the host (an sslip.io
+# name over the server's IP is enough for Caddy's HTTP-01 challenge), and point
+# the two upstreams at the published loopback ports of the two services.
+#
+# Keep the callback handle in front of the catch-all: Caddy evaluates handle
+# blocks in the order they appear, and the first match wins.
+music.example.invalid {
+	encode gzip
+	@callback path /wecom/*
+	handle @callback {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse, shutil, subprocess, sys, urllib.request, urllib.parse
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
-COMPOSE=ROOT/'compose.prod.yaml'; NGINX=ROOT/'deploy/nginx/musicdl.conf'; CADDY=ROOT/'deploy/caddy/Caddyfile'
+COMPOSE=ROOT/'compose.prod.yaml'; NGINX=ROOT/'deploy/nginx/musicdl.conf'; CADDY=ROOT/'deploy/caddy/Caddyfile'; PANEL_EDGE=ROOT/'deploy/caddy/panel-edge.Caddyfile'
 def _python():
  p=ROOT/'.venv'/'Scripts'/'python.exe'
  if p.exists(): return p
@@ -15,8 +15,12 @@ def compose_contract(t=None):
  cs=[('services:\n  musicdl:' in t and '  admin-panel:' in t and '  plugin-runner:' in t,'three application services'),('redis:' not in t and 'MUSICDL_REDIS__URL: "${MUSICDL_REDIS__URL:?' in t,'external Redis only'),(t.count('user: "10001:10001"')==3,'every service non-root'),(t.count('read_only: true')==3 and t.count('cap_drop: [ALL]')==3 and t.count('no-new-privileges:true')==3,'read-only root and privilege boundary'),(t.count('limits:')==3 and t.count('cpus:')==3 and t.count('memory:')==3,'hard CPU/memory limits'),(t.count('healthcheck:')==3 and 'internal: true' in t,'health probes and internal network')]
  return all(report('compose','PASS' if ok else 'FAIL',d) for ok,d in cs)
 def compose(): return compose_contract()
-def proxy_contract(n,c):
- cs=[('return 308 https://' in n and 'listen 443 ssl' in n and 'ssl_protocols TLSv1.2 TLSv1.3' in n,'Nginx HTTPS/TLS'),('expires 7d' in n and 'location /api/' in n,'Nginx cache/API'),('access_log /var/log/nginx/access.log combined if=$release_loggable' in n and 'proxy_pass http://musicdl_app/wecom/callback;' in n and 'strip_query' not in n,'Nginx preserves callback query and skips its access log'),('redir https://{host}{uri} permanent' in c and 'tls /etc/caddy/tls' in c,'Caddy HTTPS/TLS'),('log_skip @callback' in c and 'uri strip_query' not in c and 'reverse_proxy musicdl:8000' in c,'Caddy preserves callback query and skips its log'),('Cache-Control' in c and 'handle_path /api/*' in c,'Caddy cache/API')]; return all(report('proxy','PASS' if ok else 'FAIL',d) for ok,d in cs)
+def one_line_blocks(t):
+ 'Caddy opens a block on one line and closes it on another; a one-liner makes the whole file unadaptable.'
+ return [ln.strip() for ln in t.splitlines() if ' {' in ln.split('#',1)[0] and '}' in ln.split('#',1)[0].split('{',1)[1]]
+def proxy_contract(n,c,p=None):
+ p=PANEL_EDGE.read_text() if p is None else p
+ cs=[('return 308 https://' in n and 'listen 443 ssl' in n and 'ssl_protocols TLSv1.2 TLSv1.3' in n,'Nginx HTTPS/TLS'),('expires 7d' in n and 'location /api/' in n,'Nginx cache/API'),('access_log /var/log/nginx/access.log combined if=$release_loggable' in n and 'proxy_pass http://musicdl_app/wecom/callback;' in n and 'strip_query' not in n,'Nginx preserves callback query and skips its access log'),('redir https://{host}{uri} permanent' in c and 'tls /etc/caddy/tls' in c,'Caddy HTTPS/TLS'),('log_skip @callback' in c and 'uri strip_query' not in c and 'reverse_proxy musicdl:8000' in c,'Caddy preserves callback query and skips its log'),('Cache-Control' in c and 'handle_path /api/*' in c,'Caddy cache/API'),(not one_line_blocks(c) and not one_line_blocks(p),'every Caddy block opens and closes on its own line'),('path /wecom/*' in p and 'reverse_proxy 127.0.0.1:8000' in p and 'reverse_proxy 127.0.0.1:3000' in p,'panel edge sends the callback to the product and the rest to the console')]; return all(report('proxy','PASS' if ok else 'FAIL',d) for ok,d in cs)
 def proxy():
  n,c=NGINX.read_text(),CADDY.read_text(); return proxy_contract(n,c)
 def telegram_contract(t):

@@ -144,7 +144,7 @@ curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 从服务跑起来到真正可用还需要三步：
 
 1. 通过 HTTPS 反向代理访问 `/admin/`，或走浏览器视为可信主机的回环隧道。所有 Cookie 都带 `Secure` 标记，明文 HTTP 无法进入后台。未登录访问会直接收到登录页本身；在改掉默认凭证之前，除 `/admin/`、`/admin/change-credentials` 与 `/admin/change-credentials-form` 之外的每个路由都会返回 `403`。
-2. 通过 `POST /admin/sources` 安装音源插件，或通过 `POST /admin/bots` 定义一个 Telegram Bot，然后在后台搜索并下载一次，确认该音源确实可用。没有任何已启用音源的部署没有可搜索的内容。
+2. 通过 `POST /admin/sources` 安装音源插件，或通过 `POST /admin/bots` 定义一个 Telegram Bot，然后在后台搜索并下载一次，确认该音源确实可用。没有任何已启用音源的部署没有可搜索的内容。镜像自带 `music_v1bot` 定义（默认命令 `/search {query}`），所以新装的部署不用先定义 Bot 就有这一条；不想用它就在 Bot 管理页改名、禁用或删除，删掉之后重启也不会复活。
 3. 用 `MUSICDL_WECOM__ENABLED=true` 以及下表中的凭证开启企业微信边界，然后在企业微信中发送 `/search <关键词>`。这个边界是可选的：没有它后台照样能用。
 
 ## 配置
@@ -168,7 +168,7 @@ curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 | `MUSICDL_PLUGIN__SERVICE_URL` | 由 Compose 设置 | 插件运行器内部地址 `http://plugin-runner:8080`。 |
 | `MUSICDL_PLUGIN__APP_DATA_ROOT` | 可选 | 已安装插件代码的存放位置，默认 `/data/app`。 |
 | `MUSICDL_MEDIA__ROOT` | 由 Compose 设置 | 主服务的媒体挂载点 `/data/music`。 |
-| `MUSICDL_TELEGRAM__ENABLED` | 可选 | 注册 Telegram 连接器与后台维护的 Bot 定义，默认 `false`。 |
+| `MUSICDL_TELEGRAM__ENABLED` | 可选 | 注册 Telegram 连接器与后台维护的 Bot 定义，默认 `false`；连接器未开启时内置的 `music_v1bot` 定义仍会出现在后台，但不会被注册成音源。 |
 | `MUSICDL_TELEGRAM__API_ID`、`__API_HASH` | 开启 Telegram 时 | Telegram 应用凭证。 |
 | `MUSICDL_TELEGRAM__PROFILE`、`__SESSION_ROOT` | 可选 | 受限 session 的档案名与挂载点，默认 `default` 与 `/data/telegram-sessions`。 |
 | `MUSICDL_AI__ENABLED` | 可选 | 辅助排序与语言分类，默认 `false`。 |
@@ -192,7 +192,7 @@ curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 | `GET /admin/sources`、`POST /admin/sources` | 列出并安装音源插件。 |
 | `POST /admin/sources/analyze` | 预览一次导入且不写入任何内容。 |
 | `PATCH /admin/sources/{id}`、`DELETE /admin/sources/{id}` | 启用、调整优先级或删除音源。 |
-| `GET /admin/bots`、`POST /admin/bots`、`PATCH /admin/bots/{id}`、`DELETE /admin/bots/{id}` | 维护会成为搜索源的 Telegram Bot。 |
+| `GET /admin/bots`、`POST /admin/bots`、`PATCH /admin/bots/{id}`、`DELETE /admin/bots/{id}` | 维护会成为搜索源的 Telegram Bot；没有存过 Bot 列表的部署从内置的 `music_v1bot` 开始。 |
 | `GET /admin/health` | 汇总依赖健康度。 |
 | `GET /admin/config`、`PATCH /admin/config` | 读出面板能改的每一项、它当前的来源与生效值（密钥只回答“是否已设置”），并按批校验后保存一组改动。 |
 | `GET /admin/sources/health` | 每个音源最近若干次搜索与下载的成败汇总，附最后一次报错的阶段与代码。 |
@@ -289,7 +289,7 @@ python -m pytest -q -W error
 | 运行时配置 | 每个配置分组及其默认值，集中在同一个模型里声明 | [config.py](./src/musicdl/config.py) |
 | 部署形态 | 服务、卷、网络与安全选项 | [compose.yaml](./compose.yaml) |
 | 生产限制 | 每个服务的 CPU、内存与重启策略 | [compose.prod.yaml](./compose.prod.yaml) |
-| 反向代理 | 位于后台之前终止 TLS 的 Nginx 与 Caddy 模板 | [deploy](./deploy) |
+| 反向代理 | 位于后台之前终止 TLS 的 Nginx 与 Caddy 模板；`deploy/caddy/panel-edge.Caddyfile` 是只跑面板的部署，把 `/wecom/*` 送回产品进程，其余请求交给控制台 | [deploy](./deploy) |
 | 面板镜像 | 控制台如何构建、后端地址在哪里固定，以及它如何以容器方式运行 | [docker/web/Dockerfile](./docker/web/Dockerfile) |
 | 控制台结构 | 面板的目录结构与契约检查命令 | [web/STRUCTURE.md](./web/STRUCTURE.md) |
 | 发布门禁 | 门禁脚本、篡改自检与备份演练 | [run_gates.py](./scripts/release/run_gates.py) |
