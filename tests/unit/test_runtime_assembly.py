@@ -18,7 +18,8 @@ def _settings():
     return SimpleNamespace(
         redis=SimpleNamespace(url=_Secret("redis://runtime-test/0"), connect_timeout=1.5, operation_timeout=2.5),
         media=SimpleNamespace(root="/data/music"),
-        wecom=SimpleNamespace(enabled=True, corp_id="corp-test", secret=_Secret("wecom-secret"), agent_id=7, selection_ttl=321),
+        wecom=SimpleNamespace(enabled=True, corp_id="corp-test", secret=_Secret("wecom-secret"), agent_id=7,
+                              api_base="http://proxy.example:9080", selection_ttl=321),
         plugin=SimpleNamespace(service_url="http://plugin:8080", app_data_root="/data/app"),
         ai=SimpleNamespace(enabled=True, api_key=_Secret("ai-key"), model="test-model", timeout=3.0, max_candidates=10),
         worker=SimpleNamespace(search_timeout=8.0, resolve_stream_timeout=15.0, health_timeout=5.0,
@@ -135,6 +136,8 @@ def test_build_runtime_wires_wecom_secret_and_redis_settings(runtime_fakes):
     client = runtime.wecom
     assert client.args[:3] == ("corp-test", "wecom-secret", 7)
     assert client.args[3] is runtime.redis
+    # Where the outbound calls go is the deployment's choice, not a constant.
+    assert client.kwargs["base_url"] == "http://proxy.example:9080"
     assert runtime.redis.args[0] == "redis://runtime-test/0"
     assert runtime.redis.kwargs["socket_connect_timeout"] == 1.5
     assert runtime.redis.kwargs["socket_timeout"] == 2.5

@@ -308,7 +308,8 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
         state = RedisStateStore(redis)
         service = WeComService(settings.wecom, state, clock or time.time)
         wecom = WeComClient(settings.wecom.corp_id, settings.wecom.secret.get_secret_value(),
-                            settings.wecom.agent_id, redis)
+                            settings.wecom.agent_id, redis,
+                            base_url=str(settings.wecom.api_base))
     plugin_client = PluginClient(str(settings.plugin.service_url), broker=HttpsActionBroker())
     transport = SecureMediaTransport()
     # Every installed lx source resolves against the same four catalogues, so

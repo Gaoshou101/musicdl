@@ -160,6 +160,7 @@ curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 | `MUSICDL_ADMIN_PORT` | 可选 | Compose 为面板发布的回环端口，默认 `3000`。 |
 | `MUSICDL_WECOM__ENABLED` | 需要对外服务时 | 开启回调边界，默认 `false`。 |
 | `MUSICDL_WECOM__CORP_ID`、`__AGENT_ID`、`__TOKEN`、`__SECRET` | 开启企业微信时 | 企业 ID、应用 AgentId、回调 Token 与应用 Secret。 |
+| `MUSICDL_WECOM__API_BASE` | 可选 | 出网 API 地址，默认官方 `https://qyapi.weixin.qq.com`。海外部署可指向国内的反向代理（例如 `ddsderek/wxchat` 的 `http://主机:9080`），这样 `gettoken` 与发消息都从可信 IP 发出；注意公网明文 HTTP 会让应用 Secret 暴露在链路上。 |
 | `MUSICDL_WECOM__ENCODING_AES_KEY` | 开启企业微信时 | 43 位 EncodingAESKey，解码后必须是 32 字节。 |
 | `MUSICDL_WECOM__ALLOWED_USERS` | 开启企业微信时 | 白名单；为空时启动失败。 |
 | `MUSICDL_ADMIN__ENABLED` | 可选 | 是否挂载 `/admin`，默认 `true`。 |

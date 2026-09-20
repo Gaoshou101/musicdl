@@ -76,6 +76,11 @@ GROUPS: tuple[ConfigGroup, ...] = (
             ConfigField("wecom.agent_id", "应用 AgentId", "int", "企微应用的 AgentId。"),
             ConfigField("wecom.token", "回调 Token", "secret", "回调签名 Token，留空表示不修改。"),
             ConfigField("wecom.secret", "应用 Secret", "secret", "应用 Secret，留空表示不修改。"),
+            ConfigField("wecom.api_base", "消息代理地址", "text",
+                        "出网 API 地址，留空即用官方 https://qyapi.weixin.qq.com。"
+                        "海外部署可指向国内的反向代理（例如 ddsderek/wxchat 的 http://主机:9080），"
+                        "gettoken 与发消息就从可信 IP 发出；只需写协议、主机和端口，路径会被拼在后面。"
+                        "注意：公网明文 HTTP 会让应用 Secret 暴露在链路上，能上就上 HTTPS。"),
             ConfigField("wecom.encoding_aes_key", "EncodingAESKey", "secret",
                         "43 位 EncodingAESKey，解码后必须是 32 字节。"),
             ConfigField("wecom.allowed_users", "白名单", "list",

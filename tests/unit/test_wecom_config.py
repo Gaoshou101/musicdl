@@ -90,3 +90,34 @@ def test_enabled_rejects_missing_or_blank_outbound_secret(monkeypatch, secret):
         monkeypatch.setenv("MUSICDL_WECOM__SECRET", secret)
     with pytest.raises(ValidationError):
         AppSettings()
+
+
+def _official_endpoint() -> str:
+    return "https://qyapi.weixin.qq.com"
+
+
+def test_outbound_api_base_defaults_to_the_official_endpoint():
+    assert str(WeComSettings().api_base).rstrip("/") == _official_endpoint()
+
+
+def test_outbound_api_base_accepts_a_mainland_reverse_proxy():
+    settings = WeComSettings(api_base="http://115.159.107.211:9080")
+    assert str(settings.api_base).rstrip("/") == "http://115.159.107.211:9080"
+
+
+def test_outbound_api_base_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("MUSICDL_WECOM__API_BASE", "  http://proxy.example:9080/  ")
+    assert str(AppSettings().wecom.api_base).rstrip("/") == "http://proxy.example:9080"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None])
+def test_a_blank_outbound_api_base_means_the_official_endpoint(blank):
+    """Clearing the panel field is how an operator asks for the official API."""
+    assert str(WeComSettings(api_base=blank).api_base).rstrip("/") == _official_endpoint()
+
+
+@pytest.mark.parametrize("value", ["115.159.107.211:9080", "qyapi.weixin.qq.com",
+                                   "ftp://proxy.example:9080", "not a url"])
+def test_outbound_api_base_must_be_an_http_url(value):
+    with pytest.raises(ValidationError):
+        WeComSettings(api_base=value)

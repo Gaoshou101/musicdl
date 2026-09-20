@@ -70,11 +70,30 @@ class WeComSettings(BaseModel):
     agent_id: int | None = Field(default=None, gt=0)
     token: SecretStr | None = None
     secret: SecretStr | None = None
+    # Where every outbound API call goes. A deployment outside mainland China
+    # points this at a reverse proxy in front of qyapi.weixin.qq.com, which is
+    # also what puts the request behind an address the corporation trusts.
+    api_base: AnyHttpUrl = AnyHttpUrl("https://qyapi.weixin.qq.com")
     encoding_aes_key: SecretStr | None = None
     allowed_users: list[str] = Field(default_factory=list)
     clock_skew: int = Field(default=300, ge=1, le=3600)
     dedup_ttl: int = Field(default=86400, ge=60, le=604800)
     selection_ttl: int = Field(default=600, ge=60, le=86400)
+
+    @field_validator("api_base", mode="before")
+    @classmethod
+    def api_base_falls_back_to_the_official_endpoint(cls, value: object):
+        """An empty box in the panel means the official endpoint, not a failure.
+
+        The panel sends the empty string when an operator clears the field, and
+        ``AnyHttpUrl`` would reject that; the deployment's documented default is
+        what the operator just asked for.
+        """
+        if value is None:
+            return "https://qyapi.weixin.qq.com"
+        if isinstance(value, str):
+            return value.strip() or "https://qyapi.weixin.qq.com"
+        return value
 
     @model_validator(mode="after")
     def enabled_requires_credentials(self):
