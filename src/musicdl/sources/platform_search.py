@@ -21,7 +21,9 @@ does not move this boundary by one host.
 
 One upstream search per ``(platform, query)`` is shared by every installed lx
 source, because they all resolve against the same catalogue.  Twelve sources
-cost four requests per query rather than forty-eight.
+cost four requests per query rather than forty-eight, and a catalogue measured
+to answer an empty envelope by accident may be asked again inside the same
+per-query budget.
 
 What comes back is one candidate per hit, tagged with the identity of one
 installed lx source, the ``lx:<platform>:<songId>`` item id its shim decodes
@@ -45,6 +47,7 @@ import html
 import json
 import math
 import re
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -221,6 +224,10 @@ class _Platform:
     rows_path: tuple[str, ...]
     read: Callable[[Mapping[str, Any]], tuple]
     id_pattern: re.Pattern[str]
+    # How many draws one query gets from this platform.  One everywhere the
+    # platform answers what it was asked, because a second request there would
+    # only be load on the upstream.
+    attempts: int = 1
 
 
 _PLATFORMS: dict[str, _Platform] = {
@@ -251,12 +258,22 @@ _PLATFORMS: dict[str, _Platform] = {
             f"https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w={quote(keyword, safe='')}"
             f"&format=json&n={limit}&p=1"),
         rows_path=("data", "song", "list"), read=_tx_read, id_pattern=_SAFE_ID),
+    # Measured 2026-09-20 from this deployment: this host answers a well-formed
+    # envelope whose ``data.total`` is 0 and whose ``lists`` is empty for about
+    # half the queries it holds hundreds of rows for -- four of twelve queries
+    # answered with twenty rows at 1.7 s each, and in a ten-round interleaved
+    # A/B a per-request random id changed nothing (6/10 against 7/10).  An
+    # empty envelope from here is therefore not evidence of an empty catalogue,
+    # so the query is drawn again.  Kuwo, NetEase, and QQ answered six of six
+    # with the same queries and never answered empty, which is why they keep a
+    # single draw.  Three draws take a silent query from one chance in three to
+    # about seven in eight, and still fit inside one ``timeout``.
     "kg": _Platform(
         name="kg", host="songsearch.kugou.com", referer="https://www.kugou.com/",
         url=lambda keyword, limit: (
             f"https://songsearch.kugou.com/song_search_v2?keyword={quote(keyword, safe='')}"
             f"&page=1&pagesize={limit}"),
-        rows_path=("data", "lists"), read=_kg_read, id_pattern=_HEX_ID),
+        rows_path=("data", "lists"), read=_kg_read, id_pattern=_HEX_ID, attempts=3),
 }
 
 
@@ -356,22 +373,37 @@ class PlatformSearch:
         spec = _PLATFORMS[platform]
         action = HttpAction(action_id=f"search-{spec.name}", url=spec.url(query, self.limit),
                             headers={"Referer": spec.referer})
-        try:
-            observation = await asyncio.to_thread(self.broker.fetch, action, SEARCH_HOSTS,
-                                                  timeout=self.timeout)
-        except ActionDenied as exc:
-            raise PlatformSearchError(f"search_{exc.code}") from exc
-        except PlatformSearchError:
-            raise
-        except Exception as exc:  # noqa: BLE001 -- every transport failure is one outcome
-            raise PlatformSearchError("search_failed") from exc
-        if not 200 <= int(observation.status_code) < 300:
-            raise PlatformSearchError("search_failed")
-        try:
-            payload = decode_body(observation.body)
-        except Exception as exc:  # noqa: BLE001 -- a non-JSON answer is an empty answer
-            raise PlatformSearchError("search_unreadable") from exc
-        return parse_hits(platform, payload)
+        # Every draw of one platform's query shares this one budget, so asking
+        # a platform again -- which only happens where an empty envelope was
+        # measured to be unreliable -- cannot make the platform as a whole
+        # outlive the timeout its caller set.
+        deadline = time.monotonic() + self.timeout
+        for attempt in range(spec.attempts):
+            remaining = deadline - time.monotonic()
+            timeout = self.timeout if spec.attempts == 1 else remaining / (spec.attempts - attempt)
+            try:
+                observation = await asyncio.to_thread(self.broker.fetch, action, SEARCH_HOSTS,
+                                                      timeout=timeout)
+            except ActionDenied as exc:
+                # Running out of time on one draw is one more reason to make
+                # the next one, if there is a next one left to make.
+                if exc.code == "timeout" and attempt + 1 < spec.attempts:
+                    continue
+                raise PlatformSearchError(f"search_{exc.code}") from exc
+            except PlatformSearchError:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- every transport failure is one outcome
+                raise PlatformSearchError("search_failed") from exc
+            if not 200 <= int(observation.status_code) < 300:
+                raise PlatformSearchError("search_failed")
+            try:
+                payload = decode_body(observation.body)
+            except Exception as exc:  # noqa: BLE001 -- a non-JSON answer is an empty answer
+                raise PlatformSearchError("search_unreadable") from exc
+            hits = parse_hits(platform, payload)
+            if hits or attempt + 1 == spec.attempts:
+                return hits
+        return ()
 
 
 def _consume(task: asyncio.Future) -> None:
