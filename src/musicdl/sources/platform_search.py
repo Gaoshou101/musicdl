@@ -258,16 +258,23 @@ _PLATFORMS: dict[str, _Platform] = {
             f"https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w={quote(keyword, safe='')}"
             f"&format=json&n={limit}&p=1"),
         rows_path=("data", "song", "list"), read=_tx_read, id_pattern=_SAFE_ID),
-    # Measured 2026-09-20 from this deployment: this host answers a well-formed
-    # envelope whose ``data.total`` is 0 and whose ``lists`` is empty for about
-    # half the queries it holds hundreds of rows for -- four of twelve queries
-    # answered with twenty rows at 1.7 s each, and in a ten-round interleaved
-    # A/B a per-request random id changed nothing (6/10 against 7/10).  An
-    # empty envelope from here is therefore not evidence of an empty catalogue,
-    # so the query is drawn again.  Kuwo, NetEase, and QQ answered six of six
-    # with the same queries and never answered empty, which is why they keep a
-    # single draw.  Three draws take a silent query from one chance in three to
-    # about seven in eight, and still fit inside one ``timeout``.
+    # Measured 2026-09-20 from this deployment.  This host answers a well-formed
+    # envelope whose ``data.total`` is 0 and whose ``lists`` is empty for a
+    # query it holds hundreds of rows for: twelve queries drawn once produced
+    # rows four times, and forty spaced draws of eight of those queries
+    # produced rows fourteen times, at 0.8-3.1 s each.  An empty envelope here
+    # is therefore not evidence of an empty catalogue, and reading it as one is
+    # what left every kg column of the download matrix blank.
+    #
+    # The draws are made one after another because drawing three at once was
+    # measured to answer *less*: five of those same twelve queries, against
+    # eight for three in a row.  A per-request random id, a larger parameter
+    # set, and the signed ``complexsearch`` endpoint were each measured and
+    # none of them changed the answer.
+    #
+    # Kuwo, NetEase, and QQ answered six of six queries with the same text and
+    # never answered empty, so a second request to them would be load on the
+    # upstream and nothing else.  They keep a single draw.
     "kg": _Platform(
         name="kg", host="songsearch.kugou.com", referer="https://www.kugou.com/",
         url=lambda keyword, limit: (
