@@ -173,6 +173,16 @@ async function main() {
   const channels = await api.listSourceHealth()
   check('source health lists the channels the panel can use', Array.isArray(channels.sources), `${channels.total} 个渠道`)
 
+  // The Telegram session the bots are called with: the panel reads the session's
+  // own state, not a configuration mirror, so an operator who has filled in
+  // api_id and api_hash still sees `invalid_session` until a login completes.
+  const telegram = await api.readTelegram()
+  check(
+    'telegram reports a session state rather than echoing the configuration',
+    typeof telegram.enabled === 'boolean' && typeof telegram.available === 'boolean' && 'status' in telegram,
+    `enabled=${telegram.enabled} available=${telegram.available} status=${telegram.status}`,
+  )
+
   if (suite === 'remote') {
     const search = await api.searchCandidates('晴天', 5)
     check('search answers with candidates', Array.isArray(search.candidates), `${search.count}/${search.total} 条，${search.sources.length} 个音源`)

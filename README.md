@@ -26,7 +26,7 @@
 | AI only advises, and ships disabled | With `MUSICDL_AI__ENABLED=false`, ranking and language classification stay deterministic. An enabled advisor that fails leaves the deterministic verdict in place. |
 | The panel exercises the sources on its own | `GET /admin/search`, `POST /admin/download`, and `GET /admin/media/{path}` run the registry the workers run, so a source is proved out without sending the bot a message. |
 | Dependency health separates "nothing to do" from "broken" | `/admin/health` answers `ok`, `failed`, or `not_required`, so a dependency with nothing to do in this deployment does not turn a working panel red. |
-| The running configuration is editable from the panel | `GET /admin/config` and `PATCH /admin/config` move the WeCom, Redis, Telegram, AI, and worker budgets out of the host's `.env` and into the panel, where a change is saved once and the container is not rebuilt; secrets are write-only, and the settings only Compose owns say so. |
+| The running configuration is editable from the panel | `GET /admin/config` and `PATCH /admin/config` move the WeCom, Redis, Telegram, AI, and worker budgets out of the host's `.env` and into the panel. Every setting the panel owns is adopted in place: the save rebuilds the runtime from the settings in force, replaces its workers, and reports the rebuild back to the page, so a changed credential, budget, or Bot does not cost a restart. Secrets are write-only, and the settings only Compose owns say so. |
 | Channel health answers "which source is broken" | `GET /admin/sources/health` rolls the panel's own searches and downloads up into one verdict per source (working, flaky, failing, unproven), a success rate over the last handful of attempts, and the last error. Dependency health says whether Redis is up; this says whether one channel can still serve. |
 | One broken channel no longer sinks the whole panel | The panel's own search prefers the channel it has observed answering when two channels tie, and a failed download refreshes the same query once and retries a single time on another channel's copy of the same recording. |
 | The panel can read the service's own log | `GET /admin/logs` serves the most recent lines this process logged -- level, logger, message, exception text -- with a cursor and a level filter; URL query strings and credential-shaped fields are redacted before a line enters the window. |
@@ -144,14 +144,14 @@ The panel answers `{"status":"ok"}` on its own `/healthz`, the one route it serv
 Three more steps take the deployment from running to useful:
 
 1. Reach `/admin/` through an HTTPS reverse proxy, or through a loopback tunnel where browsers treat the host as trustworthy. Every cookie is marked `Secure`, so the panel is unreachable over plain HTTP. An unauthenticated visit is answered with the login page itself, and until the default credentials change every route except `/admin/`, `/admin/change-credentials`, and `/admin/change-credentials-form` answers `403`.
-2. Install a source plugin with `POST /admin/sources`, or define a Telegram Bot with `POST /admin/bots`, and then search and download from the panel to prove the source answers. A deployment with no enabled source has nothing to search. The image ships a `music_v1bot` definition (the default `/search {query}` contract), so a fresh install already has one; rename, disable or delete it from the Bot page and the deletion sticks across restarts.
+2. Install a source plugin with `POST /admin/sources`, or define a Telegram Bot with `POST /admin/bots`, and then search and download from the panel to prove the source answers. A deployment with no enabled source has nothing to search. The image ships a `music_v1bot` definition (the default `/search {query}` contract), so a fresh install already has one; rename, disable or delete it from the Bot page and the deletion sticks across restarts. A Telegram Bot needs an authorised account behind it: `api_id` and `api_hash` wire the client, and the Bot page's own login card finishes the one-time sign-in (phone number, the code Telegram sends, and the two-step password when the account has one), so the Bot page says `未登录` instead of every search failing with `invalid_session`.
 3. Enable the WeCom boundary with `MUSICDL_WECOM__ENABLED=true` and the credentials listed below, then send `/search <query>` from WeCom. The boundary is optional: the panel works without it.
 
 ## Configuration
 
 All settings use the `MUSICDL_` prefix with `__` as the nesting delimiter. Copy `.env.example` to `.env` and replace only the placeholders; never commit `.env` or real credentials.
 
-Part of the table below can also be moved into the panel: it keeps its own layer of overrides in the state file and applies them over the deployment's variables at startup. The panel only knows the fields it declares, and each one carries where its value came from (panel override, deployment variable, or default) and when it takes effect (immediately, or on the next start). The settings only Compose can change — published ports, volume mounts, resource limits — are listed separately with the variable to set, instead of being offered as a control that would lie.
+Part of the table below can also be moved into the panel: it keeps its own layer of overrides in the state file and applies them over the deployment's variables at startup. The panel only knows the fields it declares, and each one carries where its value came from (panel override, deployment variable, or default). Every field it owns is adopted immediately — a save only reloads the runtime when a field the runtime actually reads has changed, and the reply says which generation the reload produced — so the settings only Compose can change (published ports, volume mounts, resource limits) are listed separately with the variable to set, instead of being offered as a control that would lie.
 
 | Variable | Required | Purpose |
 |---|---|---|
@@ -194,8 +194,11 @@ The panel lives at `/admin` and works on its own: the registry it searches throu
 | `POST /admin/sources/analyze` | Previews one import and stores nothing. |
 | `PATCH /admin/sources/{id}`, `DELETE /admin/sources/{id}` | Enable, reprioritise, or remove a source. |
 | `GET /admin/bots`, `POST /admin/bots`, `PATCH /admin/bots/{id}`, `DELETE /admin/bots/{id}` | Define and edit the Telegram Bots that become search sources; a deployment that never stored a bot list starts from the built-in `music_v1bot`. |
+| `GET /admin/telegram` | The stored Telegram session's own state (`ready`, `invalid_session`, `code_required`, `password_required`, `rate_limited`, `error`) and the masked number a half-finished login waits on. |
+| `POST /admin/telegram/login`, `POST /admin/telegram/login/verify`, `POST /admin/telegram/login/password` | The one-time sign-in: send the code to a phone number, submit the code, then the two-step password if the account has one. |
+| `POST /admin/telegram/logout` | Forget the stored session, so the next login starts from a fresh code. |
 | `GET /admin/health` | Aggregated dependency health. |
-| `GET /admin/config`, `PATCH /admin/config` | Read every setting the panel owns with its source and the value in force (a secret only answers whether one is set), then validate and store one batch of changes. |
+| `GET /admin/config`, `PATCH /admin/config` | Read every setting the panel owns with its source and the value in force (a secret only answers whether one is set), then validate and store one batch of changes; the write is adopted in place and the reply carries the rebuild under `reload` (`reloaded`, `failed`, or `skipped`). |
 | `GET /admin/sources/health` | Per-source roll-up of the last searches and downloads, with the stage and code of the last failure. |
 | `GET /admin/events`, `GET /admin/audit` | Paginated event and audit logs. |
 | `GET /admin/logs` | The in-memory window onto this process's own log records: cursor (`after`) paging and a `level` filter, for "what did the service print" rather than "what did the panel ask". |
@@ -210,9 +213,13 @@ Mutating routes need the double-submit CSRF token. State is written to `MUSICDL_
 
 That same state file carries the panel's own layer of settings under a `settings` key: a field the panel changed is recorded there, a field it did not is still decided by the deployment's environment, and only a field neither layer sets falls back to a default. A batch is validated and written as a whole, so one illegal value refuses the whole batch rather than storing half of it; a stored value this build can no longer accept is dropped at startup and listed on the page. Secrets never come back out — leaving one blank keeps the stored value, and only an explicit `null` clears the override and lets the deployment's value stand again.
 
+Changing any of it does not need a restart. A save that moves a field the runtime reads — a WeCom credential or proxy, a Telegram Bot list, a Redis URL, a worker budget — rebuilds the runtime in place: the next runtime is assembled from the settings in force *before* the running one is touched, so a build that fails leaves the working deployment alone, the workers of the runtime that was replaced are cancelled and their new counterparts take over, and every mutating reply carries the outcome under `reload` (`reloaded` with the generation and channel count, `failed` with the reason, or nothing at all when the change touched neither). A cancelled worker leaves its message pending in its Redis stream, where the next runtime's `XAUTOCLAIM` finds it, so a reload costs a retry rather than a message: `docker ps` shows the same `Up` time across a credential change.
+
 ## Web Panel
 
 `web/` holds an optional Next.js dashboard that talks only to the routes above, with pages for the overview, sources, Bots, the running configuration, health, logs, and credentials. It rewrites its own `/api/*` calls to the app's `/admin/*` routes, and it fixes the app's origin while it builds rather than when it runs. The configuration page shows the fields the panel owns next to the container settings only Compose owns, and saves the whole batch of edits at once.
+
+The Bot page also carries the Telegram account the definitions are called with: the session's own state, a first login in three steps (number, code, two-step password), and a sign-out that forgets the stored session. A Bot definition says which bot to ask; this card is what makes the asking possible.
 
 ```bash
 cd web
