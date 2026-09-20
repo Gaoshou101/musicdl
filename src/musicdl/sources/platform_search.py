@@ -232,11 +232,18 @@ _PLATFORMS: dict[str, _Platform] = {
             f"https://search.kuwo.cn/r.s?all={quote(keyword, safe='')}"
             f"&ft=music&itemset=web_2013&client=kt&pn=0&rn={limit}&rformat=json&encoding=utf8"),
         rows_path=("abslist",), read=_kw_read, id_pattern=_SAFE_ID),
+    # NetEase answers the documented ``{"result": {"songs": [...]}}`` envelope
+    # only on ``/api/search/get``.  Measured 2026-09-20: the ``/web`` suffix
+    # this module used to ask answers a 36 KiB body whose ``result`` is one hex
+    # string -- an encrypted envelope the row reader below can take nothing out
+    # of, which is why every wy column was empty -- and ``/api/cloudsearch/pc``
+    # answers the newer ``ar``/``al`` row shape this reader does not read.  The
+    # suffix is the whole difference: one query parsed twenty rows.
     "wy": _Platform(
         name="wy", host="music.163.com", referer="https://music.163.com/",
         url=lambda keyword, limit: (
-            f"https://music.163.com/api/search/get/web?s={quote(keyword, safe='')}"
-            f"&type=1&limit={limit}"),
+            f"https://music.163.com/api/search/get?s={quote(keyword, safe='')}"
+            f"&type=1&offset=0&limit={limit}"),
         rows_path=("result", "songs"), read=_wy_read, id_pattern=_SAFE_ID),
     "tx": _Platform(
         name="tx", host="c.y.qq.com", referer="https://y.qq.com/",

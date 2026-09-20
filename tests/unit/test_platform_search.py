@@ -216,6 +216,21 @@ def test_each_platform_is_asked_at_its_own_host_with_the_referer_it_requires():
     assert asked["search-kw"].headers == {"Referer": "https://www.kuwo.cn/"}
 
 
+def test_netease_is_asked_at_the_endpoint_that_still_answers_the_documented_envelope():
+    # Measured 2026-09-20: ``/api/search/get/web`` answers a 36 KiB body whose
+    # ``result`` is one hex string -- an encrypted envelope every wy column
+    # came back empty from -- while ``/api/search/get`` still answers
+    # ``{"result": {"songs": [...]}}`` and parsed twenty rows for one query.
+    # The suffix is the whole difference, so the URL is pinned here.
+    search, broker = search_of({"wy": observation(WY_PAYLOAD)})
+
+    hits = asyncio.run(search.hits("wy", "夜曲"))
+
+    assert broker.calls[0]["action"].url == (
+        "https://music.163.com/api/search/get?s=%E5%A4%9C%E6%9B%B2&type=1&offset=0&limit=20")
+    assert [hit.song_id for hit in hits] == ["2725685941"]
+
+
 def test_the_search_policy_is_the_four_hosts_and_a_bare_policy_object():
     search, broker = search_of({"kw": observation(KW_BODY)})
     asyncio.run(search.hits("kw", "夜曲"))
