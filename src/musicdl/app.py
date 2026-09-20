@@ -524,8 +524,14 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
     async def wecom_get(request: Request) -> PlainTextResponse:
         if not settings.wecom.enabled:
             return PlainTextResponse("disabled", status_code=503)
+        service = getattr(app.state, "wecom_service", None)
+        if service is None:
+            # Enabling the boundary is a restart-scoped change: the panel writes
+            # the setting at once, while the service that answers is built at
+            # start-up. Say so instead of raising at the WeCom console.
+            return PlainTextResponse("restart required", status_code=503)
         try:
-            value = await app.state.wecom_service.verify_get(request)
+            value = await service.verify_get(request)
         except ValueError:
             return PlainTextResponse("bad request", status_code=400)
         return PlainTextResponse(value)
@@ -534,8 +540,11 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
     async def wecom_post(request: Request) -> Response:
         if not settings.wecom.enabled:
             return PlainTextResponse("disabled", status_code=503)
+        service = getattr(app.state, "wecom_service", None)
+        if service is None:
+            return PlainTextResponse("restart required", status_code=503)
         try:
-            await app.state.wecom_service.handle_post(request)
+            await service.handle_post(request)
         except ValueError as exc:
             if str(exc) == "unsupported_encoding":
                 return PlainTextResponse("unsupported media", status_code=415)

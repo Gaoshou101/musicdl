@@ -68,6 +68,26 @@ def test_callback_disabled_and_health_independent(fake_state):
     asyncio.run(run())
 
 
+def test_a_boundary_enabled_but_not_restarted_answers_503_instead_of_500(fake_state):
+    """The panel writes ``wecom.enabled`` at once, the service is built at start-up.
+
+    Until that restart the route has no service to call. An operator pasting the
+    callback URL into the WeCom console has to read "restart required", not an
+    internal server error that looks like a broken deployment.
+    """
+    app = create_app(settings(), state_factory=lambda _: fake_state)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://test") as c:
+            return await c.get("/wecom/callback"), await c.post("/wecom/callback", content=b"<xml/>")
+
+    probe, post = asyncio.run(run())
+    assert probe.status_code == 503
+    assert probe.text == "restart required"
+    assert post.status_code == 503
+
+
 def test_get_validation_returns_exact_plaintext_without_redis(fake_state):
     crypto = WeComCrypto(KEY, "corp")
     ts = "1700000000"
