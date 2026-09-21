@@ -78,6 +78,11 @@ class OpenAICompatibleClient:
                         body = b"".join(chunks)
         except (httpx.ReadTimeout, asyncio.TimeoutError):
             raise AIError("timeout") from None
+        except httpx.HTTPStatusError as error:
+            # The one failure an operator can act on: 401 is a credential, 402 a
+            # balance, 429 a quota. The code stays the advisor's own, and the
+            # status travels beside it for the screen that asked.
+            raise AIError("provider_error", f"HTTP {error.response.status_code}") from None
         except httpx.HTTPError:
             raise AIError("provider_error") from None
         except ValueError:

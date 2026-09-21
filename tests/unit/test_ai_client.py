@@ -121,6 +121,9 @@ async def test_http_errors_are_provider_errors(status):
     with pytest.raises(AIError) as caught:
         await OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler)).complete_json([])
     assert caught.value.code == "provider_error"
+    # The status is the one thing an operator can act on, so it survives the
+    # collapse into a code; the endpoint's body does not.
+    assert caught.value.detail == f"HTTP {status}"
     assert "provider-secret" not in str(caught.value)
     assert "provider-secret" not in repr(caught.value)
 

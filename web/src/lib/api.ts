@@ -706,6 +706,52 @@ export function updateConfig(values: Record<string, unknown>): Promise<ConfigWri
   return request<ConfigWriteReport>('/config', { method: 'PATCH', body: { values } })
 }
 
+/** The advisor's own failure vocabulary, as the probe reports it. */
+export type AIProbeCode =
+  | 'disabled'
+  | 'unconfigured'
+  | 'timeout'
+  | 'provider_error'
+  | 'invalid_response'
+
+/**
+ * What one test request to the configured endpoint cost and said.
+ *
+ * The advisor fails silently by design -- it falls back to the deterministic
+ * answer -- so this reply is the one place an operator can tell a working key
+ * from one the endpoint answers 401 to. `detail` is the endpoint's own status
+ * line and never a body, so no completion text reaches the panel's storage.
+ */
+export type AIProbeReport = {
+  ok: boolean
+  code: AIProbeCode | null
+  detail: string | null
+  took_ms: number
+  model: string | null
+  /** How long the probe was allowed to wait, which is not the saved timeout. */
+  budget_ms: number
+  reply: string | null
+}
+
+/** What each failure means, in the words the operator needs to act on it. */
+export const AI_PROBE_TEXT: Record<AIProbeCode, string> = {
+  disabled: 'AI 辅助还没打开',
+  unconfigured: '缺少 API Key 或模型名',
+  timeout: '端点在探针预算内没有回答',
+  provider_error: '端点拒绝了这次请求',
+  invalid_response: '端点回话了，但不是约定的 JSON',
+}
+
+/**
+ * Spend one tiny request on the endpoint in force.
+ *
+ * It reads the saved settings rather than the boxes on screen, because those are
+ * what the advisor will really use, and it writes nothing.
+ */
+export function testAIEndpoint(): Promise<AIProbeReport> {
+  return request<AIProbeReport>('/config/ai-test', { method: 'POST' })
+}
+
 /**
  * Whether the stored Telegram session can talk to bots right now.
  *

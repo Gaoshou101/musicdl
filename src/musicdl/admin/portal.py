@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from typing import Any, Callable
 
 from musicdl.config import AppSettings
+from musicdl.ai.diagnose import probe_endpoint
 from musicdl.media import download_candidate, download_with_fallback
 from musicdl.media.models import MediaError
 from musicdl.plugins.install import install_source, preview_source
@@ -815,6 +816,23 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             audit.append({"action": "update_config_reload", "status": report["status"],
                           "keys": changed})
         return with_reload_report(result, report)
+
+    @router.post("/config/ai-test")
+    async def test_ai(request: Request):
+        """Spend one tiny request on the endpoint in force, and report what it said.
+
+        The advisor's failures are invisible by design -- it falls back to the
+        deterministic answer -- so an operator who has just typed a key has no
+        way to tell a working endpoint from one that answers 401 to everything.
+        This is that screen: no setting is written, and the reply carries the
+        code the advisor would have logged, the endpoint's own status line, and
+        how long the round trip took.
+        """
+        mutate(request)
+        result = await probe_endpoint(config.settings.ai)
+        audit.append({"action": "test_ai", "status": "success" if result.ok else "failed",
+                      "code": result.code})
+        return result.as_dict()
 
     @router.get("/events")
     async def event_page(request: Request, offset: int = 0, limit: int = 50):
