@@ -48,9 +48,9 @@ jobs:
   # own job: the Python gates never wait on npm, and a console that does not
   # build can never hide behind a green test suite. It ships inside the app's
   # image rather than in one of its own, so this job builds and starts that
-  # service through the deployment files themselves -- and then asks it for a
-  # page, a route, and the session boundary, because a container that starts is
-  # not yet a container that serves.
+  # service through the production Compose file itself -- and then asks it for
+  # a page, a route, and the session boundary, because a container that starts
+  # is not yet a container that serves.
   admin-panel:
     name: Admin panel image
     runs-on: ubuntu-latest
@@ -73,8 +73,11 @@ jobs:
       - name: Typecheck
         working-directory: web
         run: npx tsc --noEmit
-      - name: Build the service the deployment files describe, console included
-        run: docker compose -p console-smoke -f compose.yaml -f compose.prod.yaml build musicdl
+      - name: Build the service the deployment file describes, console included
+        # The production file, not the development one: it is what a host runs,
+        # and it layers on nothing -- combining the two would merge their
+        # sequence fields rather than replace them.
+        run: docker compose -p console-smoke -f compose.prod.yaml build musicdl
       - name: Serve one page and one route from that container
         # Every boundary in play -- read-only root filesystem, tmpfs, the
         # volume-backed data root, the user, the published port, the command --
@@ -84,7 +87,7 @@ jobs:
         # asked for, because serving the first while shadowing the second is
         # the failure this job exists to catch.
         run: |
-          compose() { docker compose -p console-smoke -f compose.yaml -f compose.prod.yaml "$@"; }
+          compose() { docker compose -p console-smoke -f compose.prod.yaml "$@"; }
           fail() { compose logs musicdl; exit 1; }
           compose up --detach --no-build musicdl || fail
           for attempt in $(seq 1 20); do

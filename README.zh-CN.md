@@ -266,7 +266,7 @@ npm run build
 | `admin-auth` | 后台相关测试文件在 `-W error` 下通过。 |
 | `compose-recovery` | 重启与卷契约成立、备份脚本能解析每个卷，并在隔离的 Redis 上完成一次恢复演练。 |
 
-CI（`.github/workflows/ci.yml`）会在每次 push 与 pull request 上运行测试套件与 `--self-test --dry-run`。托管运行器自带 Docker Engine，因此 `plugin-security` 会在那里真实执行；`wecom-callback` 与 `compose-recovery` 始终由人工执行，因为没有托管运行器能诚实地判定它们。另有一个 `admin-panel` 任务会对控制台做类型检查，然后**用部署文件本身**构建并启动应用服务——就是主机上那份只读镜像、那些卷和那条命令——再向它要 `/healthz`、控制台首页，以及 `/admin/sources` 的 `401`。在 workflow 里复述这套边界只能证明 workflow 自己写的参数，驱动 compose 才能证明真正发布出去的那个容器。
+CI（`.github/workflows/ci.yml`）会在每次 push 与 pull request 上运行测试套件与 `--self-test --dry-run`。托管运行器自带 Docker Engine，因此 `plugin-security` 会在那里真实执行；`wecom-callback` 与 `compose-recovery` 始终由人工执行，因为没有托管运行器能诚实地判定它们。另有一个 `admin-panel` 任务会对控制台做类型检查，然后**用 `compose.prod.yaml` 本身**构建并启动应用服务——就是主机上那份只读根文件系统、那些卷和那条命令——再向它要 `/healthz`、控制台首页，以及 `/admin/sources` 的 `401`。在 workflow 里复述这套边界只能证明 workflow 自己写的参数，驱动 compose 才能证明真正发布出去的那个容器。
 
 ## 开发
 

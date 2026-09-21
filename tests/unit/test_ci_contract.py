@@ -87,7 +87,10 @@ def test_ci_builds_and_then_serves_the_deployed_service_through_its_own_files():
     # this job has to build -- not a second one that could pass on its own and
     # then never be what a deployment runs.
     assert "docker compose" in ran
-    assert "compose.yaml" in ran and "compose.prod.yaml" in ran
+    # The production file is the deployment, and it is layered on nothing:
+    # combining it with the development file merges their sequence fields
+    # (`security_opt`) into a duplicate rather than replacing them.
+    assert "compose.prod.yaml" in ran and "compose.yaml" not in ran
     assert "build musicdl" in ran
     assert "up --detach --no-build" in ran
     # Serving the page is not enough: the file server must not have taken the

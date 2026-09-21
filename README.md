@@ -271,7 +271,7 @@ Some incompatibilities are deliberate: a plugin cannot import arbitrary packages
 | `admin-auth` | The admin test files pass under `-W error`. |
 | `compose-recovery` | The restart and volume contract holds, the backup script resolves every volume, and an isolated Redis recovery drill passes. |
 
-CI (`.github/workflows/ci.yml`) runs the test suite and `--self-test --dry-run` on every push and pull request. The hosted runner provides a Docker Engine, so `plugin-security` runs for real there; `wecom-callback` and `compose-recovery` stay human-run because no hosted runner can decide them honestly. A separate `admin-panel` job type-checks the dashboard, then builds and starts the app service through the deployment files themselves -- the same read-only image, volumes, and command a host would run -- and asks it for `/healthz`, the console's front page, and a `401` from `/admin/sources`. Restating that boundary in the workflow would prove the flags the workflow wrote; driving Compose proves the container that ships.
+CI (`.github/workflows/ci.yml`) runs the test suite and `--self-test --dry-run` on every push and pull request. The hosted runner provides a Docker Engine, so `plugin-security` runs for real there; `wecom-callback` and `compose-recovery` stay human-run because no hosted runner can decide them honestly. A separate `admin-panel` job type-checks the dashboard, then builds and starts the app service through `compose.prod.yaml` itself -- the same read-only root filesystem, volumes, and command a host runs -- and asks it for `/healthz`, the console's front page, and a `401` from `/admin/sources`. Restating that boundary in the workflow would prove the flags the workflow wrote; driving Compose proves the container that ships.
 
 ## Development
 
