@@ -130,6 +130,8 @@ def test_ai_is_disabled_by_default():
     assert str(settings.base_url) == "https://api.openai.com/v1"
     assert settings.timeout == 10.0
     assert settings.max_candidates == 20
+    # Unset means the HTTP client's own agent, which is what most endpoints want.
+    assert settings.user_agent is None
 
 
 def test_enabled_ai_requires_and_normalizes_credentials(monkeypatch):
@@ -164,11 +166,30 @@ def test_ai_rejects_unsupported_base_url(monkeypatch, base_url):
         AppSettings()
 
 
-@pytest.mark.parametrize("timeout", ["0", "nan", "61"])
+@pytest.mark.parametrize("timeout", ["0", "nan", "121"])
 def test_ai_rejects_invalid_timeout(monkeypatch, timeout):
     monkeypatch.setenv("MUSICDL_AI__TIMEOUT", timeout)
     with pytest.raises(ValidationError):
         AppSettings()
+
+
+def test_ai_timeout_admits_the_deadline_a_slow_relay_needs(monkeypatch):
+    """A reasoning model behind a relay answered a real ranking in 58.5 seconds."""
+    monkeypatch.setenv("MUSICDL_AI__TIMEOUT", "120")
+    assert AppSettings().ai.timeout == 120.0
+
+
+def test_ai_user_agent_is_trimmed_and_a_blank_clears_it(monkeypatch):
+    monkeypatch.setenv("MUSICDL_AI__USER_AGENT", "  claude-cli/1.0.0 (external, cli)  ")
+    assert AppSettings().ai.user_agent == "claude-cli/1.0.0 (external, cli)"
+    monkeypatch.setenv("MUSICDL_AI__USER_AGENT", "   ")
+    assert AppSettings().ai.user_agent is None
+
+
+@pytest.mark.parametrize("value", ["x" * 201, "claude-cli/1.0.0\r\nX-Injected: 1", "claude\ncli"])
+def test_ai_rejects_a_user_agent_that_is_not_one_bounded_header(value):
+    with pytest.raises(ValidationError):
+        AISettings(user_agent=value)
 
 
 @pytest.mark.parametrize("max_candidates", ["true", "0", "101"])

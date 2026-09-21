@@ -55,6 +55,25 @@ async def test_client_sends_bounded_openai_compatible_request():
 
 
 @run_sync
+async def test_client_sends_the_configured_user_agent_and_keeps_its_own_by_default():
+    """agentrouter.org answers 401 to every default agent and admits this one."""
+    seen = []
+    agent = "claude-cli/1.0.0 (external, cli)"
+
+    async def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok":true}'}}]})
+
+    flagged = OpenAICompatibleClient(settings(user_agent=agent), transport=httpx.MockTransport(handler))
+    assert await flagged.complete_json([{"role": "user", "content": "rank"}]) == {"ok": True}
+    assert seen[-1].headers["user-agent"] == agent
+
+    plain = OpenAICompatibleClient(settings(), transport=httpx.MockTransport(handler))
+    assert await plain.complete_json([{"role": "user", "content": "rank"}]) == {"ok": True}
+    assert seen[-1].headers["user-agent"] not in {"", agent}
+
+
+@run_sync
 async def test_standard_openai_response_with_metadata_is_accepted():
     async def handler(request):
         return httpx.Response(

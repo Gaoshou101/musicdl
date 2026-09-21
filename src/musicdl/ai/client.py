@@ -49,6 +49,8 @@ class OpenAICompatibleClient:
     async def complete_json(self, messages: Sequence[dict[str, str]]) -> dict[str, Any]:
         endpoint = str(self._settings.base_url).rstrip("/") + "/chat/completions"
         headers = {"Authorization": f"Bearer {self._settings.api_key.get_secret_value()}"}
+        if self._settings.user_agent:
+            headers["User-Agent"] = self._settings.user_agent
         payload = {
             "model": self._settings.model,
             "messages": list(messages),

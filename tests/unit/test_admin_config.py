@@ -121,6 +121,19 @@ def test_update_applies_live_and_persists(tmp_path):
     assert written == {"ai.enabled": True, "ai.model": "m", "ai.api_key": "k"}
 
 
+def test_the_panel_owns_the_advisory_user_agent_and_a_blank_clears_it(tmp_path):
+    """The gate is the request's agent, so the operator has to be able to set it."""
+    settings = settings_for(tmp_path)
+    manager = ConfigManager(settings)
+    assert fields_of(manager.describe())["ai.user_agent"]["value"] is None
+    manager.update({"ai.user_agent": "claude-cli/1.0.0 (external, cli)"})
+    assert settings.ai.user_agent == "claude-cli/1.0.0 (external, cli)"
+    assert fields_of(manager.describe())["ai.user_agent"]["source"] == "panel"
+    manager.update({"ai.user_agent": ""})
+    assert settings.ai.user_agent is None
+    assert fields_of(manager.describe())["ai.user_agent"]["value"] is None
+
+
 def test_the_container_knobs_are_reported_and_not_editable(tmp_path):
     manager = ConfigManager(settings_for(tmp_path))
     payload = manager.describe()

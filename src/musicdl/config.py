@@ -189,7 +189,14 @@ class AISettings(BaseModel):
     base_url: AnyHttpUrl = AnyHttpUrl("https://api.openai.com/v1")
     api_key: SecretStr | None = None
     model: str | None = Field(default=None, max_length=200)
-    timeout: float = Field(default=10.0, gt=0, le=60)
+    # Some relays only answer a particular client: agentrouter.org rejects every
+    # default Python, curl and browser User-Agent with 401 and admits
+    # "claude-cli/1.0.0 (external, cli)". The value is a header, so it is kept to
+    # a single line and bounded before it is ever sent.
+    user_agent: str | None = Field(default=None, max_length=200)
+    # A reasoning model behind a relay answered a real 20-candidate ranking in
+    # 58.5 seconds, so the ceiling has to leave room above that.
+    timeout: float = Field(default=10.0, gt=0, le=120)
     max_candidates: int = Field(default=20, ge=1, le=100)
 
     @field_validator("base_url")
@@ -205,6 +212,20 @@ class AISettings(BaseModel):
         if not math.isfinite(value):
             raise ValueError("AI timeout must be finite")
         return value
+
+    @field_validator("user_agent", mode="before")
+    @classmethod
+    def user_agent_must_be_one_header_line(cls, value: object):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("AI user agent must be a string")
+        text = value.strip()
+        if not text:
+            return None
+        if any(character in text for character in "\r\n\x00"):
+            raise ValueError("AI user agent must be a single header line")
+        return text
 
     @field_validator("max_candidates", mode="before")
     @classmethod
