@@ -44,22 +44,15 @@
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                reverse proxy   (deploy/nginx, deploy/caddy)                │
 └───────────────────────────────────────────────────────┬────────────────────┘
-       │                                                │
-       │                                                │ /admin + /api/*
-       │                                                ▼
-       │                  ┌──────────────────────────────────────────────────┐
-       │                  │       admin-panel   (uid 10001, read-only)       │
-       │                  │      rewrites /api/* to /admin/* on the app      │
-       │                  └─────────────────────────────┬────────────────────┘
-       │                                                │
-       │ /wecom (callback)                              │ http://musicdl:8000
-       ▼                                                ▼
+                                                       │  /wecom/callback, the console, and /admin
+                                                       ▼  are one port: http://musicdl:8000
 ┌────────────────────────────────────────────────────────────────────────────┐
 │            musicdl main service   (uid 10001, read-only rootfs)            │
 │                                                                            │
 │┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐│
 ││       FastAPI        │  │    MessageWorker     │  │      JobWorker       ││
-││    /wecom  /admin    │  │    search + rank     │  │   resolve+publish    ││
+││  /wecom  /admin  /   │  │    search + rank     │  │   resolve+publish    ││
+││  + static console    │  │                      │  │                      ││
 └──────────┬─────────────────────────┬─────────────────────────┬─────────────┘
            │                         │                         │
            HTTP                      redis://                  HTTPS
@@ -70,7 +63,7 @@
 └──────────────────────┘   └──────────────────────┘   └──────────────────────┘
 ```
 
-`compose.yaml` runs three application services and no Redis. The `musicdl` service owns the media, application-data, and Telegram-session volumes; `plugin-runner` is attached only to the internal `plugin-control` network and receives no secrets; `admin-panel` is built from `docker/web/Dockerfile`, runs non-root on a read-only root filesystem like the other two, publishes its own loopback port, and reaches the app through the `/api/*` rewrites the build bakes in. Redis stays external and is configured with `MUSICDL_REDIS__URL`.
+`compose.yaml` runs two application services and no Redis. The `musicdl` service owns the media, application-data, and Telegram-session volumes and serves the console from `/`, which `docker/main/Dockerfile` builds into its own image; `plugin-runner` is attached only to the internal `plugin-control` network and receives no secrets. The console is static files rather than a second runtime: production runs no Node process for it, publishes no second port, and needs no rewrite whose paths could drift from the API's. Redis stays external and is configured with `MUSICDL_REDIS__URL`.
 
 ## Usage Example
 
@@ -138,12 +131,11 @@ The GitHub repository is private, so cloning requires access to `Gaoshou101/musi
 ```bash
 docker compose ps
 curl http://127.0.0.1:${MUSICDL_PORT:-8000}/healthz
-curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 ```
 
-`/healthz` answers `{"service":"musicdl","status":"ok","config_version":1}` and deliberately contacts neither Redis nor the plugin runner, so it proves the process is up and nothing more. Readiness is separate: with WeCom enabled `/readyz` pings Redis-backed state, and with it disabled there are no workers to lose, but `/readyz` still answers `503` if the source runtime the panel searches through could not be assembled.
+One port serves the whole portal: `/` is the console, `/admin/*` is the API it calls, and `/wecom/callback` is the callback boundary. Everything above `/wecom` belongs to one process, so there is no second health endpoint to probe and no second runtime that could report itself healthy while the app was down.
 
-The panel answers `{"status":"ok"}` on its own `/healthz`, the one route it serves without a session and the exact route its Compose health check probes. It reports that the panel process is serving requests and touches nothing behind it.
+`/healthz` answers `{"service":"musicdl","status":"ok","config_version":1}` and deliberately contacts neither Redis nor the plugin runner, so it proves the process is up and nothing more. Readiness is separate: with WeCom enabled `/readyz` pings Redis-backed state, and with it disabled there are no workers to lose, but `/readyz` still answers `503` if the source runtime the panel searches through could not be assembled.
 
 Three more steps take the deployment from running to useful:
 
@@ -161,7 +153,7 @@ Part of the table below can also be moved into the panel: it keeps its own layer
 |---|---|---|
 | `MUSICDL_REDIS__URL` | Yes | External Redis endpoint; `redis://` or `rediss://`. |
 | `MUSICDL_PORT` | No | Loopback host port published by Compose. Defaults to `8000`. |
-| `MUSICDL_ADMIN_PORT` | No | Loopback host port Compose publishes for the panel. Defaults to `3000`. |
+| `MUSICDL_ADMIN__PANEL_ROOT` | No | Where the console's static export lives inside the container. The app's image sets `/app/panel`; a checkout that never built the console serves no front page at `/` and logs a warning instead of refusing to start. |
 | `MUSICDL_WECOM__ENABLED` | To serve users | Turns on the callback boundary. Defaults to `false`. |
 | `MUSICDL_WECOM__CORP_ID`, `__AGENT_ID`, `__TOKEN`, `__SECRET` | When WeCom is enabled | Corporation ID, agent ID, callback token, and application secret. |
 | `MUSICDL_WECOM__API_BASE` | Optional | Where outbound API calls go; defaults to the official `https://qyapi.weixin.qq.com`. A deployment outside mainland China can point it at a reverse proxy (for example `ddsderek/wxchat` on `http://host:9080`), so `gettoken` and message sends leave from a trusted address. Plain HTTP on a public link exposes the application secret, so prefer HTTPS where the proxy offers it. |
@@ -222,17 +214,17 @@ Changing any of it does not need a restart. A save that moves a field the runtim
 
 ## Web Panel
 
-`web/` holds an optional Next.js dashboard that talks only to the routes above, with pages for the overview, sources, Bots, the running configuration, health, logs, and credentials. It rewrites its own `/api/*` calls to the app's `/admin/*` routes, and it fixes the app's origin while it builds rather than when it runs. The configuration page shows the fields the panel owns next to the container settings only Compose owns, and saves the whole batch of edits at once.
+`web/` holds an optional Next.js dashboard that talks only to the routes above, with pages for the overview, sources, Bots, the running configuration, health, logs, and credentials. It is client-only, so `next build` exports static files that the app serves from `/`, and it calls the app's `/admin/*` routes on that same origin -- there is no rewrite to maintain and no origin to fix at build time. The configuration page shows the fields the panel owns next to the container settings only Compose owns, and saves the whole batch of edits at once.
 
 The Bot page also carries the Telegram account the definitions are called with: the session's own state, a first login in three steps (number, code, two-step password), and a sign-out that forgets the stored session. A Bot definition says which bot to ask; this card is what makes the asking possible.
 
 ```bash
 cd web
 npm install
-MUSICDL_API_ORIGIN=http://127.0.0.1:8000 npm run build
+npm run build
 ```
 
-`npm run check:api:remote` runs a read-only contract check against a deployed panel, and `npm run check:api:local` runs the full flow against a local app and panel. The panel is one of the Compose services: `docker/web/Dockerfile` builds it, and Compose publishes `127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}`. `web/STRUCTURE.md` maps the directory.
+`npm run check:api:remote` runs a read-only contract check against a deployed console, and `npm run check:api:local` runs the full flow against a local app. The console is not a service of its own: `docker/main/Dockerfile` builds it into the app's image and the app serves it from `/`, so an app whose `MUSICDL_ADMIN__PANEL_ROOT` points at `web/out` is the whole setup. `web/STRUCTURE.md` maps the directory.
 
 ## Source Plugins
 
@@ -279,7 +271,7 @@ Some incompatibilities are deliberate: a plugin cannot import arbitrary packages
 | `admin-auth` | The admin test files pass under `-W error`. |
 | `compose-recovery` | The restart and volume contract holds, the backup script resolves every volume, and an isolated Redis recovery drill passes. |
 
-CI (`.github/workflows/ci.yml`) runs the test suite and `--self-test --dry-run` on every push and pull request. The hosted runner provides a Docker Engine, so `plugin-security` runs for real there; `wecom-callback` and `compose-recovery` stay human-run because no hosted runner can decide them honestly. A separate `admin-panel` job type-checks the dashboard, builds its image, and starts the container read-only to smoke-test `/healthz`, so the panel is proven in CI rather than only on an operator's machine.
+CI (`.github/workflows/ci.yml`) runs the test suite and `--self-test --dry-run` on every push and pull request. The hosted runner provides a Docker Engine, so `plugin-security` runs for real there; `wecom-callback` and `compose-recovery` stay human-run because no hosted runner can decide them honestly. A separate `admin-panel` job type-checks the dashboard, then builds and starts the app service through `compose.prod.yaml` itself -- the same read-only root filesystem, volumes, and command a host runs -- and asks it for `/healthz`, the console's front page, and a `401` from `/admin/sources`. Restating that boundary in the workflow would prove the flags the workflow wrote; driving Compose proves the container that ships.
 
 ## Development
 
@@ -302,8 +294,8 @@ The dashboard in `web/` has its own toolchain: `npm run build` compiles it, `npm
 | Runtime configuration | Every configuration group and its default, declared in one model | [config.py](./src/musicdl/config.py) |
 | Deployment shape | Services, volumes, networks, and security options | [compose.yaml](./compose.yaml) |
 | Production limits | CPU, memory, and restart policy for every service | [compose.prod.yaml](./compose.prod.yaml) |
-| Reverse proxies | Nginx and Caddy templates that terminate TLS in front of the portal; `deploy/caddy/panel-edge.Caddyfile` is the panel-only deployment, which sends `/wecom/*` back to the product process and everything else to the console | [deploy](./deploy) |
-| Admin panel image | How the dashboard is built, where its backend origin is fixed, and how it runs as a container | [docker/web/Dockerfile](./docker/web/Dockerfile) |
+| Reverse proxies | Nginx and Caddy templates that terminate TLS in front of the portal; every request reaches one upstream, because the console and the API behind it are the same process | [deploy](./deploy) |
+| Console build | How the dashboard is compiled into the app's image and where the static export lands | [docker/main/Dockerfile](./docker/main/Dockerfile) |
 | Web panel layout | The dashboard's directory map and its contract checks | [web/STRUCTURE.md](./web/STRUCTURE.md) |
 | Release gates | The gate runner, its tamper self-test, and the backup drill | [run_gates.py](./scripts/release/run_gates.py) |
 | Dependency inventory | Pinned versions, licences, and supply-chain evidence | [THIRD_PARTY.md](./THIRD_PARTY.md) |

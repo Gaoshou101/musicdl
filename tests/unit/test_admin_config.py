@@ -138,7 +138,10 @@ def test_the_container_knobs_are_reported_and_not_editable(tmp_path):
     manager = ConfigManager(settings_for(tmp_path))
     payload = manager.describe()
     knobs = {item["key"]: item for item in payload["container"]}
-    assert knobs["ports.panel"]["env"] == "MUSICDL_ADMIN_PORT"
+    # The console ships inside the app image and has no port of its own, so the
+    # knob that used to advertise one now names where its files live.
+    assert knobs["paths.panel"]["env"] == "MUSICDL_ADMIN__PANEL_ROOT"
+    assert "ports.panel" not in knobs and "limits.panel" not in knobs
     assert "MUSICDL_PORT" == knobs["ports.app"]["env"]
     with pytest.raises(ValueError):
         manager.update({"media.root": "/somewhere-else"})

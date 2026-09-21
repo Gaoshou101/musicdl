@@ -65,8 +65,15 @@ def test_ci_actions_are_new_enough_to_stop_targeting_node_20():
         assert seen[action] >= minimum, f"{action}@{seen[action]} targets Node 20 and is deprecated"
 
 
-def test_ci_builds_and_then_serves_the_panel_image():
-    """A Dockerfile that builds is not yet a container that runs the way Compose will."""
+def test_ci_builds_and_then_serves_the_deployed_service_through_its_own_files():
+    """A Dockerfile that builds is not yet a container that runs the way Compose will.
+
+    The console ships inside the app's image, so the thing worth starting is the
+    service the deployment files describe. Restating its boundary here -- the
+    read-only root filesystem, the tmpfs, the volume-backed data root, the
+    command -- would only prove the flags this job wrote, so the job is asserted
+    to drive Compose instead of repeating any of them.
+    """
     data, _ = workflow()
     panel = job(data, "admin-panel")
     assert panel["runs-on"] == "ubuntu-latest"
@@ -76,16 +83,34 @@ def test_ci_builds_and_then_serves_the_panel_image():
     ran = " ".join(commands(panel))
     assert "npm ci" in ran
     assert "npx tsc --noEmit" in ran
-    assert "docker build" in ran and "docker/web/Dockerfile" in ran
-    # The Compose boundary is a read-only root filesystem whose writable paths
-    # are tmpfs, so the smoke run has to reproduce exactly that.
-    assert "--read-only" in ran and "/app/.next/cache" in ran
-    assert "/healthz" in ran
+    # The console ships in the image Compose deploys, so that is the service
+    # this job has to build -- not a second one that could pass on its own and
+    # then never be what a deployment runs.
+    assert "docker compose" in ran
+    # The production file is the deployment, and it is layered on nothing:
+    # combining it with the development file merges their sequence fields
+    # (`security_opt`) into a duplicate rather than replacing them.
+    assert "compose.prod.yaml" in ran and "compose.yaml" not in ran
+    assert "build musicdl" in ran
+    assert "up --detach --no-build" in ran
+    # Serving the page is not enough: the file server must not have taken the
+    # API's routes with it, which is what the unauthenticated probe shows.
+    assert "/healthz" in ran and "/admin/sources" in ran and "401" in ran
+    # The boundary belongs to the deployment files; a copy of it here could
+    # drift from them and pass against a container nobody deploys.
+    for restated in ("--read-only", "--tmpfs", "uvicorn", "10001:10001"):
+        assert restated not in ran, f"the smoke test restates the deployment's {restated}"
 
 
 def test_ci_panel_job_never_needs_a_deployment_secret():
     data, _ = workflow()
     panel = job(data, "admin-panel")
-    assert "env" not in panel
+    # The deployment files require an external Redis URL. The job supplies a
+    # loopback placeholder because nothing in it enables WeCom, and it reaches
+    # no secret to make a smoke test pass.
+    env = panel["env"]
+    assert env["MUSICDL_REDIS__URL"] == "redis://127.0.0.1:6379/0"
+    assert env["MUSICDL_PORT"] == "3999"
+    assert "secrets." not in str(panel)
     ran = " ".join(commands(panel))
     assert "--build-arg" not in ran, "the image's own default is the Compose service name"

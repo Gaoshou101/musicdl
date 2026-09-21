@@ -2,9 +2,9 @@
  * The one client every page uses to reach the musicdl admin API.
  *
  * Three things the panel cannot get wrong live here rather than in seven
- * pages: the `/api/*` -> `/admin/*` hop, the double-submit CSRF header every
- * mutating call needs, and the translation of the backend's `detail`
- * envelopes into something an operator can read.
+ * pages: the prefix the app's own routes live under, the double-submit CSRF
+ * header every mutating call needs, and the translation of the backend's
+ * `detail` envelopes into something an operator can read.
  *
  * The backend answers with English `detail` strings; a few of them are the
  * ones an operator will actually meet, so they are translated by name and
@@ -310,6 +310,15 @@ export const USERNAME_STORAGE_KEY = 'tgmusic.username'
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
+/**
+ * The app's own route prefix.
+ *
+ * The console is served by the process it manages, so there is no hop to hide
+ * and no second namespace to keep in step: these are the product's real paths,
+ * the same ones its HTML pages and any script an operator writes use.
+ */
+const API_ROOT = '/admin'
+
 /** The origin the panel is served from, or a test/standalone override. */
 function configuredBase(): string {
   const value = typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_API_BASE : undefined
@@ -450,13 +459,13 @@ let csrfToken: string | null = null
  * Remember the token the backend just handed out.
  *
  * The backend also sets a `csrf_token` cookie, but it sets no `Path`, so a
- * browser scopes that cookie to the request path's directory -- `/api`, since
- * every call here goes through the panel's own `/api/*` hop. A page like
- * `/dashboard` therefore cannot read it back with `document.cookie`, while the
- * cookie itself still travels with every `/api/*` request, which is exactly
- * what the backend's double-submit check compares against. Keeping the value
- * from the login (and credential change) reply is what makes the header half
- * of that pair available to the page.
+ * browser scopes that cookie to the request path's directory -- `/admin`, which
+ * is where every call here goes. A page like `/dashboard` therefore cannot read
+ * it back with `document.cookie`, while the cookie itself still travels with
+ * every `/admin/*` request, which is exactly what the backend's double-submit
+ * check compares against. Keeping the value from the login (and credential
+ * change) reply is what makes the header half of that pair available to the
+ * page.
  */
 function rememberCsrf(token: unknown): void {
   if (typeof token !== 'string' || !token) return
@@ -490,7 +499,7 @@ function forgetCsrf(): void {
 /** A relative URL for one artifact the panel already downloaded. */
 export function mediaUrl(relativePath: string): string {
   const path = relativePath.split('/').map(encodeURIComponent).join('/')
-  return `${configuredBase()}/api/media/${path}`
+  return `${configuredBase()}${API_ROOT}/media/${path}`
 }
 
 type Query = Record<string, string | number | boolean | undefined | null>
@@ -504,7 +513,7 @@ type RequestOptions = {
 }
 
 function withQuery(path: string, query?: Query): string {
-  const base = `${configuredBase()}/api${path}`
+  const base = `${configuredBase()}${API_ROOT}${path}`
   if (!query) return base
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) {

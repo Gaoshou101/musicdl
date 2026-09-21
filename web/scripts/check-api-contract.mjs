@@ -1,8 +1,8 @@
 /**
  * Drives the compiled admin client (src/lib/api.ts) against a running panel.
  *
- * This is the check that the panel's own request shapes -- the /api hop, the
- * CSRF header, the envelopes it reads back -- are the ones the real backend
+ * This is the check that the panel's own request shapes -- the /admin prefix,
+ * the CSRF header, the envelopes it reads back -- are the ones the real backend
  * accepts. It runs in Node with a cookie jar standing in for a browser, so the
  * double-submit pair is exercised exactly as it will be in a browser.
  *
@@ -15,10 +15,13 @@
  *                        but which runs no plugin runner
  *   suite=local-nostore  the same app started with no plugin store at all
  *
- * The three deployments are started like this, all from the repository root:
+ * The three deployments are started like this, all from the repository root.
+ * The app serves the built console itself, so one process is the whole panel:
  *
- *   # the panel itself, serving /api/* from the app on 127.0.0.1:8000
- *   cd web && npm run build && npx next start -p 3101
+ *   # build the console, then point the app at what it produced
+ *   cd web && npm run build
+ *   MUSICDL_ADMIN__PANEL_ROOT=$PWD/out .venv/Scripts/python -m uvicorn musicdl.app:app \
+ *     --host 127.0.0.1 --port 3101
  *
  *   # suite=local   -- store present, no runner: search answers an empty
  *   #                  catalogue, health reports the runner as failed
@@ -120,7 +123,7 @@ async function main() {
     login = await api.login(username, ROTATED_PASSWORD)
     rotated = true
   }
-  check('login sets a session cookie through the /api proxy', jar.has('admin_session'), [...jar.keys()].join(','))
+  check('login sets a session cookie on the app origin', jar.has('admin_session'), [...jar.keys()].join(','))
   check('login sets the csrf cookie the backend will compare against', jar.has('csrf_token'))
   check('login reply carried a csrf token', Boolean(api.readCookie('csrf_token')))
   check('login reports whether the password must change', typeof login.must_change === 'boolean', `must_change=${login.must_change}`)
@@ -140,7 +143,7 @@ async function main() {
     check('credentials changed and the replacement session works', Array.isArray(afterChange.items))
   }
 
-  const bare = await fetch(`${base}/api/bots`, {
+  const bare = await fetch(`${base}/admin/bots`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: 'csrf-probe', username: 'csrfprobe_bot' }),

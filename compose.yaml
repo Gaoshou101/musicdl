@@ -31,40 +31,14 @@ services:
       timeout: 5s
       retries: 3
 
-  # The panel is a separate process from the app it manages, so it gets the
-  # same boundary as everything else here: non-root, read-only root filesystem,
-  # no capabilities, one loopback port. It reaches the app by service name over
-  # the default network and never joins plugin-control.
-  admin-panel:
-    build:
-      context: .
-      dockerfile: docker/web/Dockerfile
-      # Read at build time: Next bakes the rewritten origin into the server.
-      args:
-        MUSICDL_API_ORIGIN: "http://musicdl:8000"
-    user: "10001:10001"
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    mem_limit: 512m
-    cpus: "1.0"
-    pids_limit: 128
-    tmpfs:
-      - /tmp:size=32m,noexec,nosuid,nodev
-      - /app/.next/cache:size=32m,noexec,nosuid,nodev
-    ports:
-      - "127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}:3000"
-    networks:
-      - default
-    depends_on:
-      musicdl:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
+  # The console is not a service of its own: `docker/main/Dockerfile` builds it
+  # into the image above and the app serves it from `/`.
+  #
+  # The plugin runner stays separate because it is the one place untrusted code
+  # executes. It runs under the same boundary as everything else here -- non-root,
+  # read-only root filesystem, no capabilities -- reaches the app over the
+  # internal plugin-control network, never joins the default one, and receives no
+  # secrets.
   plugin-runner:
     build:
       context: .
