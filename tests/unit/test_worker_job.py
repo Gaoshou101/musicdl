@@ -5,7 +5,7 @@ from musicdl.media.models import FallbackResult
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
 from musicdl.wecom.state import RedisStateStore
-from musicdl.worker.workers import TERMINAL_FAILURE_TEXT, JobDeferred, JobWorker
+from musicdl.worker.workers import FALLBACK_NOTICE, TERMINAL_FAILURE_TEXT, JobDeferred, JobWorker
 
 class Redis:
     def __init__(self,messages=None): self.messages=messages or []; self.acks=[]
@@ -402,7 +402,8 @@ def test_refreshed_candidates_rebind_one_generation_and_prompt_once(monkeypatch)
     assert seen["ttl"]==600 and seen["bind"][1]=="tok-2" and seen["bind"][3]["namespace"]=="{tenant}"
     assert effect(st,"1-0","rebind")["status"]=="done" and effect_result(st,"1-0","rebind")["generation"]==1
     assert len(wc.sent)==1 and wc.sent[0][0]=="u" and wc.sent[0][1].endswith("回复序号下载。")
-    assert wc.sent[0][1].count("Song - Artist")==2
+    assert wc.sent[0][1].startswith(FALLBACK_NOTICE)
+    assert wc.sent[0][1].count("Song — Artist")==2
     assert effect(st,"1-0","selection_prompt")["status"]=="done"
 
 def test_uncertain_prompt_is_never_resent_and_the_job_still_completes(monkeypatch):

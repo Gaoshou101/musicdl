@@ -17,13 +17,16 @@ from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, Medi
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult, search_sources
 from musicdl.wecom.commands import CommandKind, ParsedCommand, parse_command
-from musicdl.wecom.results import format_results
+from musicdl.wecom.results import NO_RESULTS_TEXT, selection_message
 from musicdl.media.validation import validated_destination
 from musicdl.wecom.state import EffectLease, RedisStateStore, SelectionContext, SelectionRejected
 from .selection import bind_user_selection, get_user_selection, get_selection_for_user, get_selection_for_request, _get_by_token
 
 
 TERMINAL_FAILURE_TEXT = "处理失败，请稍后重试。"
+# A re-prompt answers the same question a second time, so it says why the first
+# answer is gone: the refreshed list may be rows the user has already read.
+FALLBACK_NOTICE = "上一次的结果下载失败，这里是最新的结果："
 EFFECT_REPLAY_LIMIT = 100
 _MEDIA_TYPES = {"mp3": "audio/mpeg", "flac": "audio/flac", "m4a": "audio/mp4", "ogg": "audio/ogg"}
 
@@ -301,16 +304,15 @@ class MessageWorker(_StreamWorker):
             except asyncio.CancelledError: raise
             except Exception: pass
         if not result.candidates:
-            await _call(self.wecom.send_text, str(payload["from_user"]), "没有找到匹配结果。")
+            await _call(self.wecom.send_text, str(payload["from_user"]), NO_RESULTS_TEXT)
             return None
         snapshot = {i: c for i, c in enumerate(result.candidates[:100], 1)}
         context = SelectionContext(str(payload["corp_id"]), str(payload["from_user"]), str(payload["request_id"]),
                                    result.version, snapshot, query=str(command.value), selection_generation=0)
         token = await self.state.issue_selection(context, ttl=self.selection_ttl)
         await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace)
-        prompt = "\n\n回复序号下载。"
-        text = format_results(result.candidates, max_items=self.max_results, max_bytes=2048 - len(prompt.encode("utf-8"))) or "没有找到匹配结果。"
-        await _call(self.wecom.send_text, context.from_user, text + prompt)
+        await _call(self.wecom.send_text, context.from_user,
+                    selection_message(str(command.value), result.candidates, max_items=self.max_results))
         return token
 
     async def run_once(self) -> int:
@@ -648,10 +650,9 @@ class JobWorker(_StreamWorker):
         token = await self._rebind(job_id, payload, refreshed, owner, deadline, user, corp_id)
         if token is None:
             return
-        prompt = "\n\n回复序号下载。"
-        text = format_results(refreshed.candidates, max_items=self.max_results,
-                              max_bytes=2048 - len(prompt.encode("utf-8")))
-        await self._notify(job_id, "selection_prompt", owner, deadline, user, (text or "没有找到匹配结果。") + prompt)
+        await self._notify(job_id, "selection_prompt", owner, deadline, user,
+                           selection_message(str(payload.get("query") or ""), refreshed.candidates,
+                                             max_items=self.max_results, notice=FALLBACK_NOTICE))
 
     async def _rebind(self, job_id: str, payload: dict[str, Any], refreshed, owner: str, deadline: float,
                       user: str, corp_id: str) -> str | None:

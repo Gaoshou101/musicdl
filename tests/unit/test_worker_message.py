@@ -49,7 +49,9 @@ def test_message_search_binds_and_sends(monkeypatch):
     token=run(MessageWorker(redis,object(),wc,state=state).handle({"corp_id":"c","from_user":"u","request_id":"r","command":"search","value":"song"}))
     assert token=="tok" and state.issued[0][0].candidates=={1:candidate()}
     assert state.issued[0][0].query=="song" and state.issued[0][0].selection_generation==0
-    assert wc.sent[0][0] == "u" and wc.sent[0][1].startswith("1. Song") and "\n\n" in wc.sent[0][1]
+    assert wc.sent[0][0] == "u"
+    assert wc.sent[0][1].startswith("「song」找到 1 个结果：\n\n1. Song — Artist")
+    assert wc.sent[0][1].endswith("回复序号下载。")
 def test_message_empty_result_sends_without_binding(monkeypatch):
     async def search(*a,**k): return SearchResult((),(),"v")
     monkeypatch.setattr("musicdl.worker.workers.search_sources",search); state,wc=State(),WeCom()

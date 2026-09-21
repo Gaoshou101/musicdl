@@ -1,6 +1,6 @@
 import pytest
 
-from musicdl.wecom.commands import CommandKind, parse_command
+from musicdl.wecom.commands import CommandKind, ParsedCommand, parse_command
 
 
 @pytest.mark.parametrize(
@@ -43,3 +43,9 @@ def test_parse_command_rejects_overlong_search():
 @pytest.mark.parametrize("text", ["0", "101"])
 def test_out_of_range_numbers_are_search_text_not_selection(text):
     assert parse_command(text).kind is CommandKind.SEARCH
+
+
+@pytest.mark.parametrize("text", ["晴天", "晴天 周杰伦", "晴天-周杰伦", "晴天 - 周杰伦", "周杰伦 晴天"])
+def test_every_way_a_person_writes_a_request_is_one_search(text):
+    """The boundary keeps the words as typed; the search layer folds the separators."""
+    assert parse_command(text) == ParsedCommand(CommandKind.SEARCH, text)
