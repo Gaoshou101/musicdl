@@ -48,12 +48,16 @@ def admin():
  if not tests:return report('admin-auth','NOT_RUN','admin tests are not merged into this Worktree')
  py=_python()
  r=subprocess.run([str(py),'-m','pytest','-q','-W','error',*tests],cwd=ROOT); return report('admin-auth','PASS' if r.returncode==0 else 'FAIL',f'admin pytest exit {r.returncode}')
+def callback_matches(status,body,expected):
+ 'The expectation is either the status the callback returns or the body it hands back; a non-numeric expectation can only be a body.'
+ text=str(expected)
+ return body==text or (text.isdecimal() and status==int(text))
 def wecom(url=None,expected=None):
  if not url:return report('wecom-callback','NOT_RUN','real callback requires explicit --wecom-url opt-in')
  parsed=urllib.parse.urlsplit(url)
  if parsed.scheme!='https' or parsed.username or parsed.password or expected is None:return report('wecom-callback','FAIL','probe requires HTTPS without userinfo and --wecom-expected')
  try:
-  with urllib.request.urlopen(url,timeout=10) as r: body=r.read(4096).decode('utf-8','replace'); ok=r.status==int(expected) or body==expected
+  with urllib.request.urlopen(url,timeout=10) as r: body=r.read(4096).decode('utf-8','replace'); ok=callback_matches(r.status,body,expected)
   return report('wecom-callback','PASS' if ok else 'FAIL','controlled HTTPS callback probe matched expected status/body')
  except Exception:return report('wecom-callback','FAIL','controlled callback probe failed (details suppressed)')
 BACKUP_VOLUMES=('musicdl-media','musicdl-app-data','musicdl-telegram')
