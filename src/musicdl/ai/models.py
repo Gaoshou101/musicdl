@@ -32,8 +32,18 @@ class AICompletionClient(Protocol):
 
 
 class AIError(ValueError):
-    def __init__(self, code: str):
+    """A stable code, plus whatever the endpoint said about it.
+
+    The advisor needs only the code, which is what it maps onto a fallback. The
+    panel's test button needs the rest: an operator looking at a red line has to
+    be able to tell "the endpoint rejected the key" from "the endpoint was slow"
+    without a log window, and an HTTP status observed at the boundary is the one
+    piece of evidence that says which.
+    """
+
+    def __init__(self, code: str, detail: str | None = None):
         self.code = code
+        self.detail = detail
         super().__init__(code)
 
 

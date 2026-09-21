@@ -9,15 +9,19 @@ import {
   FloppyDisk,
   Info,
   LockSimple,
+  PlugsConnected,
   Sliders,
   WarningCircle,
 } from '@phosphor-icons/react'
 import {
+  AI_PROBE_TEXT,
   ConfigFieldView,
   ConfigReport,
+  AIProbeReport,
   errorMessage,
   listConfig,
   reloadNote,
+  testAIEndpoint,
   updateConfig,
 } from '@/lib/api'
 
@@ -199,6 +203,131 @@ function FieldRow({ field, drafts, cleared, onDraft, onClear, onUndo }: FieldRow
   )
 }
 
+/**
+ * The one screen that says whether the endpoint in force actually answers.
+ *
+ * The advisor is advisory: a failure falls back to the deterministic answer, so
+ * a key the endpoint rejects looks exactly like an endpoint that works and has
+ * nothing to add. This button spends one tiny request -- the same code path the
+ * advisor uses -- and reports the code, the endpoint's own status line and the
+ * round trip, without writing a setting.
+ */
+function AiProbeCard({ dirty }: { dirty: boolean }) {
+  const [running, setRunning] = useState(false)
+  const [report, setReport] = useState<AIProbeReport | null>(null)
+  const [failure, setFailure] = useState('')
+
+  const probe = async () => {
+    setRunning(true)
+    setFailure('')
+    setReport(null)
+    try {
+      setReport(await testAIEndpoint())
+    } catch (err) {
+      setFailure(errorMessage(err))
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="mt-5 rounded-xl border border-neutral-800/80 bg-neutral-900/40 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-lg bg-accent-500/15 flex items-center justify-center flex-shrink-0">
+            <PlugsConnected size={20} weight="duotone" className="text-accent-400" />
+          </div>
+          <div>
+            <h3 className="font-medium">测试连接</h3>
+            <p className="text-neutral-400 text-sm mt-1">
+              用已保存的配置发一次最小请求，走的是 AI 排序用的同一条代码路径；返回状态码、耗时与模型回显，不写入任何设置。
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void probe()}
+          disabled={running}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex-shrink-0"
+        >
+          {running ? (
+            <div className="w-4 h-4 border-2 border-neutral-300 border-t-transparent rounded-full animate-spin" />
+          ) : (
+            <PlugsConnected size={18} />
+          )}
+          {running ? '测试中…' : '测试连接'}
+        </button>
+      </div>
+
+      {dirty && (
+        <p className="text-warning text-xs mt-3">有未保存的改动，这里测的是已经保存的配置。</p>
+      )}
+
+      {failure && (
+        <p role="alert" className="mt-4 px-3 py-2.5 rounded-lg bg-danger/10 border border-danger/20 text-danger text-sm">
+          {failure}
+        </p>
+      )}
+
+      {report && (
+        <div
+          role="status"
+          className={`mt-4 rounded-lg border px-3 py-2.5 text-sm ${
+            report.ok ? 'bg-success/10 border-success/25' : 'bg-danger/10 border-danger/25'
+          }`}
+        >
+          <div className="flex items-center gap-2 flex-wrap">
+            {report.ok ? (
+              <CheckCircle size={18} weight="fill" className="text-success" />
+            ) : (
+              <WarningCircle size={18} weight="fill" className="text-danger" />
+            )}
+            <span className={report.ok ? 'text-success font-medium' : 'text-danger font-medium'}>
+              {report.ok ? '连接成功' : '连接失败'}
+            </span>
+            <span className="text-neutral-400 text-xs">
+              {report.ok
+                ? `${report.model ?? '模型未知'} 用了 ${report.took_ms} ms`
+                : `${report.code ? AI_PROBE_TEXT[report.code] : '端点没有给出可读的原因'}${
+                    report.code && report.code !== 'disabled' && report.code !== 'unconfigured'
+                      ? `（${report.took_ms} ms / 上限 ${report.budget_ms} ms）`
+                      : ''
+                  }`}
+            </span>
+          </div>
+          <dl className="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+            {report.detail && (
+              <div className="flex gap-2">
+                <dt className="text-neutral-500">端点回话</dt>
+                <dd className="font-mono text-neutral-300">{report.detail}</dd>
+              </div>
+            )}
+            {report.code && !report.detail && (
+              <div className="flex gap-2">
+                <dt className="text-neutral-500">失败代码</dt>
+                <dd className="font-mono text-neutral-300">{report.code}</dd>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <dt className="text-neutral-500">模型</dt>
+              <dd className="font-mono text-neutral-300">{report.model ?? '未填写'}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="text-neutral-500">探针预算</dt>
+              <dd className="font-mono text-neutral-300">
+                {report.budget_ms ? `${report.budget_ms} ms` : '未发请求'}
+              </dd>
+            </div>
+          </dl>
+          {report.reply && (
+            <p className="mt-2 font-mono text-xs text-neutral-400 break-all">{report.reply}</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ConfigPage() {
   const [report, setReport] = useState<ConfigReport | null>(null)
   const [drafts, setDrafts] = useState<Drafts>({})
@@ -289,6 +418,13 @@ export default function ConfigPage() {
         0,
       )
     : 0
+
+  // The probe reads what was saved, so it says out loud when the boxes on screen
+  // have moved past it rather than reporting on a configuration nobody stored.
+  const aiDirty =
+    report?.groups
+      .find((group) => group.id === 'ai')
+      ?.fields.some((field) => isDirty(field, drafts, cleared)) ?? false
 
   if (loading) {
     return (
@@ -418,6 +554,7 @@ export default function ConfigPage() {
                 />
               ))}
             </div>
+            {group.id === 'ai' && <AiProbeCard dirty={aiDirty} />}
           </div>
         ))}
 
