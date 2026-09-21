@@ -16,7 +16,7 @@
 
 ## Phase 1 — WeCom callback vertical slice
 
-**Status:** Implementation completed on 2026-09-12; locally verified and runtime-verified against Redis 7.2.16 in a hardened Debian Docker container. Real WeCom application and public TLS interoperability gate remains pending.
+**Status:** Implementation completed on 2026-09-12; locally verified and runtime-verified against Redis 7.2.16 in a hardened Debian Docker container. The real-callback gate ran on 2026-09-22 against the deployed instance behind public HTTPS (see Release gates): a signed echostr request built from the deployment's own Token and EncodingAESKey was answered with the exact plaintext, and the same request with a tampered signature was refused with 400. What stays unverified is a message from a real WeCom member travelling through WeCom's own servers.
 
 **Goal:** 完成白名单、企微签名验证、去重、搜索命令解析、候选选择关联和异步响应骨架。
 
@@ -88,7 +88,7 @@
 
 ## Phase 7 — Administration and production Compose
 
-**Status:** Administration portal delivered (`6c36a88`), mounted into the application in PR #18, and made restart-persistent for FR-008 in PR #21 (`08f92aa`); the release gate suite was made honest and executable in PR #19 and PR #20, and CI was added in PR #23 (`5f3f11d`). **Not closed:** the real WeCom callback gate and the Compose backup/recovery drill still require a human-run deployment, while a custom Telegram Bot is now maintainable through the portal, because PR #25 (`44e9428`) added the Bot definition surface (a required `username` and an optional `command_template`) with `POST /admin/bots`, `PATCH /admin/bots/{id}`, and `DELETE /admin/bots/{id}`.
+**Status:** Administration portal delivered (`6c36a88`), mounted into the application in PR #18, and made restart-persistent for FR-008 in PR #21 (`08f92aa`); the release gate suite was made honest and executable in PR #19 and PR #20, and CI was added in PR #23 (`5f3f11d`). **Both human-run gates closed on 2026-09-22** against the deployed instance (see Release gates), and the console now ships inside the application image instead of a container of its own (PR #54, `eedfcaf`), which is what the two-service Compose baseline below describes. A custom Telegram Bot is maintainable through the portal, because PR #25 (`44e9428`) added the Bot definition surface (a required `username` and an optional `command_template`) with `POST /admin/bots`, `PATCH /admin/bots/{id}`, and `DELETE /admin/bots/{id}`.
 
 **Goal:** 提供管理后台、默认凭据迁移提示、来源/Bot 管理、健康度和日志查看，并完成双容器 Compose 发布基线。
 
@@ -102,4 +102,11 @@
 
 发布前必须通过：企微真实回调门、Telegram session 隔离门、媒体路径与下载完整性门、插件容器安全门、后台认证门，以及 Compose 重启/备份恢复演练。插件容器安全门是 1.0 的强制门，不得跳过；任何门未通过，相关需求保持 Active，不得仅以“服务已启动”作为验收证据。
 
-**Status on 2026-09-16.** CI run 35067109829 (PR #23) executed the sweep on an Ubuntu runner and reported `[self-test] PASS` together with `[plugin-security] PASS`, `[compose] PASS`, `[proxy] PASS`, `[telegram-session-isolation] PASS`, `[media-integrity] PASS`, and `[admin-auth] PASS`; the same run reported 937 passed / 25 skipped. Two gates stay human-run by design and are reported as NOT_RUN with their reason rather than as PASS: `wecom-callback` needs a real WeCom application behind public HTTPS, and `compose-recovery` needs the deployment Redis plus the volume backup drill. Until both are executed against the real deployment, FR-001 and NFR-002 keep their evidence at the level recorded above and 1.0 is not claimable.
+**Status on 2026-09-16.** CI run 35067109829 (PR #23) executed the sweep on an Ubuntu runner and reported `[self-test] PASS` together with `[plugin-security] PASS`, `[compose] PASS`, `[proxy] PASS`, `[telegram-session-isolation] PASS`, `[media-integrity] PASS`, and `[admin-auth] PASS`; the same run reported 937 passed / 25 skipped. Two gates stay human-run by design and are reported as NOT_RUN with their reason rather than as PASS: `wecom-callback` needs a real WeCom application behind public HTTPS, and `compose-recovery` needs the deployment Redis plus the volume backup drill.
+
+**Status on 2026-09-22.** Both human-run gates were executed against the deployment at `https://37-114-48-248.sslip.io` (merge point `4e572f2`), from `scripts/release/run_gates.py` itself rather than from a hand-written probe:
+
+- `[wecom-callback] PASS` — a signed echostr request, built inside the app container from the deployment's own `wecom.token`, `wecom.encoding_aes_key` and `wecom.corp_id`, was sent to `/wecom/callback` over public HTTPS and answered `200` with the plaintext echoed exactly; flipping one character of the signature returned `400`. The gate was passed with `--wecom-expected 200`, and PR #55 fixed the gate so that `--wecom-expected <body>` works too, which it did not: `int(expected)` raised before the body was ever compared.
+- `[compose-recovery] PASS` — the same gate resolved the backup plan for all three declared volumes and then ran `scripts/release/redis_recovery.py --confirm-isolated` against the deployment's Redis, reached through an SSH tunnel to the container address; the isolated canary was written, read back, consumed from its stream and deleted. Note for a local run: redis-py 8 reads a bare `redis://<password>@host` as a username, so the tunnelled URL has to keep the credential part verbatim.
+
+**Still open:** the volume-level backup and restore of `musicdl-media`, `musicdl-app-data` and `musicdl-telegram` against the live deployment. The gate proves the plan resolves and that an isolated Redis namespace recovers; it deliberately does not overwrite live volumes, so that drill remains a separate, explicitly approved human step.

@@ -2,7 +2,7 @@
 
 ## Status
 
-实现完成；真实企业微信应用与公网 TLS 联调门待验证。Phase 1 尚不标记为完全完成。
+实现完成；真实回调门已于 2026-09-22 在远端部署上执行并通过（见下）。真实企业微信成员经微信服务器发送消息的端到端验证仍未执行。
 
 ## Delivered
 
@@ -50,16 +50,21 @@
 - 容器日志未出现 callback 查询串。
 - 测试容器、网络、镜像标签、远端制品和本地临时制品均已清理。
 
-## Remaining acceptance gate
+## Real-callback gate (2026-09-22)
 
-需要用户提供或自行配置真实企业微信自建应用的 CorpID、AgentID、Token、EncodingAESKey、白名单成员和公网 HTTPS 回调地址，完成：
+部署实例 `https://37-114-48-248.sslip.io`（合并点 `4e572f2`）上执行，凭据取自部署自身的 `wecom.token`、`wecom.encoding_aes_key`、`wecom.corp_id`：
 
-1. 企业微信后台 URL 验证；
-2. 真实文本消息字段与重试行为；
-3. 反向代理和公网 TLS；
-4. 代理层 access log 不保留 callback query string 的证明。
+- 用企业微信的 URL 验证算法生成签名与 AES-256-CBC 密文 echostr，经公网 HTTPS 请求 `/wecom/callback`，返回 `200` 且正文与明文逐字节一致；容器内实测 `echoed_plaintext=True`。
+- 同一请求仅翻转签名中一个字符：`400`，说明签名校验确实生效，不是无条件回显。
+- 项目自带的发布门通过：`[wecom-callback] PASS - controlled HTTPS callback probe matched expected status/body`。
+- 反向代理层不记录 callback query string 由 `proxy` 门持续校验（`log_skip @callback`、nginx `if=$release_loggable`）。
 
-在这些检查完成前，路线图保持“实现完成，真实应用门待验证”。
+## Still not verified
+
+1. 真实企业微信成员发送文本消息、经微信服务器重试的真实字段与重试行为；
+2. 消息代理（`ddsderek/wxchat`）在真实会话中的回复投递。
+
+上述两项需要真实用户在客户端操作，未包含在本次门内。
 
 ## Rollback
 
