@@ -19,9 +19,9 @@ music.example.invalid {
 		header Cache-Control "public, max-age=604800, immutable"
 		file_server
 	}
-	handle_path /api/* {
-		reverse_proxy musicdl:8000
-	}
+	# Everything else is one process: the console's pages and assets, and the
+	# /admin routes they call. There is no second upstream to route to and no
+	# path to strip, so the catch-all below is the whole configuration.
 	handle {
 		reverse_proxy musicdl:8000
 	}

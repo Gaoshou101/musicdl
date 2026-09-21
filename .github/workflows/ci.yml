@@ -44,15 +44,22 @@ jobs:
         # that genuinely cannot run here stays NOT_RUN with its reason.
         run: python scripts/release/run_gates.py --self-test --dry-run
 
-  # The panel is a second deliverable with its own toolchain, so it gets its own
-  # job: the Python gates never wait on npm, and a panel that does not build can
-  # never hide behind a green test suite. The image is what Compose deploys, so
-  # the image is what gets built here rather than a second `next build` on the
-  # runner -- and then started, because a Dockerfile that builds is not yet a
-  # container that serves.
+  # The console is a second deliverable with its own toolchain, so it gets its
+  # own job: the Python gates never wait on npm, and a console that does not
+  # build can never hide behind a green test suite. It ships inside the app's
+  # image rather than in one of its own, so this job builds and starts that
+  # service through the deployment files themselves -- and then asks it for a
+  # page, a route, and the session boundary, because a container that starts is
+  # not yet a container that serves.
   admin-panel:
     name: Admin panel image
     runs-on: ubuntu-latest
+    env:
+      # The deployment files require an external Redis URL. Nothing in this job
+      # enables WeCom, so the runtime never dials it, and a hosted runner is
+      # never handed a real credential to make a smoke test pass.
+      MUSICDL_REDIS__URL: redis://127.0.0.1:6379/0
+      MUSICDL_PORT: "3999"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -66,22 +73,28 @@ jobs:
       - name: Typecheck
         working-directory: web
         run: npx tsc --noEmit
-      - name: Build the panel image
-        run: docker build --file docker/web/Dockerfile --tag musicdl-admin:ci .
-      - name: Serve one request from the built image
-        # The read-only root filesystem and the two tmpfs mounts are the
-        # Compose contract; exercising them here is what stops the image from
-        # passing a build and then failing on the deployment host.
+      - name: Build the service the deployment files describe, console included
+        run: docker compose -p console-smoke -f compose.yaml -f compose.prod.yaml build musicdl
+      - name: Serve one page and one route from that container
+        # Every boundary in play -- read-only root filesystem, tmpfs, the
+        # volume-backed data root, the user, the published port, the command --
+        # is read from the deployment files instead of being restated here,
+        # because a smoke test that restates them proves the flags it wrote
+        # rather than the container that ships. A page and a route are both
+        # asked for, because serving the first while shadowing the second is
+        # the failure this job exists to catch.
         run: |
-          docker run --detach --name panel-smoke \
-            --read-only --tmpfs /tmp --tmpfs /app/.next/cache \
-            --publish 127.0.0.1:3999:3000 musicdl-admin:ci
-          for attempt in $(seq 1 15); do
-            if curl --fail --silent --show-error http://127.0.0.1:3999/healthz > /dev/null; then
-              echo "panel answered /healthz"
-              exit 0
+          compose() { docker compose -p console-smoke -f compose.yaml -f compose.prod.yaml "$@"; }
+          fail() { compose logs musicdl; exit 1; }
+          compose up --detach --no-build musicdl || fail
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:3999/healthz > /dev/null; then
+              break
             fi
             sleep 2
           done
-          docker logs panel-smoke
-          exit 1
+          curl --fail --silent --show-error http://127.0.0.1:3999/healthz || fail
+          curl --fail --silent --show-error http://127.0.0.1:3999/ > /tmp/console.html || fail
+          grep --quiet '管理后台' /tmp/console.html || fail
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3999/admin/sources)" = "401" || fail
+          echo "one container answered /healthz, served the console, and kept /admin behind a session"

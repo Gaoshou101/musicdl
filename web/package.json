@@ -5,7 +5,6 @@
   "scripts": {
     "dev": "next dev -p 3001",
     "build": "next build",
-    "start": "next start",
     "lint": "next lint",
     "check:api:build": "tsc src/lib/api.ts --outDir .next/contract --module esnext --moduleResolution bundler --target es2022 --skipLibCheck && node -e \"require('node:fs').renameSync('.next/contract/api.js', '.next/contract/api.mjs')\"",
     "check:api:remote": "npm run check:api:build && node scripts/check-api-contract.mjs",

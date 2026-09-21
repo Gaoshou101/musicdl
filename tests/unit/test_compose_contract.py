@@ -10,9 +10,9 @@ def compose():
     return yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
 
 
-def test_compose_has_exactly_three_application_services_and_no_redis_service():
+def test_compose_has_exactly_two_application_services_and_no_redis_service():
     data = compose()
-    assert set(data["services"]) == {"musicdl", "admin-panel", "plugin-runner"}
+    assert set(data["services"]) == {"musicdl", "plugin-runner"}
     assert all("redis" not in str(service.get("image", "")).lower() for service in data["services"].values())
 
 
@@ -39,34 +39,28 @@ def test_compose_plugin_runner_is_internal_and_main_can_reach_it():
     assert data["networks"]["plugin-control"]["internal"] is True
 
 
-def test_compose_panel_reaches_the_app_by_service_name_and_owns_no_state():
-    """The panel is a client of the app: no volumes, no plugin-control, one origin.
+def test_compose_has_no_console_service_because_the_app_serves_it():
+    """The console is a deliverable of the app image, not a container.
 
-    Next resolves its `/api/*` rewrite while it builds, so the app's address is
-    a build argument. Pointing it at the service name is what lets the panel
-    run anywhere the Compose network runs.
+    A service here would mean a second runtime, a second published port, and a
+    forwarding hop whose paths could drift from the API's -- which is what the
+    static export removed. Naming only the app and the runner is what keeps that
+    from creeping back in, and the image is where the files actually have to be.
     """
-    panel = compose()["services"]["admin-panel"]
-    assert panel["build"]["args"]["MUSICDL_API_ORIGIN"] == "http://musicdl:8000"
-    assert panel["networks"] == ["default"]
-    assert panel.get("volumes", []) == []
-    assert panel["depends_on"] == {"musicdl": {"condition": "service_healthy"}}
-
-
-def test_compose_panel_is_loopback_only_and_caches_on_tmpfs():
-    panel = compose()["services"]["admin-panel"]
-    assert panel["ports"] == ["127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}:3000"]
-    mounts = [str(entry).split(":")[0] for entry in panel["tmpfs"]]
-    # A read-only root filesystem only leaves the runtime the paths it is given.
-    assert mounts == ["/tmp", "/app/.next/cache"]
+    data = compose()
+    assert "admin-panel" not in data["services"]
+    app = data["services"]["musicdl"]
+    assert app["ports"] == ["127.0.0.1:${MUSICDL_PORT:-8000}:8000"]
+    manifest = (ROOT / "docker/main/Dockerfile").read_text(encoding="utf-8")
+    assert "COPY --from=panel" in manifest
+    assert "/app/panel" in manifest
 
 
 def test_compose_security_and_network_boundaries():
     data = compose()
     main = data["services"]["musicdl"]
     plugin = data["services"]["plugin-runner"]
-    panel = data["services"]["admin-panel"]
-    for service in (main, plugin, panel):
+    for service in (main, plugin):
         assert service["user"] == "10001:10001"
         assert service["read_only"] is True
         assert service["cap_drop"] == ["ALL"]
@@ -85,13 +79,6 @@ def test_compose_plugin_runner_resource_limits_are_exact():
     assert plugin["tmpfs"] == ["/tmp:size=32m,noexec,nosuid,nodev"]
 
 
-def test_compose_panel_resource_limits_are_exact():
-    panel = compose()["services"]["admin-panel"]
-    assert panel["mem_limit"] == "512m"
-    assert panel["cpus"] == "1.0"
-    assert panel["pids_limit"] == 128
-
-
 def test_compose_plugin_runner_has_no_host_integration_surfaces():
     plugin = compose()["services"]["plugin-runner"]
     assert plugin.get("secrets", []) == []
@@ -107,12 +94,11 @@ def test_compose_uses_pinned_images_and_stdlib_healthchecks():
     dockers = {name: service["build"]["dockerfile"] for name, service in data["services"].items()}
     assert dockers == {
         "musicdl": "docker/main/Dockerfile",
-        "admin-panel": "docker/web/Dockerfile",
         "plugin-runner": "docker/plugin/Dockerfile",
     }
     # Each image is probed with the runtime it actually ships.
     probes = {name: service["healthcheck"]["test"][1] for name, service in data["services"].items()}
-    assert probes == {"musicdl": "python", "admin-panel": "node", "plugin-runner": "python"}
+    assert probes == {"musicdl": "python", "plugin-runner": "python"}
 
 
 def test_compose_disables_uvicorn_query_string_access_logs():

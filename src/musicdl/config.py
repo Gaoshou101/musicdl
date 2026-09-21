@@ -154,6 +154,14 @@ class AdminSettings(BaseModel):
     login_limit: int = Field(default=5, ge=1, le=1000)
     login_window_seconds: float = Field(default=60.0, gt=0, le=3600)
     state_path: str | None = None
+    # Where the built console lives, when this deployment has one. It is a
+    # property of the image rather than a setting an operator tunes, so it stays
+    # out of the panel's own config page and is set by the image that bakes the
+    # files in. It carries no path validator on purpose: the rest of these paths
+    # describe mounts inside the container, while this one is also what a
+    # developer points at a local `web/out`, and a value that resolves to
+    # nothing is reported at start-up rather than refused.
+    panel_root: str | None = None
 
     @field_validator("state_path")
     @classmethod

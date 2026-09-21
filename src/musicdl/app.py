@@ -3,11 +3,13 @@ import asyncio
 import inspect
 import logging
 import math
+from pathlib import Path
 from typing import Any, Callable
 import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from .config import AppSettings
 from .wecom.service import WeComService
@@ -398,6 +400,26 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                     refresh=refresh, preference=preference)
 
 
+def _panel_root(settings: AppSettings) -> str | None:
+    """The directory the built console occupies, or None when there is none.
+
+    The console is one deliverable of the image, not a condition for the service
+    to run: a checkout that never built it, or a deployment built without Node,
+    still answers /healthz and the administration API. That is why a configured
+    path with nothing behind it is treated exactly like no path at all.
+    """
+    configured = settings.admin.panel_root
+    if not configured:
+        return None
+    if Path(configured).is_dir():
+        return configured
+    # A deployment that names a directory and then does not get one has a
+    # deployment problem, not a reason to refuse to start. Saying so once beats
+    # leaving an operator to guess why the front page is a 404.
+    logger.warning("admin panel root %s does not exist; serving no console", configured)
+    return None
+
+
 def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any], Any] | None = None,
                clock=None, runtime_factory: Callable[[Any], Any] | None = None) -> FastAPI:
     settings = settings or AppSettings()
@@ -646,6 +668,22 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
         except StateUnavailable:
             return PlainTextResponse("not ready", status_code=503)
         return Response(status_code=200)
+
+    # The console is this process's own front end. It is a client-only Next
+    # build, so the image carries static files rather than a second runtime, and
+    # one origin serves the browser everything it asks for: the pages, the
+    # administration routes they call, and the WeCom callback.
+    #
+    # The mount is registered last on purpose. Starlette matches routes in the
+    # order they were added, so every path declared above -- /healthz, /readyz,
+    # /wecom/callback, and the whole /admin surface -- is decided before this
+    # one is consulted, and the panel only ever answers what nothing else
+    # claimed. `html=True` is what makes a deep link work: the export writes
+    # `dashboard/config/index.html`, and a directory request has to resolve to
+    # the file inside it rather than to a listing.
+    panel_root = _panel_root(settings)
+    if panel_root is not None:
+        app.mount("/", StaticFiles(directory=panel_root, html=True), name="panel")
 
     return app
 

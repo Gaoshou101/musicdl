@@ -182,8 +182,8 @@ RUNTIME_GROUPS: tuple[str, ...] = ("wecom", "redis", "telegram", "ai", "worker")
 CONTAINER_KNOBS: tuple[dict[str, Any], ...] = (
     {"key": "ports.app", "label": "主服务回环端口", "env": "MUSICDL_PORT",
      "help": "compose.yaml 发布 127.0.0.1:${MUSICDL_PORT:-8000}:8000；改完执行 docker compose up -d musicdl。"},
-    {"key": "ports.panel", "label": "面板回环端口", "env": "MUSICDL_ADMIN_PORT",
-     "help": "面板发布 127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}:3000，只监听回环地址。"},
+    {"key": "paths.panel", "label": "管理面板静态文件", "env": "MUSICDL_ADMIN__PANEL_ROOT",
+     "help": "面板由主服务自己托管，没有独立端口：镜像把控制台烘在 /app/panel，浏览器访问 /。"},
     {"key": "paths.media", "label": "媒体库挂载", "env": "MUSICDL_MEDIA__ROOT",
      "help": "Compose 固定为 /data/music，卷 musicdl-media；换成别的路径需要同时改挂载。"},
     {"key": "paths.app_data", "label": "应用数据挂载", "env": "MUSICDL_PLUGIN__APP_DATA_ROOT",
@@ -194,10 +194,8 @@ CONTAINER_KNOBS: tuple[dict[str, Any], ...] = (
      "help": "Compose 固定为 /data/app/admin-state.json，凭据与这份配置都存在这里。"},
     {"key": "runner.url", "label": "插件运行器地址", "env": "MUSICDL_PLUGIN__SERVICE_URL",
      "help": "Compose 固定为 http://plugin-runner:8080，走内部 plugin-control 网络。"},
-    {"key": "limits.panel", "label": "面板资源上限", "env": None,
-     "help": "mem_limit 512m、cpus 1.0、pids_limit 128、只读根文件系统、cap_drop ALL。"},
     {"key": "limits.app", "label": "主服务资源上限", "env": None,
-     "help": "只读根文件系统、cap_drop ALL、no-new-privileges；生产覆盖文件另设 CPU 与内存上限。"},
+     "help": "控制台与后台接口跑在同一个进程里：只读根文件系统、cap_drop ALL、no-new-privileges；生产覆盖文件另设 CPU 与内存上限。"},
     {"key": "runner.isolation", "label": "插件运行器隔离", "env": None,
      "help": "只接入内部 plugin-control 网络，不接收 Redis 地址、密钥与 Docker socket。"},
 )

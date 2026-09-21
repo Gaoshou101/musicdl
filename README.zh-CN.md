@@ -44,22 +44,15 @@
 │                reverse proxy   (deploy/nginx, deploy/caddy)                │
 └───────────────────────────────────────────────────────┬────────────────────┘
        │                                                │
-       │                                                │ /admin + /api/*
-       │                                                ▼
-       │                  ┌──────────────────────────────────────────────────┐
-       │                  │       admin-panel   (uid 10001, read-only)       │
-       │                  │      rewrites /api/* to /admin/* on the app      │
-       │                  └─────────────────────────────┬────────────────────┘
-       │                                                │
-       │ /wecom (callback)                              │ http://musicdl:8000
-       ▼                                                ▼
-┌────────────────────────────────────────────────────────────────────────────┐
+                                                       │  /wecom/callback、控制台与 /admin
+                                                       ▼  是同一个进程：http://musicdl:8000
 │            musicdl main service   (uid 10001, read-only rootfs)            │
 │                                                                            │
 │┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐│
 ││       FastAPI        │  │    MessageWorker     │  │      JobWorker       ││
 ││    /wecom  /admin    │  │    search + rank     │  │   resolve+publish    ││
-└──────────┬─────────────────────────┬─────────────────────────┬─────────────┘
+││  /wecom  /admin  /   │  │    search + rank     │  │   resolve+publish    ││
+││  + static console    │  │                      │  │                      ││
            │                         │                         │
            HTTP                      redis://                  HTTPS
            ▼                         ▼                         ▼
@@ -69,7 +62,7 @@
 └──────────────────────┘   └──────────────────────┘   └──────────────────────┘
 ```
 
-`compose.yaml` 运行三个应用服务，不包含 Redis。`musicdl` 服务持有媒体、应用数据与 Telegram session 三个卷；`plugin-runner` 只接入内部的 `plugin-control` 网络，且不接收任何密钥；`admin-panel` 由 `docker/web/Dockerfile` 构建，与其他两个服务一样以非 root 身份运行在只读根文件系统上，发布自己的回环端口，并通过构建期固化在镜像里的 `/api/*` 重写访问应用。Redis 始终是外部服务，通过 `MUSICDL_REDIS__URL` 配置。
+`compose.yaml` 运行两个应用服务，不包含 Redis。`musicdl` 服务持有媒体、应用数据与 Telegram session 三个卷，并从 `/` 提供控制台——这些静态文件由 `docker/main/Dockerfile` 构建进它自己的镜像；`plugin-runner` 只接入内部的 `plugin-control` 网络，且不接收任何密钥。控制台是静态文件而不是第二个运行时：线上没有为它跑的 Node 进程，没有第二个对外端口，也没有一条路径可能和 API 走偏的重写规则。Redis 始终是外部服务，通过 `MUSICDL_REDIS__URL` 配置。
 
 ## 使用示例
 
@@ -134,12 +127,11 @@ docker compose up -d
 ```bash
 docker compose ps
 curl http://127.0.0.1:${MUSICDL_PORT:-8000}/healthz
-curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 ```
 
-`/healthz` 返回 `{"service":"musicdl","status":"ok","config_version":1}`，并且刻意不访问 Redis 与插件运行器，因此它只能证明进程存活。就绪状态是分开的：开启企业微信时 `/readyz` 会探测由 Redis 支撑的状态；关闭时虽然没有 worker 会掉线，但若后台检索所用的音源运行时未能装配，`/readyz` 仍会返回 `503`。
+整个门户只用一个端口：`/` 是控制台，`/admin/*` 是它调用的接口，`/wecom/callback` 是回调边界。`/wecom` 以上的部分都属于同一个进程，所以没有第二个健康探测地址，也不会出现「控制台说自己健康、应用已经挂了」这种情况。
 
-面板自己的 `/healthz` 返回 `{"status":"ok"}`：这是它唯一免登录就能访问的路由，也是 Compose 健康探测实际请求的地址，只说明面板进程正在处理请求，不触碰任何后端。
+`/healthz` 返回 `{"service":"musicdl","status":"ok","config_version":1}`，并且刻意不访问 Redis 与插件运行器，因此它只能证明进程存活。就绪状态是分开的：开启企业微信时 `/readyz` 会探测由 Redis 支撑的状态；关闭时虽然没有 worker 会掉线，但若后台检索所用的音源运行时未能装配，`/readyz` 仍会返回 `503`。
 
 从服务跑起来到真正可用还需要三步：
 
@@ -157,7 +149,7 @@ curl http://127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}/healthz
 |---|---|---|
 | `MUSICDL_REDIS__URL` | 必需 | 外部 Redis 地址，支持 `redis://` 与 `rediss://`。 |
 | `MUSICDL_PORT` | 可选 | Compose 发布的回环端口，默认 `8000`。 |
-| `MUSICDL_ADMIN_PORT` | 可选 | Compose 为面板发布的回环端口，默认 `3000`。 |
+| `MUSICDL_ADMIN__PANEL_ROOT` | 可选 | 控制台静态导出在容器内的位置。应用镜像已设为 `/app/panel`；没有构建过控制台的检出不会在 `/` 提供首页，只记一条警告，而不是拒绝启动。 |
 | `MUSICDL_WECOM__ENABLED` | 需要对外服务时 | 开启回调边界，默认 `false`。 |
 | `MUSICDL_WECOM__CORP_ID`、`__AGENT_ID`、`__TOKEN`、`__SECRET` | 开启企业微信时 | 企业 ID、应用 AgentId、回调 Token 与应用 Secret。 |
 | `MUSICDL_WECOM__API_BASE` | 可选 | 出网 API 地址，默认官方 `https://qyapi.weixin.qq.com`。海外部署可指向国内的反向代理（例如 `ddsderek/wxchat` 的 `http://主机:9080`），这样 `gettoken` 与发消息都从可信 IP 发出；注意公网明文 HTTP 会让应用 Secret 暴露在链路上。 |
@@ -217,17 +209,17 @@ JSON 路由继续返回 JSON，因此未认证的 `GET /admin/sources` 仍然是
 
 ## Web 控制台
 
-`web/` 是一个可选的 Next.js 控制台，只调用上面的这些路由，包含仪表板、音源管理、Bot 管理、运行配置、健康监控、日志与设置七个页面。它把自己的 `/api/*` 请求重写到应用的 `/admin/*` 路由，并且在构建期而不是运行期固定后端地址；「运行配置」页同时展示面板能改的字段与只有 compose 能改的容器项，改动会先攒成一批再一起保存。
+`web/` 是一个可选的 Next.js 控制台，只调用上面的这些路由，包含仪表板、音源管理、Bot 管理、运行配置、健康监控、日志与设置七个页面。它全部是客户端代码，所以 `next build` 直接导出静态文件，由应用从 `/` 提供，并就在同一个来源上调用 `/admin/*`——没有需要维护的重写规则，也没有构建期要固定的后端地址；「运行配置」页同时展示面板能改的字段与只有 compose 能改的容器项，改动会先攒成一批再一起保存。
 
 Bot 管理页上还带着这些定义实际调用所用的 Telegram 账号：会话自身的状态、三步完成的首次登录（手机号、登录码、两步验证密码），以及一个删除已存会话的退出登录。Bot 定义回答的是「要问哪个 Bot」，而这张卡片才能让提问真的发生。
 
 ```bash
 cd web
 npm install
-MUSICDL_API_ORIGIN=http://127.0.0.1:8000 npm run build
+npm run build
 ```
 
-`npm run check:api:remote` 对已部署的面板跑只读契约检查，`npm run check:api:local` 对本机应用与面板跑完整流程。面板现在就是 `compose.yaml` 里的一个服务：由 `docker/web/Dockerfile` 构建，Compose 发布 `127.0.0.1:${MUSICDL_ADMIN_PORT:-3000}`；目录结构见 `web/STRUCTURE.md`。
+`npm run check:api:remote` 对已部署的控制台跑只读契约检查，`npm run check:api:local` 对本机应用跑完整流程。控制台不是独立服务：`docker/main/Dockerfile` 把它构建进应用镜像，应用从 `/` 提供它，因此只要让应用的 `MUSICDL_ADMIN__PANEL_ROOT` 指向 `web/out` 就够了；目录结构见 `web/STRUCTURE.md`。
 
 ## 音源插件
 
@@ -265,7 +257,7 @@ MUSICDL_API_ORIGIN=http://127.0.0.1:8000 npm run build
 
 | 门禁 | 它判定什么 |
 |---|---|
-| `compose` | 三个应用服务、无 Redis 服务、非 root 用户、只读根文件系统、硬性 CPU 与内存上限、健康探测与内部插件网络。 |
+| `compose` | 两个应用服务、无 Redis 服务、非 root 用户、只读根文件系统、硬性 CPU 与内存上限、健康探测与内部插件网络。 |
 | `proxy` | Nginx 与 Caddy 模板是否终止 TLS、保留回调查询串，并把回调排除在访问日志之外。 |
 | `wecom-callback` | 位于公网 HTTPS 之后的真实企业微信应用；需人工执行，配合 `--wecom-url` 与 `--wecom-expected`。 |
 | `telegram-session-isolation` | session 卷及其凭证只属于主服务。 |
@@ -274,7 +266,7 @@ MUSICDL_API_ORIGIN=http://127.0.0.1:8000 npm run build
 | `admin-auth` | 后台相关测试文件在 `-W error` 下通过。 |
 | `compose-recovery` | 重启与卷契约成立、备份脚本能解析每个卷，并在隔离的 Redis 上完成一次恢复演练。 |
 
-CI（`.github/workflows/ci.yml`）会在每次 push 与 pull request 上运行测试套件与 `--self-test --dry-run`。托管运行器自带 Docker Engine，因此 `plugin-security` 会在那里真实执行；`wecom-callback` 与 `compose-recovery` 始终由人工执行，因为没有托管运行器能诚实地判定它们。另有一个 `admin-panel` 任务会对控制台做类型检查、构建镜像，并以只读方式启动容器冒烟测试 `/healthz`，因此面板是在 CI 里被验证，而不只是在运维自己的机器上。
+CI（`.github/workflows/ci.yml`）会在每次 push 与 pull request 上运行测试套件与 `--self-test --dry-run`。托管运行器自带 Docker Engine，因此 `plugin-security` 会在那里真实执行；`wecom-callback` 与 `compose-recovery` 始终由人工执行，因为没有托管运行器能诚实地判定它们。另有一个 `admin-panel` 任务会对控制台做类型检查，然后**用部署文件本身**构建并启动应用服务——就是主机上那份只读镜像、那些卷和那条命令——再向它要 `/healthz`、控制台首页，以及 `/admin/sources` 的 `401`。在 workflow 里复述这套边界只能证明 workflow 自己写的参数，驱动 compose 才能证明真正发布出去的那个容器。
 
 ## 开发
 
@@ -297,8 +289,8 @@ python -m pytest -q -W error
 | 运行时配置 | 每个配置分组及其默认值，集中在同一个模型里声明 | [config.py](./src/musicdl/config.py) |
 | 部署形态 | 服务、卷、网络与安全选项 | [compose.yaml](./compose.yaml) |
 | 生产限制 | 每个服务的 CPU、内存与重启策略 | [compose.prod.yaml](./compose.prod.yaml) |
-| 反向代理 | 位于后台之前终止 TLS 的 Nginx 与 Caddy 模板；`deploy/caddy/panel-edge.Caddyfile` 是只跑面板的部署，把 `/wecom/*` 送回产品进程，其余请求交给控制台 | [deploy](./deploy) |
-| 面板镜像 | 控制台如何构建、后端地址在哪里固定，以及它如何以容器方式运行 | [docker/web/Dockerfile](./docker/web/Dockerfile) |
+| 反向代理 | 位于后台之前终止 TLS 的 Nginx 与 Caddy 模板；所有请求都只发往一个上游，因为控制台与它背后的接口是同一个进程 | [deploy](./deploy) |
+| 控制台构建 | 控制台如何被编译进应用镜像，以及静态导出落在哪里 | [docker/main/Dockerfile](./docker/main/Dockerfile) |
 | 控制台结构 | 面板的目录结构与契约检查命令 | [web/STRUCTURE.md](./web/STRUCTURE.md) |
 | 发布门禁 | 门禁脚本、篡改自检与备份演练 | [run_gates.py](./scripts/release/run_gates.py) |
 | 依赖清单 | 固定版本、许可证与供应链证据 | [THIRD_PARTY.md](./THIRD_PARTY.md) |

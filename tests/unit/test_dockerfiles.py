@@ -57,48 +57,26 @@ def test_plugin_runner_packages_deno_host_asset():
     assert 'musicdl_plugin_runner = ["*.js"]' in text
 
 
-def test_panel_image_pins_node_builds_standalone_and_runs_non_root():
-    text = (ROOT / "docker/web/Dockerfile").read_text(encoding="utf-8")
-    assert "FROM node:22.23.2-slim" in text
-    assert text.count("FROM node:22.23.2-slim") == 3, "deps, builder, and runner are the same pinned base"
-    assert "npm ci" in text
-    assert "npm run build" in text
-    assert "USER 10001:10001" in text
-    assert "groupadd --gid 10001" in text
-    assert text.index("groupadd") < text.index("useradd")
-    assert "useradd --uid 10001" in text
-    assert "--shell /usr/sbin/nologin" in text
-    assert ".[dev]" not in text
+def test_the_console_is_built_into_the_app_image_and_not_into_one_of_its_own():
+    """The console is static files, so the runtime stage carries files, not Node.
 
-
-def test_panel_image_ships_the_standalone_server_and_its_static_chunks():
-    text = (ROOT / "docker/web/Dockerfile").read_text(encoding="utf-8")
-    runner = text[text.rindex("FROM "):]
-    # `standalone` carries the server and its slice of node_modules, but never
-    # the static chunks: those have to be copied beside it or every page loads
-    # without its JavaScript.
-    assert "COPY --from=builder --chown=10001:10001 /build/.next/standalone ./" in runner
-    assert "COPY --from=builder --chown=10001:10001 /build/.next/static ./.next/static" in runner
-    assert 'CMD ["node", "server.js"]' in runner
-    assert "/app/.next/cache" in runner, "the runtime needs a writable cache beside a read-only root"
-
-
-def test_panel_image_takes_the_app_origin_at_build_time():
-    """Next resolves its rewrites during `next build`, so the app address is an ARG.
-
-    A runtime ENV would be read by nothing: the rewrite is already compiled into
-    the server by the time the container starts.
+    A separate panel image would put a Node runtime back in production for a
+    build step, publish a second port, and need a forwarding hop. Asserting that
+    the export is copied in -- and that no panel Dockerfile exists to build
+    instead -- is what keeps the deployment at two containers.
     """
-    text = (ROOT / "docker/web/Dockerfile").read_text(encoding="utf-8")
-    assert "ARG MUSICDL_API_ORIGIN=http://musicdl:8000" in text
-    builder = text[text.index("FROM node:22.23.2-slim AS builder"):text.index("FROM node:22.23.2-slim AS runner")]
-    assert "ENV MUSICDL_API_ORIGIN=${MUSICDL_API_ORIGIN}" in builder
-    assert "npm run build" in builder
-    runner = text[text.rindex("FROM "):]
-    assert "MUSICDL_API_ORIGIN" not in runner
+    text = (ROOT / "docker/main/Dockerfile").read_text(encoding="utf-8")
+    assert not (ROOT / "docker/web/Dockerfile").exists()
+    panel = text[text.index("FROM node:22.23.2-slim AS panel"):text.index("FROM python:3.12.14-slim")]
+    assert "npm ci" in panel and "npm run build" in panel
+    runtime = text[text.rindex("FROM python:3.12.14-slim"):]
+    assert "COPY --from=panel --chown=10001:10001 /build/out /app/panel" in runtime
+    assert "ENV MUSICDL_ADMIN__PANEL_ROOT=/app/panel" in runtime
+    # Nothing from the Node toolchain survives into the stage that runs.
+    assert "npm" not in runtime and "node_modules" not in runtime
 
 
 def test_dockerignore_keeps_the_panel_build_output_out_of_the_context():
     text = (ROOT / ".dockerignore").read_text(encoding="utf-8")
-    for pattern in ("web/node_modules", "web/.next", "web/tsconfig.tsbuildinfo"):
+    for pattern in ("web/node_modules", "web/.next", "web/out", "web/tsconfig.tsbuildinfo"):
         assert pattern in text
