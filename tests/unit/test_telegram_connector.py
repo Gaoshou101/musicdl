@@ -281,3 +281,163 @@ def test_connector_disconnect_clears_clients(tmp_path):
     asyncio.run(connector.disconnect())
     assert client.disconnected is True
     assert len(connector._clients) == 0
+class FlowButton:
+    def __init__(self, text):
+        self.text = text
+
+
+class FlowRow:
+    def __init__(self, *labels):
+        self.buttons = tuple(FlowButton(label) for label in labels)
+
+
+class FlowMarkup:
+    def __init__(self, *rows):
+        self.rows = tuple(FlowRow(*row) for row in rows)
+
+
+class FlowMessage:
+    def __init__(self, *, text=None, markup=None, document=None):
+        self.message, self.reply_markup, self.document = text, markup, document
+        self.clicked = None
+
+    async def click(self, index):
+        self.clicked = index
+        return self
+
+
+class ScriptedConversation:
+    """Hands back the replies a Bot would send, in order."""
+
+    def __init__(self, replies, events):
+        self.replies, self.events = list(replies), events
+
+    async def __aenter__(self):
+        self.events.append("enter")
+        return self
+
+    async def __aexit__(self, *exc):
+        self.events.append("exit")
+        return False
+
+    async def send_message(self, command):
+        self.events.append(("send", command))
+
+    async def get_response(self, timeout=None):
+        self.events.append(("response", timeout))
+        return self.replies.pop(0)
+
+
+class FlowClient(FakeClient):
+    def __init__(self, replies, chunks=(), events=None, state="ready"):
+        super().__init__(state)
+        self.replies, self.chunks, self.events = replies, tuple(chunks), events if events is not None else []
+
+    def conversation(self, bot_username, timeout):
+        self.events.append(("conversation", bot_username, timeout))
+        return ScriptedConversation(self.replies, self.events)
+
+    async def iter_download(self, document, request_size=None):
+        self.events.append(("iter_download", document, request_size))
+        for chunk in self.chunks:
+            yield chunk
+
+
+def test_the_flow_presses_the_button_and_returns_the_file_behind_it(tmp_path):
+    listing = FlowMessage(text="1. 晴天", markup=FlowMarkup(["1", "2"]))
+    notice = FlowMessage(text="正在上传...")
+    file = FlowMessage(document="the-file")
+    client = FlowClient([listing, notice, file])
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+    flow = connector.bot_flow("default")
+
+    reply = asyncio.run(flow.select("music_v1bot", "/search 晴天", 10.0, "1"))
+
+    assert reply is file
+    assert listing.clicked == 0
+    assert client.events[0] == ("conversation", "music_v1bot", 10.0)
+    assert ("send", "/search 晴天") in client.events
+
+
+def test_the_flow_reads_the_second_entry_as_the_second_button(tmp_path):
+    listing = FlowMessage(text="1. a\n2. b", markup=FlowMarkup(["1", "2", "3"]))
+    file = FlowMessage(document="the-file")
+    client = FlowClient([listing, file])
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+
+    asyncio.run(connector.bot_flow("default").select("bot", "/s", 5.0, "2"))
+
+    assert listing.clicked == 1
+
+
+def test_the_flow_refuses_a_button_that_is_not_there(tmp_path):
+    listing = FlowMessage(text="1. a", markup=FlowMarkup(["上一页", "下一页"]))
+    client = FlowClient([listing])
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+
+    with pytest.raises(ValueError, match="bot_selection_missing"):
+        asyncio.run(connector.bot_flow("default").select("bot", "/s", 5.0, "1"))
+
+
+def test_the_flow_without_a_label_takes_the_file_the_bot_sends(tmp_path):
+    file = FlowMessage(document="the-file")
+    client = FlowClient([file])
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+
+    reply = asyncio.run(connector.bot_flow("default").select("bot", "/s", 5.0))
+
+    assert reply is file
+
+
+def test_the_flow_gives_up_when_no_reply_carries_a_file(tmp_path):
+    client = FlowClient([FlowMessage(text="没有找到相关歌曲")] * 8)
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+
+    with pytest.raises(ValueError, match="invalid_bot_response"):
+        asyncio.run(connector.bot_flow("default").select("bot", "/s", 5.0))
+
+
+def test_the_flow_streams_the_file_the_reply_carries(tmp_path):
+    file = FlowMessage(document="the-file")
+    client = FlowClient([file], chunks=[b"fLaC", bytearray(b"\x00\x01"), b""])
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+    flow = connector.bot_flow("default")
+
+    async def drain():
+        return [chunk async for chunk in flow.stream(file, request_size=4096)]
+
+    assert asyncio.run(drain()) == [b"fLaC", b"\x00\x01"]
+    assert client.events[-1] == ("iter_download", "the-file", 4096)
+
+
+def test_the_flow_refuses_a_reply_without_a_file(tmp_path):
+    client = FlowClient([])
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+    flow = connector.bot_flow("default")
+
+    async def drain():
+        return [chunk async for chunk in flow.stream(FlowMessage(text="no file"))]
+
+    with pytest.raises(ValueError, match="invalid_bot_response"):
+        asyncio.run(drain())
+
+
+def test_the_flow_reports_an_unauthorized_account_rather_than_asking(tmp_path):
+    class Unauthorized(FlowClient):
+        def conversation(self, bot_username, timeout):
+            raise AssertionError("a conversation was opened for a signed-out account")
+
+    client = Unauthorized([], state="new")
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: client)
+    flow = connector.bot_flow("default")
+
+    assert asyncio.run(flow.ready()) is False
+    with pytest.raises(RuntimeError, match="not authorized"):
+        asyncio.run(flow.ask("bot", "/search x", 5.0))
+
+
+def test_the_flow_and_the_requester_share_one_lock_per_bot(tmp_path):
+    connector = TelegramConnector(tmp_path, 1, "hash", lambda p: FakeClient("ready"))
+
+    assert connector.bot_lock("default", "MusicBot") is connector.bot_lock("default", "musicbot")
+    assert connector.bot_lock("default", "MusicBot") is not connector.bot_lock("other", "MusicBot")

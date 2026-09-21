@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from musicdl.admin.auth import AdminAuth
 from musicdl.admin.csrf import CSRFMiddleware
 from musicdl.admin.health import EventLogStore, SourceHealthStore
-from musicdl.admin.management import SourceManager
+from musicdl.admin.management import BotManager, SourceManager
 from musicdl.admin.portal import create_admin_router
 from musicdl.config import WorkerSettings
 from musicdl.media.models import DownloadEvent
@@ -189,14 +189,15 @@ class Runtime:
         self.registry = registry
 
 
-def build(*, failing: bool = False):
+def build(*, failing: bool = False, bots=None, source_health=None, entries=None):
     source = Source(failing=failing)
     auth, sources = AdminAuth(), SourceManager()
     auth.change_credentials("admin", "admin", "new-password")
     sources.register({"id": "primary", "name": "主音源", "priority": 3, "enabled": True})
     app = FastAPI()
-    service = Runtime(SourceRegistry([SourceEntry("primary", "1.0.0", source)]))
+    service = Runtime(SourceRegistry(entries if entries is not None else [SourceEntry("primary", "1.0.0", source)]))
     app.include_router(create_admin_router(auth=auth, sources=sources, events=EventLogStore(),
+                                           bots=bots, source_health=source_health,
                                            runtime=lambda: service, worker=WorkerSettings()))
     app.add_middleware(CSRFMiddleware, auth=auth)
     return app
@@ -251,6 +252,68 @@ def test_a_channel_that_fails_its_search_is_reported_as_failing():
     primary = run(scenario())
     assert primary["status"] == "failing"
     assert primary["last_error"] == "search_error" and primary["last_error_stage"] == "search"
+
+
+def test_a_telegram_bot_is_listed_as_a_configured_channel():
+    """The Bot page defines a channel the plugin list knows nothing about.
+
+    A Bot is searched and downloaded like any other channel, so a roll-up that
+    reads only the plugin list showed the channel that was answering as one
+    that had just been removed.
+    """
+
+    async def scenario():
+        bots = BotManager()
+        bots.register({"id": "music_v1bot", "username": "music_v1bot", "priority": 2})
+        entries = [SourceEntry("primary", "1.0.0", Source()),
+                   SourceEntry("music_v1bot", "music_v1bot", Source())]
+        async with client_for(build(bots=bots, entries=entries)) as client:
+            await signed_in(client)
+            return (await client.get("/admin/sources/health")).json()
+
+    bot = row(run(scenario()), "music_v1bot")
+    assert bot["configured"] is True and bot["enabled"] is True
+    assert bot["name"] == "music_v1bot" and bot["priority"] == 2
+    assert bot["status"] == "unknown"
+
+
+def test_a_bot_the_runtime_never_registered_is_not_a_channel():
+    """A definition without a channel behind it stays off the roll-up.
+
+    A deployment whose Telegram side is off keeps the shipped definition on
+    the Bot page, and the runtime registers nothing for it.  Listing it here
+    would be the same mistake in reverse: a channel that does not exist,
+    reported as one that is merely idle.
+    """
+
+    async def scenario():
+        bots = BotManager()
+        bots.register({"id": "music_v1bot", "username": "music_v1bot"})
+        async with client_for(build(bots=bots)) as client:
+            await signed_in(client)
+            return (await client.get("/admin/sources/health")).json()
+
+    assert [item["id"] for item in run(scenario())["sources"]] == ["primary"]
+
+
+def test_a_disabled_bot_is_history_rather_than_a_channel():
+    async def scenario():
+        bots = BotManager()
+        bots.register({"id": "music_v1bot", "username": "music_v1bot"})
+        bots.update("music_v1bot", enabled=False)
+        store = SourceHealthStore()
+        store.observe_search("music_v1bot", "ok", count=8)
+        entries = [SourceEntry("primary", "1.0.0", Source()),
+                   SourceEntry("music_v1bot", "music_v1bot", Source())]
+        async with client_for(build(bots=bots, source_health=store, entries=entries)) as client:
+            await signed_in(client)
+            return (await client.get("/admin/sources/health")).json()
+
+    bot = row(run(scenario()), "music_v1bot")
+    assert bot["configured"] is False and bot["enabled"] is False
+    # The listing it answered with is still worth reading.
+    assert bot["status"] == "ok" and bot["last_count"] == 8
+
 
 # -- the weight a search tie-break is given ------------------------------
 #
