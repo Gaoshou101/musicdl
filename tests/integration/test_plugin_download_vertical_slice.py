@@ -569,7 +569,7 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
 
     # WeCom saw the selection prompt and then the recorded success notice.
     assert slice_.wecom.sent[0][0] == FROM_USER
-    assert "primary@1" in slice_.wecom.sent[0][1] and "回复序号下载。" in slice_.wecom.sent[0][1]
+    assert "1. Song — Artist" in slice_.wecom.sent[0][1] and "回复序号下载。" in slice_.wecom.sent[0][1]
     assert slice_.wecom.sent[1][0] == FROM_USER
     assert slice_.wecom.sent[1][1].startswith("下载成功：")
     assert Path(slice_.wecom.sent[1][1].removeprefix("下载成功：")) == EXPECTED_RELATIVE
@@ -621,8 +621,11 @@ def test_vertical_slice_failure_reprompts_without_downloading_a_replacement(tmp_
 
     # WeCom saw the original prompt and exactly one replacement prompt, never a success notice.
     assert [user for user, _ in slice_.wecom.sent] == [FROM_USER, FROM_USER]
-    assert "primary@1" in slice_.wecom.sent[0][1]
-    assert "backup@1" in slice_.wecom.sent[1][1] and "回复序号下载。" in slice_.wecom.sent[1][1]
+    # The replacement is the same recording from another channel, so the row is
+    # the same row; what tells the two prompts apart is why the second one came.
+    assert "1. Song — Artist" in slice_.wecom.sent[0][1]
+    assert slice_.wecom.sent[1][1].startswith("上一次的结果下载失败，这里是最新的结果：")
+    assert "1. Song — Artist" in slice_.wecom.sent[1][1] and "回复序号下载。" in slice_.wecom.sent[1][1]
     assert all("下载成功" not in text for _, text in slice_.wecom.sent)
 
     # The job message was acknowledged once its fenced effects settled; nothing was dead-lettered.

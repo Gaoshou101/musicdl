@@ -83,15 +83,18 @@ A message that reaches the WeCom callback is parsed into one command. Bare text 
 | `n`, `p`, `/c`, `/cancel` | `parse_command` recognises them, but no worker consumes them yet, so they currently produce no reply. |
 | Any other `/command` | Recorded as unsupported. |
 
-The reply renders one line per candidate, with optional album, duration, and bitrate appended when the source states them:
+The words are taken as typed, and the search folds the separator between a song and its artist, so `月光 陈慧娴` and `月光-陈慧娴` are one request. The reply says what was searched and then renders one short line per candidate:
 
 ```text
-1. <title> - <artist>（<source_id>@<source_version>；格式 <format>；大小 <size>）
+「月光-陈慧娴」找到 84 个结果：
+
+1. 月光 — 陈慧娴《几时再见演唱会》  ·  4:29  ·  FLAC 1411kbps  ·  网易云
+2. 月光 — 陈慧娴《永远是你的朋友》  ·  4:46  ·  MP3 320kbps  ·  QQ音乐
 
 回复序号下载。
 ```
 
-The `musicdl` service sends that text and the user answers with `1`. The selected candidate is bound to a generation, so a token minted against an older candidate list cannot select a refreshed one.
+Every row leads with the title, the artist, and the album, and then appends only what the channel actually stated: the running time, the quality, and the catalogue named the way a person reads it. A missing field is left out rather than printed as `未知`. The `musicdl` service sends that text and the user answers with `1`. The selected candidate is bound to a generation, so a token minted against an older candidate list cannot select a refreshed one; when a download fails and the refreshed list is sent instead, that prompt says why it repeats.
 
 ### Exercising a source without WeCom
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import inspect
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -41,6 +42,18 @@ class SearchResult:
 def search_result_version(candidates: Sequence[Candidate]) -> str:
     public = [candidate.public_representation for candidate in candidates]
     return hashlib.sha256(json.dumps(public, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+# The separators people type between a song and its artist, and the space a
+# catalogue answers with.  Folding them is what makes "晴天-周杰伦" the same
+# request as "晴天 周杰伦": the hyphenated spelling used to miss the
+# exact-match tier entirely, and the quality sort then buried the recording
+# somebody had asked for by name under louder versions of the same title.
+_SEPARATORS = re.compile(r"[\s\-–—―－_·/]+")
+
+
+def _search_key(value: str) -> str:
+    return _SEPARATORS.sub(" ", value.casefold()).strip()
 
 
 async def _invoke(entry: SourceEntry, query: str, timeout: float, max_results: int) -> tuple[SourceStatus, list[Candidate]]:
@@ -113,15 +126,30 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
                     rank == incumbent_rank
                     and (prefer > incumbent_prefer or (prefer == incumbent_prefer and stable < incumbent_stable))):
                 by_identity[key] = (candidate, entry)
-    q = query.casefold()
+    q = _search_key(query)
     retained = [(v[0], v[1]) for v in by_identity.values()]
-    def ordering(pair):
-        c, entry = pair
-        title, combined = c.title.casefold(), f"{c.title} {c.artist}".casefold()
-        relevance = 0 if title == q or combined == q else 1 if q in combined else 2
+
+    def relevance_of(candidate: Candidate) -> int:
+        """How close one candidate is to what was typed, separators aside.
+
+        A song is asked for as "title artist" or as "artist title", and the
+        catalogue answers with one spelling of it.  Both spellings are checked,
+        because a request that names the artist exactly is an exact request
+        whichever way round it was written.
+        """
+        as_written = _search_key(f"{candidate.title} {candidate.artist}")
+        swapped = _search_key(f"{candidate.artist} {candidate.title}")
+        if q in (_search_key(candidate.title), as_written, swapped):
+            return 0
+        return 1 if q in as_written or q in swapped else 2
+
+    def ordering(row):
+        relevance, c, entry = row
         quality = quality_key(c, entry.priority)
-        return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], entry.priority, title, c.artist.casefold(), c.source_id.casefold(), c.item_id.casefold())
-    ordered = tuple(c for c, _ in sorted(retained, key=ordering))
+        return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], entry.priority,
+                c.title.casefold(), c.artist.casefold(), c.source_id.casefold(), c.item_id.casefold())
+    ranked = ((relevance_of(c), c, entry) for c, entry in retained)
+    ordered = tuple(c for _, c, _ in sorted(ranked, key=ordering))
     offers = tuple(_offers_of(offered[candidate.canonical_version_key], preference)
                    for candidate in ordered)
     return SearchResult(ordered, tuple(s for s, _ in outcomes), search_result_version(ordered), offers)

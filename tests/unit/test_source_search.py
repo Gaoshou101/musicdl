@@ -292,3 +292,40 @@ def test_two_platforms_listing_one_song_are_two_rows():
 
     assert [candidate.platform for candidate in result.candidates] == ["tx", "wy", "kw"]
     assert all(offered == ("a",) for offered in result.offers)
+
+
+# -- how a request is spelled, and what the catalogue answers with ----------
+#
+# A song is asked for by title and artist in whatever shape the keyboard
+# produced.  The catalogue answers with one spelling of it, so a request that
+# names it exactly has to reach the exact-match tier whichever separator was
+# typed -- otherwise the quality sort decides, and the recording somebody asked
+# for by name is buried under louder versions of the same title.
+
+
+def _two_spellings_of_one_request():
+    async def source(query):
+        return [Candidate(source_id="a", source_version="1", item_id="louder", title="晴天",
+                          artist="一路向北", album="大声", duration=400, format="flac", bitrate=1411),
+                Candidate(source_id="a", source_version="1", item_id="asked", title="晴天",
+                          artist="周杰伦", album="叶惠美", duration=269, format="mp3", bitrate=320)]
+    return SourceRegistry([SourceEntry("a", "1", source)])
+
+
+@pytest.mark.parametrize("query", ["晴天 周杰伦", "晴天-周杰伦", "晴天 - 周杰伦",
+                                   "晴天–周杰伦", "晴天—周杰伦", "周杰伦 晴天"])
+def test_a_separator_between_a_song_and_its_artist_does_not_hide_the_exact_match(query):
+    result = asyncio.run(search_sources(_two_spellings_of_one_request(), query))
+
+    assert [c.item_id for c in result.candidates] == ["asked", "louder"]
+
+
+def test_a_request_that_names_nothing_exactly_still_falls_back_to_the_quality_sort():
+    async def source(query):
+        return [Candidate(source_id="a", source_version="1", item_id="lossy", title="晴天", artist="A",
+                          format="mp3", bitrate=64),
+                Candidate(source_id="a", source_version="1", item_id="lossless", title="晴天", artist="B",
+                          format="flac", bitrate=1411)]
+    result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "路过"))
+
+    assert [c.item_id for c in result.candidates] == ["lossless", "lossy"]
