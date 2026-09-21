@@ -178,6 +178,7 @@ Part of the table below can also be moved into the panel: it keeps its own layer
 | `MUSICDL_TELEGRAM__PROFILE`, `__SESSION_ROOT` | No | Restricted session profile and mount. Default to `default` and `/data/telegram-sessions`. |
 | `MUSICDL_AI__ENABLED` | No | Advisory ranking and language classification. Defaults to `false`. |
 | `MUSICDL_AI__BASE_URL`, `__API_KEY`, `__MODEL`, `__TIMEOUT`, `__MAX_CANDIDATES` | When AI is enabled | OpenAI-compatible endpoint settings. |
+| `MUSICDL_AI__USER_AGENT` | No | Optional User-Agent for the completion request. Some relays only answer a specific client -- agentrouter.org rejected every default Python, curl and browser agent with `401 unauthorized_client_error` and admitted `claude-cli/1.0.0 (external, cli)`. Blank keeps the HTTP client's own value. |
 | `MUSICDL_WORKER__*` | No | Search, resolve, health, and job budgets. The settings validate their own inequalities at startup rather than at first use. |
 
 ## Administration Portal

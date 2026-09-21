@@ -126,7 +126,10 @@ GROUPS: tuple[ConfigGroup, ...] = (
                         "OpenAI 兼容接口的 base URL，例如 https://api.openai.com/v1。"),
             ConfigField("ai.api_key", "API Key", "secret", "留空表示不修改。"),
             ConfigField("ai.model", "模型名", "text", "启用时必须填写。"),
-            ConfigField("ai.timeout", "超时（秒）", "float", "默认 10 秒，最大 60 秒。"),
+            ConfigField("ai.user_agent", "User-Agent", "text",
+                        "留空使用 HTTP 客户端默认值。部分中转站只放行特定客户端的 UA，"
+                        "例如 claude-cli/1.0.0 (external, cli)。"),
+            ConfigField("ai.timeout", "超时（秒）", "float", "默认 10 秒，最大 120 秒。"),
             ConfigField("ai.max_candidates", "参与排序的候选数", "int", "默认 20，最大 100。"),
         ),
     ),
