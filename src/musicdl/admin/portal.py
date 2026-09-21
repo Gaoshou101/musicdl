@@ -95,6 +95,34 @@ def _shared_catalogue(registry, source_id: str) -> bool:
     return bool(getattr(getattr(entry, "source", None), "catalogue_shared", False))
 
 
+def _bot_channels(installed: list[dict], bots: Any, registry: Any) -> list[dict]:
+    """The Telegram Bots this runtime registered, in the plugin list's shape.
+
+    A Bot is a channel like any other -- the panel searches it and downloads
+    through it -- but it is defined on the Bot page rather than in the source
+    list, so it is missing from ``sources.list()``.  The roll-up read that
+    absence as "a channel that was just removed", which greyed out the one
+    channel that was answering.
+
+    Only a Bot the runtime actually registered is a channel: one that is
+    disabled, or defined in a deployment whose Telegram side is off, serves
+    nothing, and listing it as a healthy but idle channel would be the same
+    mistake in reverse.
+    """
+    listed = {item.get("id") for item in installed}
+    channels: list[dict] = []
+    for item in bots.list() or ():
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        source_id = item.get("id")
+        if (not isinstance(source_id, str) or not source_id or source_id in listed
+                or registry is None or registry.get(source_id) is None):
+            continue
+        channels.append({"id": source_id, "name": item.get("name") or item.get("username"),
+                         "enabled": True, "priority": item.get("priority", 0)})
+    return channels
+
+
 def _media_target(root: str | Path, relative_path: str) -> Path:
     """Resolve one artifact below the media root, or refuse it.
 
@@ -397,7 +425,12 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         while looking at a source -- is this one working.
         """
         require(request)
-        return source_health.snapshot(sources.list())
+        # The Telegram Bots are channels too, and they reach this roll-up from
+        # their own definitions and the runtime's registry rather than from the
+        # plugin list.
+        installed = sources.list()
+        registry = getattr(runtime() if runtime is not None else None, "registry", None)
+        return source_health.snapshot([*installed, *_bot_channels(installed, bots, registry)])
 
     @router.post("/sources/analyze")
     async def analyze_import(body: dict, request: Request):
