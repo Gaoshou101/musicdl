@@ -31,6 +31,115 @@ def telethon_client_factory(api_id: int, api_hash: str, proxy: Any = None) -> Ca
     return factory
 
 
+def _media_of(message: Any) -> Any | None:
+    """The file one Bot reply carries, if it carries one."""
+    return (getattr(message, "document", None) or getattr(message, "audio", None)
+            or getattr(message, "voice", None))
+
+
+def button_index(message: Any, label: str) -> int:
+    """Where the inline button carrying ``label`` sits, counted across rows.
+
+    A Bot numbers its entries per listing, so the label is what identifies the
+    entry the operator picked; the position is only how Telethon reaches it.
+    """
+    wanted = "" if label is None else label.strip()
+    rows = getattr(getattr(message, "reply_markup", None), "rows", None) or ()
+    position = 0
+    for row in rows:
+        for button in getattr(row, "buttons", None) or ():
+            text = getattr(button, "text", None)
+            if isinstance(text, str) and text.strip() == wanted and wanted:
+                return position
+            position += 1
+    raise ValueError("bot_selection_missing")
+
+
+class TelegramBotFlow:
+    """A Bot conversation as two moves: ask one question, fetch one file.
+
+    A Bot that answers with a numbered list needs both moves in the same
+    conversation -- the listing is the search result and the button press is
+    the download -- and the file that comes back is streamed by the same
+    client.  Which move a Bot needs is decided by the adapter above this; the
+    flow only knows how to send a command, press a button, and read bytes.
+    """
+
+    #: A Bot that announces itself ("正在上传...") before the file has to be
+    #: read past, and a chatty one must not hold a worker open forever.
+    MAX_REPLIES = 4
+    #: 512 KiB per request measured ~0.5 MiB/s from the deployment host to
+    #: Telegram's DC on 2026-09-21; the bound only keeps a caller from asking
+    #: for a chunk size Telethon will not honour.
+    DEFAULT_REQUEST_SIZE = 512 * 1024
+
+    def __init__(self, connector: "TelegramConnector", profile: str):
+        self._connector = connector
+        self.profile = profile
+
+    async def _client(self):
+        client = await self._connector._client(self.profile)
+        if not await client.is_user_authorized():
+            raise RuntimeError("telegram client is not authorized")
+        return client
+
+    async def ready(self) -> bool:
+        """Whether this flow could talk to Telegram right now, without asking."""
+        try:
+            return await self._client() is not None
+        except Exception:  # noqa: BLE001 - a probe reports, it does not raise
+            return False
+
+    async def ask(self, bot_username: str, command: str, timeout: float) -> Any:
+        """Send one command and return the reply it produced."""
+        client = await self._client()
+        async with self._connector.bot_lock(self.profile, bot_username):
+            async with client.conversation(bot_username, timeout=timeout) as conversation:
+                await conversation.send_message(command)
+                return await conversation.get_response()
+
+    async def select(self, bot_username: str, command: str, timeout: float,
+                     label: str | None = None) -> Any:
+        """Replay one search and return the file reply it leads to.
+
+        ``label`` is the listing button to press.  Without one the Bot answers
+        with the file itself, which is the older contract; either way the reply
+        that carries a file is what comes back.
+        """
+        client = await self._client()
+        async with self._connector.bot_lock(self.profile, bot_username):
+            async with client.conversation(bot_username, timeout=timeout) as conversation:
+                await conversation.send_message(command)
+                reply = await conversation.get_response()
+                if label is not None:
+                    await reply.click(button_index(reply, label))
+                    reply = None
+                for _ in range(self.MAX_REPLIES):
+                    if reply is None:
+                        reply = await conversation.get_response(timeout=timeout)
+                    if _media_of(reply) is not None:
+                        return reply
+                    reply = None
+        raise ValueError("invalid_bot_response")
+
+    async def stream(self, message: Any, *, request_size: int | None = None):
+        """Yield the bytes of one file reply, in the order Telegram serves them."""
+        if isinstance(request_size, bool) or (request_size is not None
+                                              and (not isinstance(request_size, int)
+                                                   or not 1024 <= request_size <= 1024 * 1024)):
+            raise ValueError("invalid_chunk_size")
+        document = _media_of(message)
+        if document is None:
+            raise ValueError("invalid_bot_response")
+        client = await self._client()
+        async for chunk in client.iter_download(
+                document, request_size=request_size or self.DEFAULT_REQUEST_SIZE):
+            if isinstance(chunk, bytearray):
+                chunk = bytes(chunk)
+            if isinstance(chunk, bytes) and chunk:
+                yield chunk
+
+
 class TelegramConnector:
     """Small orchestration boundary around an injectable Telegram client."""
 
@@ -232,22 +341,31 @@ class TelegramConnector:
             raise TypeError("decoder must be callable")
 
         async def request(bot_username: str, command: str, timeout: float):
-            client = await self._client(profile)
-            if not await client.is_user_authorized():
-                raise RuntimeError("telegram client is not authorized")
-            lock_key = (profile, bot_username.lower())
-            if lock_key not in self._bot_locks:
-                self._bot_locks[lock_key] = asyncio.Lock()
-            async with self._bot_locks[lock_key]:
-                async with client.conversation(bot_username, timeout=timeout) as conversation:
-                    await conversation.send_message(command)
-                    response = await conversation.get_response()
+            response = await self.bot_flow(profile).ask(bot_username, command, timeout)
             decoded = decoder(response)
             if inspect.isawaitable(decoded):
                 decoded = await decoded
             return decoded
 
         return request
+
+    def bot_lock(self, profile: str, bot_username: str) -> asyncio.Lock:
+        """The lock for one Bot in one profile.
+
+        Two searches landing in the same chat at once would answer each other's
+        requests -- the Bot replies in order, not in pairs -- so every
+        conversation with a Bot is serialised here, and the requester and the
+        flow above share the one lock.
+        """
+        key = (profile, str(bot_username).lower())
+        lock = self._bot_locks.get(key)
+        if lock is None:
+            lock = self._bot_locks[key] = asyncio.Lock()
+        return lock
+
+    def bot_flow(self, profile: str) -> TelegramBotFlow:
+        """The conversation, button, and file primitives for one profile."""
+        return TelegramBotFlow(self, profile)
 
     async def restore(self, profile: str) -> TelegramResult:
         try:

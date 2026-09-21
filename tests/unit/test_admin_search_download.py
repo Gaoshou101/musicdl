@@ -347,3 +347,53 @@ def test_a_failed_download_leaves_a_warning_in_the_service_log(tmp_path, caplog)
 
     assert response.status_code == 502
     assert any("panel download failed" in record.getMessage() for record in caplog.records)
+
+class SlowSource(Source):
+    """A channel that streams through something slower than a CDN.
+
+    A Telegram Bot hands a file over at whatever the account's link allows; it
+    says so with ``stream_budget_seconds``, and the panel has to read that
+    rather than cut the download off at the CDN-sized budget.
+    """
+
+    def __init__(self, budget: float) -> None:
+        super().__init__("bot")
+        self.stream_budget_seconds = budget
+        self.served = False
+
+    async def download(self, candidate: Candidate):
+        await asyncio.sleep(0.3)
+        self.served = True
+        return await super().download(candidate)
+
+
+def app_with(tmp_path, source):
+    auth, events = AdminAuth(), EventLogStore()
+    auth.change_credentials("admin", "operator", "new-password")
+    app = FastAPI()
+    service = Runtime(SourceRegistry([SourceEntry(source.source_id, "1.0.0", source)]),
+                      {source.source_id: source})
+    app.include_router(create_admin_router(auth=auth, events=events, runtime=lambda: service,
+                                           media_root=tmp_path, worker=WorkerSettings()))
+    app.add_middleware(CSRFMiddleware, auth=auth)
+    return app
+
+
+def test_the_panel_gives_a_slow_channel_the_budget_it_asks_for(tmp_path):
+    """The configured 15s is for a CDN; a channel that names its own budget gets it."""
+
+    async def scenario(budget):
+        source = SlowSource(budget)
+        async with client_for(app_with(tmp_path, source)) as client:
+            token = await signed_in(client)
+            candidate = (await client.get("/admin/search", params={"q": "稻香"})).json()["candidates"][0]
+            response = await client.post("/admin/download", json={"candidate": candidate},
+                                         headers={"x-csrf-token": token})
+        return response, source
+
+    cut_off, ignored = run(scenario(0.05))
+    served, slow = run(scenario(60.0))
+
+    assert cut_off.status_code == 504 and cut_off.json()["detail"] == "media_timeout"
+    assert ignored.served is False
+    assert served.status_code == 200 and slow.served is True

@@ -343,8 +343,14 @@ def test_enabled_telegram_registers_one_source_per_enabled_definition(runtime_fa
 
     custom = entries["custom"]
     assert custom.source.command_template == "/get {query}" and custom.source.timeout == 4.0
-    # One connector serves every definition, so the bridges are the same object.
-    assert public.source.requester is custom.source.requester
+    # One connector serves every definition, so the conversations with each Bot
+    # go through the same flow object, and every definition is also a resolver:
+    # the channel that listed a recording is the channel asked for the file,
+    # which is the whole reason a Bot is a source here.
+    assert public.source.flow is custom.source.flow
+    assert sorted(runtime.resolvers) == ["custom", "public"]
+    assert runtime.resolvers["public"] is public.source
+    assert runtime.resolvers["custom"] is custom.source
 
 
 def test_the_portal_does_not_get_a_second_toggle_for_a_telegram_bot(runtime_fakes, tmp_path):

@@ -37,6 +37,19 @@ def _positive(value: Any, default: float) -> float:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else default
 
 
+def _stream_budget(source: Any, fallback: float) -> float:
+    """How long one channel may take to hand over a file.
+
+    The configured budget is sized for a CDN that answers in seconds.  A
+    channel that streams through something else says what it needs -- a
+    Telegram Bot hands the file over at whatever the account's link to
+    Telegram allows, measured at 0.5 MiB/s on 2026-09-21 -- and everything that
+    says nothing keeps the configured budget.
+    """
+    declared = getattr(source, "stream_budget_seconds", None)
+    return _positive(declared, fallback)
+
+
 def _same_recording(wanted: Candidate, other: Candidate) -> bool:
     """Whether two channels offered the same recording.
 
@@ -577,7 +590,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             if source is None:
                 raise HTTPException(404, "source cannot resolve media")
             try:
-                async with asyncio.timeout(resolve_timeout):
+                async with asyncio.timeout(_stream_budget(source, resolve_timeout)):
                     result = await download_candidate(candidate, source, media_root,
                                                       request_id=request_id, record=recorded)
             except MediaError as exc:
@@ -591,7 +604,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         # more resolve when the refresh produced another channel's copy.
         attempt = await download_with_fallback(
             candidate, resolvers, media_root, request_id=request_id, query=query, refresh=refresh,
-            resolve_stream_timeout=resolve_timeout, refresh_timeout=search_timeout,
+            resolve_stream_timeout=_stream_budget(resolvers.get(candidate.source_id), resolve_timeout),
+            refresh_timeout=search_timeout,
             health_timeout=health_timeout, record=recorded)
         if attempt.download is not None:
             return report(candidate.source_id, None, attempt.download)
@@ -599,8 +613,9 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         replacement = _replacement(candidate, getattr(attempt.refreshed, "candidates", ()), resolvers)
         if replacement is not None:
             try:
-                async with asyncio.timeout(resolve_timeout):
-                    result = await download_candidate(replacement, resolvers[replacement.source_id],
+                replacement_source = resolvers[replacement.source_id]
+                async with asyncio.timeout(_stream_budget(replacement_source, resolve_timeout)):
+                    result = await download_candidate(replacement, replacement_source,
                                                       media_root, request_id=request_id, record=recorded)
             except MediaError as exc:
                 code = exc.code

@@ -28,10 +28,9 @@ from .admin import (DEFAULT_BOTS, AdminAuth, AdminStateStore, AuditLogStore, Bot
 from .admin.csrf import CSRFMiddleware
 from .admin.portal import create_admin_router
 from .media import classify_language
-from .telegram.bots import CustomTelegramBot, PublicTelegramBot
 from .telegram.connector import TelegramConnector, telethon_client_factory
-from .telegram.decoder import decode_media_message
 from .telegram.models import TelegramStatus
+from .telegram.source import TelegramBotSource
 
 try:
     from redis.asyncio import Redis
@@ -224,7 +223,7 @@ class _Runtime:
 
 
 def _telegram_sources(telegram_settings, bots, *, known_ids=frozenset(), factory=None):
-    """Build the connector and one search adapter per enabled Bot definition.
+    """Build the connector, one source per enabled Bot definition, its resolvers.
 
     The definitions are owned by the administration portal, so an enabled
     Telegram deployment with nothing defined registers nothing and the admin
@@ -232,6 +231,11 @@ def _telegram_sources(telegram_settings, bots, *, known_ids=frozenset(), factory
     username doubles as its source version, which is what the WeCom prompt shows
     as the version-identifying field and what separates two bots that return the
     same recording.
+
+    Each definition becomes a whole source rather than a search-only adapter:
+    the Bots this project is built around answer a search with a numbered list
+    and only send the audio once a button is pressed, so the channel that
+    listed a recording is the channel that has to fetch it.
     """
     api_hash = telegram_settings.api_hash
     secret = api_hash.get_secret_value() if hasattr(api_hash, "get_secret_value") else api_hash
@@ -239,8 +243,8 @@ def _telegram_sources(telegram_settings, bots, *, known_ids=frozenset(), factory
         telegram_settings.session_root, telegram_settings.api_id, secret,
         factory or telethon_client_factory(telegram_settings.api_id, secret,
                                            getattr(telegram_settings, "proxy", None)))
-    requester = connector.bot_requester(telegram_settings.profile, decode_media_message)
-    known, definitions = set(known_ids), []
+    flow = connector.bot_flow(telegram_settings.profile)
+    known, definitions, resolvers = set(known_ids), [], {}
     for definition in bots:
         if not definition.get("enabled", True):
             continue
@@ -249,13 +253,13 @@ def _telegram_sources(telegram_settings, bots, *, known_ids=frozenset(), factory
             raise ValueError("duplicate_source_id")
         known.add(source_id)
         template = definition.get("command_template")
-        builder = CustomTelegramBot if template else PublicTelegramBot
-        extra = {"command_template": template} if template else {}
-        adapter = builder(username, requester, source_id=source_id, source_version=username,
-                          timeout=definition["timeout"], **extra)
+        adapter = TelegramBotSource(username, flow, source_id=source_id, source_version=username,
+                                    command_template=template or "/search {query}",
+                                    timeout=definition["timeout"])
         definitions.append(SourceEntry(source_id, username, adapter,
                                        priority=definition.get("priority", 0)))
-    return connector, definitions
+        resolvers[source_id] = adapter
+    return connector, definitions, resolvers
 
 
 def _search_adapter(stored, source: PluginSource, platform_search: PlatformSearch):
@@ -341,10 +345,11 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
     telegram_sources = 0
     telegram_settings = getattr(settings, "telegram", None)
     if getattr(telegram_settings, "enabled", False):
-        telegram, definitions = _telegram_sources(
+        telegram, definitions, bot_resolvers = _telegram_sources(
             telegram_settings, bots, known_ids={entry.source_id for entry in entries},
             factory=telegram_client_factory)
         entries.extend(definitions)
+        resolvers.update(bot_resolvers)
         telegram_sources = len(definitions)
     registry = SourceRegistry(entries)
 
