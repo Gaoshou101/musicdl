@@ -13,7 +13,7 @@ MAX_MEDIA_BYTES = 500 * 1024 * 1024
 _DOWNLOAD_CODES = frozenset({
     "invalid_max_bytes", "invalid_chunk", "file_too_large", "download_failed", "empty_download",
     "size_mismatch", "unsupported_extension", "signature_mismatch", "extension_mismatch",
-    "mime_mismatch", "path_escape", "artifact_uncertain", "media_url_denied", "media_host_denied",
+    "mime_mismatch", "path_escape", "path_too_long", "artifact_uncertain", "media_url_denied", "media_host_denied",
     "media_dns_failed", "media_address_denied", "media_connect_failed", "media_tls_failed",
     "media_timeout", "media_redirect_denied", "media_response_invalid",
 })

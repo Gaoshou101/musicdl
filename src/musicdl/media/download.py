@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import os
 import stat
@@ -57,6 +58,13 @@ def _record_failure(
 ) -> None:
     emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                                      "download", "failed", error_code=code, size_bytes=size or None))
+
+
+def _path_too_long(error: BaseException) -> bool:
+    return isinstance(error, OSError) and (
+        getattr(error, "errno", None) == errno.ENAMETOOLONG
+        or getattr(error, "winerror", None) == 206
+    )
 
 
 def _relative_path(root: Path, value: str) -> Path:
@@ -350,7 +358,10 @@ async def download_candidate(
                     counter += 1
                     target = base.with_name(f"{base.stem} ({counter}){base.suffix}")
                 except OSError as exc:
-                    if getattr(exc, "winerror", None) == 1 or getattr(exc, "errno", None) in {18, 38, 95}:
+                    fallback_errnos = {errno.EXDEV, getattr(errno, "EOPNOTSUPP", -1)}
+                    if getattr(exc, "winerror", None) == 1 or (
+                        getattr(exc, "errno", None) in fallback_errnos and not _path_too_long(exc)
+                    ):
                         while target.exists():
                             counter += 1
                             target = base.with_name(f"{base.stem} ({counter}){base.suffix}")
@@ -388,8 +399,9 @@ async def download_candidate(
         raise MediaError(code) from None
     except Exception as exc:
         primary_error = exc
-        _record_failure(record, candidate, request_id, size, "download_failed")
-        raise MediaError("download_failed") from None
+        code = "path_too_long" if _path_too_long(exc) else "download_failed"
+        _record_failure(record, candidate, request_id, size, code)
+        raise MediaError(code) from None
     finally:
         if metadata is not None:
             try:

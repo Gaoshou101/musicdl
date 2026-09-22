@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -9,6 +10,8 @@ from .models import DownloadMetadata, Language, MediaError
 
 _ILLEGAL: Final[re.Pattern[str]] = re.compile(r'[<>:"/\\|?*]')
 _RESERVED: Final[frozenset[str]] = frozenset({"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))})
+_MAX_COMPONENT_BYTES: Final[int] = 240
+_HASH_HEX_LENGTH: Final[int] = 12
 _EXTENSIONS: Final[dict[str, tuple[str, frozenset[str]]]] = {
     ".mp3": ("audio/mpeg", frozenset({"mp3"})),
     ".flac": ("audio/flac", frozenset({"flac"})),
@@ -39,6 +42,16 @@ def normalize_language(value: str | None) -> Language:
     return value if value in {"华语", "欧美", "日韩"} else "未知"  # type: ignore[return-value]
 
 
+def _fit_component(value: str, max_bytes: int = _MAX_COMPONENT_BYTES) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    marker = "~" + hashlib.sha256(encoded).hexdigest()[:_HASH_HEX_LENGTH]
+    budget = max_bytes - len(marker)
+    prefix = encoded[:budget].decode("utf-8", errors="ignore").rstrip(" .")
+    return (prefix or "未知") + marker
+
+
 def sanitize_component(value: str | None) -> str:
     text = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(value or ""))
     text = _ILLEGAL.sub("_", text)
@@ -48,7 +61,7 @@ def sanitize_component(value: str | None) -> str:
     stem = text.split(".", 1)[0].upper()
     if stem in _RESERVED:
         text = "_" + text
-    return text
+    return _fit_component(text)
 
 
 def validated_destination(root: str | Path, language: str | None, artist: str, title: str, extension: str) -> Path:
@@ -65,7 +78,11 @@ def validated_destination(root: str | Path, language: str | None, artist: str, t
         ext = "." + ext
     if ext not in _EXTENSIONS:
         raise MediaError("unsupported_extension")
-    target = root_path / lang / artist_name / f"{title_name} - {artist_name}{ext}"
+    filename_stem = _fit_component(
+        f"{title_name} - {artist_name}",
+        _MAX_COMPONENT_BYTES - len(ext.encode("utf-8")),
+    )
+    target = root_path / lang / artist_name / f"{filename_stem}{ext}"
     try:
         _normalize_for_containment(target.resolve(strict=False)).relative_to(_normalize_for_containment(root_path))
     except ValueError as exc:

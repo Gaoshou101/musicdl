@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -224,6 +225,23 @@ def test_fsync_failure_closes_and_cleans(tmp_path, monkeypatch):
     events = []
     with pytest.raises(MediaError, match="download_failed") as exc: asyncio.run(download_candidate(candidate(), Source(DownloadMetadata(chunks=chunks(ID3), extension="mp3")), tmp_path, request_id="r", record=events.append))
     assert len(events) == 1 and events[0].error_code == "download_failed" and "secret" not in repr(exc.value)
+    assert not list(tmp_path.rglob("*.mp3")) and not list(tmp_path.glob(".musicdl-*.part"))
+
+
+def test_path_too_long_os_error_has_specific_code(tmp_path, monkeypatch):
+    events = []
+    too_long = OSError(errno.ENAMETOOLONG, "operator metadata must not leak")
+    monkeypatch.setattr(os, "link", lambda *_args: (_ for _ in ()).throw(too_long))
+
+    with pytest.raises(MediaError, match="path_too_long") as exc:
+        asyncio.run(download_candidate(
+            candidate(), Source(DownloadMetadata(chunks=chunks(ID3), extension="mp3")),
+            tmp_path, request_id="r", record=events.append,
+        ))
+
+    assert exc.value.code == "path_too_long"
+    assert events[-1].error_code == "path_too_long"
+    assert "operator metadata" not in repr(exc.value)
     assert not list(tmp_path.rglob("*.mp3")) and not list(tmp_path.glob(".musicdl-*.part"))
 
 
