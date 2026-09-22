@@ -258,6 +258,18 @@ Some incompatibilities are deliberate: a plugin cannot import arbitrary packages
 
 ## Release Gates
 
+### Docker images
+
+Release tags publish the two production images to Docker Hub:
+
+```text
+docker.io/wit7zz/musicdl:<version>
+docker.io/wit7zz/musicdl-plugin-runner:<version>
+```
+
+The Compose file keeps local `build:` support and also names these images. Set
+`MUSICDL_IMAGE_TAG` to pin a released version when pulling instead of building.
+
 `scripts/release/run_gates.py` decides the gates. `--gate all` is the default and treats `NOT_RUN` as a failure, so a gate that cannot run is never reported as passed. `--dry-run` prints the same table without failing the gates that need a deployment, and `--self-test` first tampers with the Compose, Telegram, proxy, and plugin boundaries and then prints the table.
 
 | Gate | What it decides |

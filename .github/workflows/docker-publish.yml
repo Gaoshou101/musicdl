@@ -1,0 +1,72 @@
+name: Publish Docker images
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to publish
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: docker.io
+  NAMESPACE: wit7zz
+
+jobs:
+  publish:
+    name: Build and publish images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+
+      - name: Resolve image tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push main image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/main/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/musicdl:${{ steps.tag.outputs.value }}
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/musicdl:latest
+          cache-from: type=gha,scope=musicdl-main
+          cache-to: type=gha,mode=max,scope=musicdl-main
+
+      - name: Build and push plugin runner image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/plugin/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/musicdl-plugin-runner:${{ steps.tag.outputs.value }}
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/musicdl-plugin-runner:latest
+          cache-from: type=gha,scope=musicdl-plugin-runner
+          cache-to: type=gha,mode=max,scope=musicdl-plugin-runner

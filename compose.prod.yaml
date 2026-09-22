@@ -1,5 +1,6 @@
 services:
   musicdl:
+    image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: docker/main/Dockerfile
@@ -46,6 +47,7 @@ services:
   # reaches the app over the internal plugin-control network, and receives no
   # secrets.
   plugin-runner:
+    image: wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: docker/plugin/Dockerfile
