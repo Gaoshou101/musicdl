@@ -1,5 +1,6 @@
 from dataclasses import FrozenInstanceError
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,26 @@ def test_language_and_path_helpers(tmp_path):
     assert sanitize_component(" ../AUX/song\x00 ") == "_AUX_song"
     path = validated_destination(tmp_path, "华语", "A/B", "../Song", ".mp3")
     assert path.relative_to(tmp_path).parts == ("华语", "A_B", "Song - A_B.mp3")
+
+
+def test_long_utf8_components_are_bounded_and_collision_resistant(tmp_path):
+    artist = "歌手" * 100
+    title = "同一首歌" * 100
+    path = validated_destination(tmp_path, "华语", artist, title, ".mp3")
+
+    assert len(path.parent.name.encode("utf-8")) <= 240
+    assert len(path.name.encode("utf-8")) <= 240
+    assert path.suffix == ".mp3"
+    assert re.search(r"~[0-9a-f]{12}$", path.parent.name)
+    assert re.search(r"~[0-9a-f]{12}\.mp3$", path.name)
+    assert validated_destination(tmp_path, "华语", artist + "甲", title, ".mp3") != path
+
+
+def test_long_component_truncation_never_splits_utf8(tmp_path):
+    path = validated_destination(tmp_path, "华语", "𠮷" * 100, "歌" * 300, "flac")
+    for component in path.relative_to(tmp_path).parts:
+        component.encode("utf-8", errors="strict")
+        assert len(component.encode("utf-8")) <= 240
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows extended-length path behavior")
