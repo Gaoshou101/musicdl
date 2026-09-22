@@ -312,5 +312,5 @@ The dashboard in `web/` has its own toolchain: `npm run build` compiles it, `npm
 | Release gates | The gate runner, its tamper self-test, and the backup drill | [run_gates.py](./scripts/release/run_gates.py) |
 | Dependency inventory | Pinned versions, licences, and supply-chain evidence | [THIRD_PARTY.md](./THIRD_PARTY.md) |
 
-No licence file is present in this repository, so this README makes no licence claim. Add a `LICENSE` file before publishing or redistributing the code.
+This repository is distributed under the MIT License; see [LICENSE](./LICENSE).
 
