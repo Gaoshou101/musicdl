@@ -27,6 +27,15 @@ def test_an_album_that_only_repeats_its_song_is_not_printed_twice():
     assert format_results([row(title="\u6674\u5929", artist="\u5468\u6770\u4f26", album="\u6674\u5929")]) == "1. \u6674\u5929 \u2014 \u5468\u6770\u4f26"
 
 
+def test_a_reply_never_shows_the_escaping_an_upstream_left_in_a_name():
+    """The row that reached a person spelled ``\\u0026`` where the ``&`` belonged."""
+    text = format_results([row(title="\u4e2d\u56fd\u68a6\\\\u0026\u6211\u7684\u68a6",
+                              artist="\u5ed6\u660c\u6c38\\\\u0026\u8c2d\u7ef4\u7ef4")])
+
+    assert "\\u0026" not in text
+    assert text == "1. \u4e2d\u56fd\u68a6&\u6211\u7684\u68a6 \u2014 \u5ed6\u660c\u6c38&\u8c2d\u7ef4\u7ef4"
+
+
 def test_a_recording_past_the_hour_reads_as_a_clock():
     assert format_results([row(duration=3723)]) == "1. Song \u2014 Artist  \u00b7  1:02:03"
 
