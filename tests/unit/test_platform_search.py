@@ -15,9 +15,10 @@ import pytest
 from musicdl.contracts.plugin import HttpAction, HttpObservation
 from musicdl.plugins.broker import ActionDenied, HttpsActionBroker
 from musicdl.sources.lx.analyzer import lx_shaped_file
+from musicdl.sources.models import Candidate
 from musicdl.sources.platform_search import (
     ITEM_PREFIX, PLATFORMS, SEARCH_HOSTS, LxSearchAdapter, PlatformSearch, PlatformSearchError,
-    parse_hits,
+    decode_body, parse_hits,
 )
 from musicdl.sources.registry import SourceEntry, SourceRegistry
 from musicdl.sources.search import search_sources
@@ -119,6 +120,31 @@ def test_kuwo_names_the_id_the_sources_resolve_and_drops_the_excerpt():
     # the search API adds is not part of the rid a source resolves.
     assert [hit.song_id for hit in hits] == ["51449297"]
     assert hits[0].title == "夜曲"
+
+
+# A trimmed copy of the live answer ``search.kuwo.cn`` gave ``笨蛋 汪苏泷`` on
+# 2026-09-22.  The one JSON read that decodes the object literal is not the last
+# layer: the ``&`` between two names arrives four backslashes deep, so two of
+# them survived into the artist and were read by a person as ``\\u0026``.
+KW_TWICE_ESCAPED_BODY = (
+    "{'abslist':[{'MUSICRID':'MUSIC_359805417','NAME':'明天会更好',"
+    "'ARTIST':'汪苏泷\\\\\\\\u0026刘维\\\\\\\\u0026刘宇宁','ALBUM':'','DURATION':'296'}]}"
+)
+
+
+def test_the_escaping_kuwo_leaves_in_its_fields_is_resolved_before_a_person_reads_it():
+    body = base64.b64encode(KW_TWICE_ESCAPED_BODY.encode()).decode()
+    hits = parse_hits("kw", decode_body(body))
+
+    # The parse itself reads the literal, not the escaping inside it.
+    assert hits[0].artist == r"汪苏泷\\u0026刘维\\u0026刘宇宁"
+    assert hits[0].title == "明天会更好"
+    # A candidate is where the text stops being wire format.
+    candidate = Candidate(source_id="lx-jade-pro", source_version="1.2.2",
+                          item_id=hits[0].item_id, title=hits[0].title, artist=hits[0].artist,
+                          album=hits[0].album, duration=hits[0].duration, platform=hits[0].platform)
+    assert candidate.artist == "汪苏泷&刘维&刘宇宁"
+    assert "\\" not in candidate.artist
 
 
 def test_netease_milliseconds_become_seconds_and_the_credit_is_joined():

@@ -18,6 +18,75 @@ def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+# An upstream that escapes its own text and then escapes it again on the way out
+# leaves the escape itself inside the value.  Kuwo's search is the measured case
+# (2026-09-22): its ``ARTIST`` field is a JavaScript object literal whose ``&``
+# is written four backslashes deep, so the one JSON read that decodes the literal
+# still leaves two of them in the artist.  A reader then got ``\u0026`` where the
+# ``&`` belonged, in the WeCom listing and in the file name alike.  Text a person
+# reads is resolved once, here, rather than by every reader of it.
+_ESCAPE_SEQUENCE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|/)")
+# Three layers is the deepest measured, and one pass is spent on each; a value
+# that still spells one after that holds a backslash of its own.
+_MAX_ESCAPE_PASSES = 4
+_HEX4 = re.compile(r"^[0-9a-fA-F]{4}$")
+_HEX2 = re.compile(r"^[0-9a-fA-F]{2}$")
+
+
+def _unescape_once(value: str) -> str:
+    """Resolve one layer of ``\\uXXXX``, ``\\xXX``, ``\\/`` and ``\\\\``.
+
+    ``\\n`` and ``\\t`` are deliberately left alone: nothing separates a title
+    holding a literal ``C:\\temp`` from one holding an escaped tab, and the
+    escape that actually arrives here is the hexadecimal one.
+    """
+    out: list[str] = []
+    index, length = 0, len(value)
+    while index < length:
+        char = value[index]
+        if char != "\\" or index + 1 >= length:
+            out.append(char)
+            index += 1
+            continue
+        following = value[index + 1]
+        if following in "\\/":
+            out.append(following)
+            index += 2
+        elif following == "u" and _HEX4.match(value[index + 2:index + 6]):
+            out.append(chr(int(value[index + 2:index + 6], 16)))
+            index += 6
+        elif following == "x" and _HEX2.match(value[index + 2:index + 4]):
+            out.append(chr(int(value[index + 2:index + 4], 16)))
+            index += 4
+        else:
+            out.append(char)
+            index += 1
+    try:
+        # ``\ud83c\udfb5`` is one character, and half of such a pair cannot be
+        # encoded at all -- so a value holding half of one keeps its escape
+        # instead of becoming text nothing downstream can send.
+        return "".join(out).encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeError:
+        return value
+
+
+def decode_escapes(value: str) -> str:
+    """The text an upstream escaped, as the text it meant.
+
+    Each pass resolves one layer and the loop stops where the value stops
+    changing, so a value escaped twice over reads as its plain text and a value
+    that only looks escaped -- ``AC\\DC`` -- comes back untouched.
+    """
+    for _ in range(_MAX_ESCAPE_PASSES):
+        if _ESCAPE_SEQUENCE.search(value) is None:
+            break
+        decoded = _unescape_once(value)
+        if decoded == value:
+            break
+        value = decoded
+    return value
+
+
 class Candidate(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -38,12 +107,26 @@ class Candidate(BaseModel):
     # same song on another one.  ``None`` when the channel produced it itself.
     platform: str | None = Field(default=None, max_length=16)
 
-    @field_validator("source_id", "source_version", "item_id", "title", "artist", "album", "format", mode="before")
+    @field_validator("source_id", "source_version", "item_id", "format", mode="before")
     @classmethod
     def clean_text(cls, value: Any) -> Any:
+        """The fields that are identity rather than prose, and stay as sent.
+
+        ``item_id`` is what a source is later asked to resolve, so rewriting it
+        would name something the source never listed.
+        """
         if value is None:
             return None
         cleaned = normalize_text(str(value))
+        return cleaned or None
+
+    @field_validator("title", "artist", "album", mode="before")
+    @classmethod
+    def clean_display_text(cls, value: Any) -> Any:
+        """The three fields a person reads, with an upstream's escaping resolved."""
+        if value is None:
+            return None
+        cleaned = normalize_text(decode_escapes(str(value)))
         return cleaned or None
 
     @field_validator("platform", mode="before")
