@@ -180,6 +180,8 @@ RUNTIME_GROUPS: tuple[str, ...] = ("wecom", "redis", "telegram", "ai", "worker")
 # What only the deployment can change. The panel reports these so an operator
 # reads one page instead of two places, and names the exact variable to set.
 CONTAINER_KNOBS: tuple[dict[str, Any], ...] = (
+    {"key": "admin.cookie_secure", "label": "仅通过 HTTPS 发送登录 Cookie", "env": "MUSICDL_ADMIN__COOKIE_SECURE",
+     "help": "默认 true；直接通过 HTTP 访问的可信局域网部署设为 false，再重建主服务容器。HTTPS 反向代理部署保持 true。"},
     {"key": "ports.app", "label": "主服务回环端口", "env": "MUSICDL_PORT",
      "help": "compose.yaml 发布 127.0.0.1:${MUSICDL_PORT:-8000}:8000；改完执行 docker compose up -d musicdl。"},
     {"key": "paths.panel", "label": "管理面板静态文件", "env": "MUSICDL_ADMIN__PANEL_ROOT",

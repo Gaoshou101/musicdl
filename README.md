@@ -88,7 +88,7 @@ curl http://127.0.0.1:8000/healthz
 curl http://127.0.0.1:8000/readyz
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000) and sign in with the initial credentials supplied by your deployment. A fresh installation requires the default credentials to be replaced before the rest of the administration API can be used. The default password is intentionally not repeated in this public README.
+By default, access the panel through an HTTPS reverse proxy. Before using [http://127.0.0.1:8000](http://127.0.0.1:8000) directly, apply the HTTP cookie settings under Configuration below. Sign in with the initial credentials supplied by your deployment. A fresh installation requires the default credentials to be replaced before the rest of the administration API can be used. The default password is intentionally not repeated in this public README.
 
 From the panel you can:
 
@@ -132,6 +132,7 @@ The administration panel is the preferred place to manage runtime settings. Envi
 |---|---|
 | `MUSICDL_REDIS__URL` | Required Redis connection URL |
 | `MUSICDL_PORT` | Host port bound to the main service; default `8000` |
+| `MUSICDL_ADMIN__COOKIE_SECURE` | Whether administrator cookies require HTTPS; defaults to `true`, set `false` only for a trusted direct HTTP deployment |
 | `MUSICDL_IMAGE_TAG` | Docker image version used by `compose.prod.yaml` |
 | `MUSICDL_AI__ENABLED` | Enable optional OpenAI-compatible advisory features |
 | `MUSICDL_AI__BASE_URL` | OpenAI-compatible API endpoint |
@@ -139,6 +140,10 @@ The administration panel is the preferred place to manage runtime settings. Envi
 | `MUSICDL_AI__MODEL` | Model identifier supplied to the compatible endpoint |
 
 Most changes made in the panel rebuild the active runtime without restarting the container. Settings that affect startup boundaries may still require a restart.
+
+For a direct HTTP panel, set `MUSICDL_ADMIN__COOKIE_SECURE=false` in `.env` and recreate the main service. Keep the default `true` when an HTTPS reverse proxy is in front of the service. This setting requires an image containing the fix; the original `1.0.0` image does not support it. Until a new image is published, build the current source with `docker compose -f compose.yaml up -d --build`.
+
+Custom Compose files must also add `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"` under `musicdl.environment`; `.env` alone does not pass it into the container. After upgrading and verifying HTTP login and password changes, remove any temporary `panel` proxy and configuration used only to strip Secure, and map the original entry port directly to the main service's port `8000`. HTTP sends credentials and sessions in plaintext; use HTTPS for public deployments.
 
 ## Source Scripts and Content Responsibility
 

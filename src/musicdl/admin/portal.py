@@ -189,8 +189,9 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         session = auth.issue_session()
         csrf = secrets.token_urlsafe(24)
         auth.bind_csrf(session, csrf)
-        response.set_cookie("admin_session", session, httponly=True, secure=True, samesite="lax")
-        response.set_cookie("csrf_token", csrf, httponly=False, secure=True, samesite="lax")
+        secure = config.settings.admin.cookie_secure
+        response.set_cookie("admin_session", session, httponly=True, secure=secure, samesite="lax")
+        response.set_cookie("csrf_token", csrf, httponly=False, secure=secure, samesite="lax")
         return csrf
 
     def active_runtime():
@@ -372,9 +373,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             auth.change_credentials(result.user_id or "", str(body.get("username", "")), str(body.get("new_password", "")))
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        replacement = auth.issue_session(); csrf = secrets.token_urlsafe(24); auth.bind_csrf(replacement, csrf)
-        response.set_cookie("admin_session", replacement, httponly=True, secure=True, samesite="lax")
-        response.set_cookie("csrf_token", csrf, secure=True, samesite="lax")
+        csrf = start_session(response)
         audit.append({"action": "change_credentials", "status": "success"})
         return {"ok": True, "csrf_token": csrf}
 

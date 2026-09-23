@@ -15,6 +15,7 @@ services:
       MUSICDL_MEDIA__ROOT: "/data/music"
       MUSICDL_TELEGRAM__SESSION_ROOT: "/data/telegram-sessions"
       MUSICDL_ADMIN__STATE_PATH: "/data/app/admin-state.json"
+      MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"
     ports:
       - "127.0.0.1:${MUSICDL_PORT:-8000}:8000"
     volumes:
