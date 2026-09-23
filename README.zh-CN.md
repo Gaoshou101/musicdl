@@ -87,7 +87,7 @@ curl http://127.0.0.1:8000/healthz
 curl http://127.0.0.1:8000/readyz
 ```
 
-打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)，使用部署提供的初始账密登录。新部署必须先修改默认账密，之后才能使用其余管理接口。出于安全原因，公开 README 不重复默认密码。
+默认通过 HTTPS 反向代理访问面板。直接访问 [http://127.0.0.1:8000](http://127.0.0.1:8000) 前，请完成下方「配置」中的 HTTP Cookie 设置。使用部署提供的初始账密登录；新部署必须先修改默认账密，之后才能使用其余管理接口。出于安全原因，公开 README 不重复默认密码。
 
 进入面板后可以：
 
@@ -140,7 +140,9 @@ curl http://127.0.0.1:8000/readyz
 
 面板保存的大部分配置会触发运行时热重载，不需要重启容器。涉及启动边界的设置仍可能要求重启。
 
-如果主服务直接通过 HTTP 提供面板，请将 `MUSICDL_ADMIN__COOKIE_SECURE=false` 写入 `.env` 并重新创建主服务；如果前面有 HTTPS 反向代理，请保持默认值 `true`。
+如果主服务直接通过 HTTP 提供面板，请将 `MUSICDL_ADMIN__COOKIE_SECURE=false` 写入 `.env` 并重新创建主服务；如果前面有 HTTPS 反向代理，请保持默认值 `true`。此开关需要包含该修复的镜像，原始 `1.0.0` 镜像不支持；新镜像发布前可从当前源码执行 `docker compose -f compose.yaml up -d --build`。
+
+自定义 Compose 还需在 `musicdl.environment` 中加入 `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"`；只写入 `.env` 不会自动传给容器。升级并验证 HTTP 登录、改密成功后，可删除仅用于剥离 Secure 的临时 `panel` 反代服务及对应配置，把原入口端口直接映射到主服务的 `8000`。HTTP 会明文传输账密和会话，公网部署请使用 HTTPS。
 
 ## 音源脚本与内容责任
 
