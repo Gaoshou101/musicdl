@@ -46,7 +46,10 @@ def test_plugin_image_builds_and_installs_the_scoped_wheel():
     assert "pip wheel --no-cache-dir --no-deps --wheel-dir /wheels ." in text
     assert "COPY src ./src" not in text
     assert "COPY pyproject.toml README.md ./" not in text
-    assert "COPY --from=runner-package /wheels/musicdl_plugin_runner-1.0.0-py3-none-any.whl" in text
+    runner_wheel = "musicdl_plugin_runner-1.0.0-py3-none-any.whl"
+    assert f"COPY --from=runner-package /wheels/{runner_wheel} /tmp/{runner_wheel}" in text
+    assert f"/tmp/{runner_wheel}" in text
+    assert "/tmp/musicdl-plugin-runner.whl" not in text
 
 
 def test_all_runner_and_contract_sources_needed_at_runtime_are_present():

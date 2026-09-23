@@ -101,3 +101,69 @@ jobs:
           grep --quiet '管理后台' /tmp/console.html || fail
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3999/admin/sources)" = "401" || fail
           echo "one container answered /healthz, served the console, and kept /admin behind a session"
+
+  # Exercise the published quick-install manifest as operators use it: one
+  # file, its default versioned images, and its bundled Redis. This is separate
+  # from the source-built image tests above and never consumes deployment data.
+  quick-install-stack:
+    name: Quick-install Compose stack
+    runs-on: ubuntu-latest
+    env:
+      MUSICDL_PORT: "3998"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start and probe the published quick-install stack
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          project="musicdl-quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          compose() { docker compose --project-name "$project" --file compose.quick.yaml "$@"; }
+          cleanup() {
+            status=$?
+            trap - EXIT
+            compose down --volumes --remove-orphans --timeout 20 || true
+            exit "$status"
+          }
+          fail() {
+            status=$?
+            echo "quick-install smoke failed (exit ${status}); service status and bounded logs follow" >&2
+            compose ps --all >&2 || true
+            compose logs --no-color --tail=100 >&2 || true
+            exit 1
+          }
+          trap cleanup EXIT
+
+          # Keep the manifest's published 1.0.1 defaults; do not accidentally
+          # inherit an image override from the hosted runner environment.
+          unset MUSICDL_IMAGE_TAG
+          compose pull || fail
+          compose up --detach --wait --wait-timeout 120 || fail
+
+          # Prove the main app can reach and use its internal Redis service,
+          # rather than only observing the Redis container's own healthcheck.
+          compose exec -T musicdl python - <<'PY' || fail
+          import os
+          from redis import Redis
+
+          client = Redis.from_url(
+              os.environ["MUSICDL_REDIS__URL"],
+              socket_connect_timeout=5,
+              socket_timeout=5,
+          )
+          key = "ci:quick-install:redis-probe"
+          try:
+              assert client.ping()
+              assert client.set(key, b"ok", ex=60)
+              assert client.get(key) == b"ok"
+              print("main app reached bundled Redis and completed SET/GET")
+          finally:
+              client.delete(key)
+              client.close()
+          PY
+
+          curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:${MUSICDL_PORT}/healthz" > /dev/null || fail
+          curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:${MUSICDL_PORT}/" > "$RUNNER_TEMP/quick-install-index.html" || fail
+          grep --quiet '管理后台' "$RUNNER_TEMP/quick-install-index.html" || fail
+          status="$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${MUSICDL_PORT}/admin/sources")" || fail
+          test "$status" = "401" || fail
+          echo "published quick-install stack became healthy, served the console, protected /admin, and used bundled Redis"
