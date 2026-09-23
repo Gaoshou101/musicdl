@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=80,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musicdl-plugin-runner"
+version = "1.0.0"
+description = "Isolated musicdl plugin runner service"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi==0.141.1",
+  "pydantic==2.13.5",
+  "uvicorn==0.52.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["musicdl", "musicdl.contracts", "musicdl_plugin_runner"]
+namespaces = false
+
+[tool.setuptools.package-data]
+musicdl_plugin_runner = ["*.js"]

@@ -43,7 +43,9 @@ def test_plugin_image_final_stage_has_only_runtime_packages():
     assert "libseccomp2=2.5.4-1+deb12u1" in final
     assert "unzip" not in final
     assert "curl" not in final
-    assert "pip install --no-cache-dir --timeout 120 --root-user-action=ignore ." in final
+    assert "pip install --no-cache-dir --timeout 120 --root-user-action=ignore /tmp/musicdl-plugin-runner.whl" in final
+    assert "COPY src ./src" not in final
+    assert "COPY pyproject.toml README.md ./" not in final
 
 
 def test_dockerignore_excludes_secrets_sessions_media_and_caches():

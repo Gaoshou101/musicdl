@@ -21,6 +21,16 @@ RUN set -eux; \
     chmod 0755 /out/deno; \
     rm -f "${deno_file}"
 
+FROM python:3.12.14-slim-bookworm AS runner-package
+
+WORKDIR /build
+COPY docker/plugin/pyproject.toml ./pyproject.toml
+COPY src/musicdl/__init__.py ./src/musicdl/__init__.py
+COPY src/musicdl/contracts/__init__.py ./src/musicdl/contracts/__init__.py
+COPY src/musicdl/contracts/plugin.py ./src/musicdl/contracts/plugin.py
+COPY src/musicdl_plugin_runner ./src/musicdl_plugin_runner
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
+
 FROM python:3.12.14-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
@@ -33,9 +43,9 @@ COPY --from=deno-download /out/deno /usr/bin/deno
 RUN deno --version
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
-COPY src ./src
-RUN pip install --no-cache-dir --timeout 120 --root-user-action=ignore .
+COPY --from=runner-package /wheels/musicdl_plugin_runner-1.0.0-py3-none-any.whl /tmp/musicdl-plugin-runner.whl
+RUN pip install --no-cache-dir --timeout 120 --root-user-action=ignore /tmp/musicdl-plugin-runner.whl \
+    && rm -f /tmp/musicdl-plugin-runner.whl
 RUN groupadd --gid 10001 musicdl \
     && useradd --uid 10001 --gid musicdl --create-home --shell /usr/sbin/nologin musicdl
 USER 10001:10001

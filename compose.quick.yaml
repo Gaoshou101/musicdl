@@ -1,0 +1,106 @@
+name: musicdl
+
+services:
+  musicdl:
+    image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.1}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    environment:
+      MUSICDL_CONFIG__VERSION: "1"
+      MUSICDL_REDIS__URL: "redis://redis:6379/0"
+      MUSICDL_PLUGIN__SERVICE_URL: "http://plugin-runner:8080"
+      MUSICDL_MEDIA__ROOT: /data/music
+      MUSICDL_TELEGRAM__SESSION_ROOT: /data/telegram-sessions
+      MUSICDL_ADMIN__STATE_PATH: /data/app/admin-state.json
+    ports:
+      - "127.0.0.1:${MUSICDL_PORT:-8000}:8000"
+    volumes:
+      - musicdl-media:/data/music
+      - musicdl-app-data:/data/app
+      - musicdl-telegram:/data/telegram-sessions
+    networks:
+      - default
+      - state
+      - plugin-control
+    depends_on:
+      redis:
+        condition: service_healthy
+      plugin-runner:
+        condition: service_healthy
+    command: ["uvicorn", "musicdl.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  plugin-runner:
+    image: wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.1}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 64
+    init: true
+    tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
+    networks:
+      - plugin-control
+    command: ["uvicorn", "musicdl_plugin_runner.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  redis:
+    image: redis:8.8.3-alpine
+    user: redis
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - musicdl-redis-data:/data
+    networks:
+      - state
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  musicdl-media:
+  musicdl-app-data:
+  musicdl-telegram:
+  musicdl-redis-data:
+
+networks:
+  default:
+  state:
+    internal: true
+  plugin-control:
+    internal: true

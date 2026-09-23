@@ -58,9 +58,37 @@
 
 运行条件：
 
-- Docker Engine 和 Docker Compose
-- 一个可访问的 Redis 实例
-- 如需使用仓库中的 Compose 文件，需要安装 Git
+- Docker Engine 和 Docker Compose 插件
+- 可访问互联网以拉取已发布的镜像
+
+```bash
+curl -fsSLo compose.quick.yaml https://raw.githubusercontent.com/Gaoshou101/musicdl/main/compose.quick.yaml
+docker compose -f compose.quick.yaml up -d
+```
+
+Windows PowerShell 可用以下命令下载同一个 Compose 文件并启动：
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/Gaoshou101/musicdl/main/compose.quick.yaml -OutFile compose.quick.yaml
+docker compose -f .\compose.quick.yaml up -d
+```
+
+快速安装使用预构建镜像，并包含一个私有 Redis 服务。无需克隆仓库、创建 `.env` 或单独准备 Redis。Redis 不映射宿主机端口，数据保存在 Docker 卷中，只有主服务可以访问。插件运行器仍位于独立的内部控制网络中，不接收应用密钥。Web 服务默认只绑定到 `127.0.0.1:8000`。
+
+检查服务是否就绪：
+
+```bash
+curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/readyz
+```
+
+打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。全新部署使用用户名 `admin`、密码 `password` 登录；面板会强制要求先更换这组凭据，之后才能使用其余管理接口。请立即更换密码；设置强密码并为远程访问配置 TLS 前，应保持服务为私有状态。
+
+快速安装的 Compose 项目名默认为 `musicdl`。如需更改宿主机端口，可在运行 Compose 前设置 `MUSICDL_PORT`。如需选择其他已发布的应用镜像，可设置 `MUSICDL_IMAGE_TAG`；默认使用已验证的 `1.0.1` 版本。主服务与插件运行器镜像使用相同的版本标签。
+
+## 现有仓库部署方式
+
+已自行管理 Redis，或需要从源码构建的用户仍可使用仓库内的 Compose 文件。该方式要求可访问的 Redis 实例以及本仓库代码副本：
 
 ```bash
 git clone https://github.com/Gaoshou101/musicdl.git
@@ -68,26 +96,14 @@ cd musicdl
 cp .env.example .env
 ```
 
-将 `.env` 中的 `MUSICDL_REDIS__URL` 修改为你的 Redis 地址。不要提交真实凭据。
-
-## 快速开始
-
-拉取 v1.0.0 镜像并启动服务：
+将 `.env` 中的 `MUSICDL_REDIS__URL` 设置为你的 Redis 地址。不要提交真实凭据。然后拉取并启动已发布镜像：
 
 ```bash
-export MUSICDL_IMAGE_TAG=1.0.0
-docker compose -f compose.prod.yaml pull
-docker compose -f compose.prod.yaml up -d
+MUSICDL_IMAGE_TAG=1.0.1 docker compose -f compose.prod.yaml pull
+MUSICDL_IMAGE_TAG=1.0.1 docker compose -f compose.prod.yaml up -d
 ```
 
-检查服务状态：
-
-```bash
-curl http://127.0.0.1:8000/healthz
-curl http://127.0.0.1:8000/readyz
-```
-
-打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)，使用部署提供的初始账密登录。新部署必须先修改默认账密，之后才能使用其余管理接口。出于安全原因，公开 README 不重复默认密码。
+需要从当前代码构建时，也可以使用 `compose.yaml`。
 
 进入面板后可以：
 
@@ -103,10 +119,10 @@ curl http://127.0.0.1:8000/readyz
 
 | 镜像 | 用途 |
 |---|---|
-| `wit7zz/musicdl:1.0.0` | 主服务和内置管理面板 |
-| `wit7zz/musicdl-plugin-runner:1.0.0` | 隔离的 JavaScript 插件运行环境 |
+| `wit7zz/musicdl:1.0.1` | 主服务和内置管理面板 |
+| `wit7zz/musicdl-plugin-runner:1.0.1` | 隔离的 JavaScript 插件运行环境 |
 
-设置 `MUSICDL_IMAGE_TAG=latest` 可以跟随最新镜像；正式环境建议固定具体版本，便于稳定升级和回滚。
+`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装默认使用 `1.0.1`。
 
 生产 Compose 默认只监听 `127.0.0.1`。如需从其他设备访问，请先通过支持 TLS 的反向代理对外提供服务。仓库提供了以下示例：
 
@@ -123,15 +139,64 @@ curl http://127.0.0.1:8000/readyz
 
 升级或迁移前应备份这三个数据卷。
 
+## 从现有部署迁移
+
+快速安装文件声明了与仓库 Compose 文件相同的三个应用卷键，并新增一个 Redis 卷。这些是 Compose 逻辑键；默认命名时，Docker 中的实际卷名为 `<项目名>_musicdl-media`、`<项目名>_musicdl-app-data` 和 `<项目名>_musicdl-telegram`。以下步骤假设使用这些带项目名前缀的卷名，且容器挂载路径未变更。如果旧配置为卷指定了 `name:`、使用 `external: true`、绑定挂载，或通过覆盖文件改了挂载路径，需要另行规划映射或复制；相同的逻辑键不代表会自动复用数据。
+
+按以下步骤迁移前，先打开管理面板的「运行配置」→「Redis」→「Redis 地址」（`redis.url`），检查配置来源。只有来源为「部署变量」（`env`），且已确认旧部署的 `MUSICDL_REDIS__URL` 是目标外部地址时，才适用本流程；如果来源为「默认值」，也必须独立核实当前生效地址确实是目标外部 Redis。面板覆盖会保存在复用的应用数据卷中的 `admin-state.json`，并优先于 Compose 环境变量；因此仅在快速安装文件中设置内置 Redis 地址，并不能保证应用切换过去。如果来源显示「面板覆盖」，旧应用或 Worker 运行期间不要点击「恢复为部署值」：Redis 密钥会被隐藏，清除覆盖可能立即热重载 `redis.url` 并切换到其他地址。请保持旧的外部 Redis Compose 部署运行，另行规划受控的离线迁移。如果无法确认来源和目标地址，请继续使用现有部署。
+
+同时检查自定义的 `wecom.api_base`、`telegram.proxy`、`ai.base_url`，以及旧 Compose 覆盖文件中引用的服务地址。快速安装清单不包含旧代理/覆盖服务，也不会自动带上它们的环境配置。切换前，请确认每个必需地址在快速安装网络中仍可访问，或先映射/替换地址并补齐所需环境设置。如果缺少必需的代理、服务或环境变量，请继续使用旧部署，直到依赖已映射或替换。
+
+1. 旧服务仍运行时，从 `docker compose ls` 记录原项目名、完整且有顺序的 `-f` 文件列表、所有 `--env-file` 参数，以及卷名和容器内挂载路径（用 `docker inspect` 检查主服务容器）。
+2. 先停止旧栈，再备份，以免服务在备份过程中继续写入文件。在原项目目录执行与启动旧栈时相同的 Compose 文件和环境参数。例如：
+
+   ```bash
+   docker compose -p OLD_PROJECT -f compose.prod.yaml stop
+   ```
+
+   将 `OLD_PROJECT` 和清单参数替换为步骤 1 记录的值；按原顺序重复所有 `-f`，并保留 `--env-file` 参数。备份步骤 1 查到的实际卷名，再在同一静止时间点使用外部 Redis 自身的一致性备份方式备份数据。如果 Redis 由其他服务共享，也要暂停那些写入方。可参考 Docker 的[数据卷备份与恢复说明](https://docs.docker.com/engine/storage/volumes/#back-up-restore-or-migrate-data-volumes)。
+3. 备份完成后，移除旧容器、网络和孤立服务，但保留数据卷：
+
+   ```bash
+   docker compose -p OLD_PROJECT -f compose.prod.yaml down --remove-orphans
+   ```
+
+   使用与 `stop` 相同的原始清单和环境参数。不要添加 `-v`。
+4. 快速安装会创建一个新的空 Redis。如果旧 Redis 状态可以丢弃，直接启动新栈：
+
+   ```bash
+   docker compose -p OLD_PROJECT -f compose.quick.yaml up -d
+   ```
+
+   如果必须保留 Redis 中的状态，先只启动内置 Redis，导入备份并验证后，再启动应用：
+
+   ```bash
+   docker compose -p OLD_PROJECT -f compose.quick.yaml up -d redis
+   # 将外部 Redis 备份恢复/导入到内置 Redis，并验证数据。
+   docker compose -p OLD_PROJECT -f compose.quick.yaml up -d
+   ```
+
+   将 `OLD_PROJECT` 替换为原项目名。如果 `compose.quick.yaml` 不在原目录，请在原项目目录执行，并传入该文件的绝对路径，例如 `-f /path/to/compose.quick.yaml`。`-p` 会覆盖快速安装文件中的默认项目名。只有实际卷名和容器挂载路径一致时，应用卷才会复用；新的 Redis 卷名为 `<项目名>_musicdl-redis-data`。必需的 Redis 数据导入并验证前，请保持新应用为停止状态。快速安装适用于全新部署、旧 Redis 状态可以丢弃的迁移，或已在启动应用前完成必需 Redis 数据导入、部署依赖配置映射并验证的迁移。
+5. 确认 Redis 配置来源显示「部署变量」（`env`）、`/readyz` 报告服务总体就绪，并检查登录、已安装音源、媒体和 Telegram 会话。复查自定义的 `wecom.api_base`、`telegram.proxy`、`ai.base_url` 地址并验证对应工作流。`/readyz` 不能普遍证明所有工作流都能连接 Redis 或外部集成；还应实际验证你使用的 Redis 相关及集成工作流。外部 Redis 内容不会自动复制，外部实例也不会被修改。
+
+只回滚服务、不回滚已保存设置或数据时，移除快速安装栈但保留卷，然后重新启动原清单。例如：
+
+```bash
+docker compose -p OLD_PROJECT -f compose.quick.yaml down
+docker compose -p OLD_PROJECT -f compose.prod.yaml up -d
+```
+
+将 `OLD_PROJECT` 替换为原项目名；第二条命令需重复原来的完整清单和环境参数。如果快速安装文件在其他位置，第一条命令传入其绝对路径。共享应用卷仍会保留，其中 app-data 卷内的 `admin-state.json` 也会保留，因此切换 Compose 文件不会重置面板配置和覆盖。内置 Redis 的写入仍在快速安装的独立 Redis 卷中，不会出现在旧外部 Redis 中。若要将数据和配置完整回滚到迁移前状态，需先停止写入方，再恢复迁移前备份的应用卷（包括已保存的后台状态）和同一静止时间点的外部 Redis 备份。若要保留快速安装期间写入内置 Redis 的新数据，则需另行导出并导入 Redis 数据。
+
 ## 配置
 
 建议通过管理面板维护运行配置。环境变量主要用于部署层参数。
 
 | 变量 | 用途 |
 |---|---|
-| `MUSICDL_REDIS__URL` | 必填的 Redis 连接地址 |
+| `MUSICDL_REDIS__URL` | `compose.yaml` 和 `compose.prod.yaml` 所需的外部 Redis 连接地址；快速安装使用内置 Redis |
 | `MUSICDL_PORT` | 主服务绑定到宿主机的端口，默认为 `8000` |
-| `MUSICDL_IMAGE_TAG` | `compose.prod.yaml` 使用的 Docker 镜像版本 |
+| `MUSICDL_IMAGE_TAG` | `compose.quick.yaml` 和 `compose.prod.yaml` 使用的 Docker 镜像版本 |
 | `MUSICDL_AI__ENABLED` | 开启可选的 OpenAI 兼容 AI 辅助功能 |
 | `MUSICDL_AI__BASE_URL` | OpenAI 兼容 API 地址 |
 | `MUSICDL_AI__API_KEY` | API 凭据，不要写入版本库 |
@@ -149,7 +214,7 @@ musicdl 的发布镜像不内置第三方音乐音源脚本。管理员可以在
 
 ## 安全边界
 
-生产 Compose 配置包含以下限制：
+Compose 配置包含以下限制：
 
 - 使用非 root 身份 `10001:10001`；
 - 容器根文件系统只读；

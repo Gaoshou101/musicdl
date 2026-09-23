@@ -6,10 +6,33 @@ telegram-sessions
 data/music
 media
 __pycache__
+**/__pycache__
 *.py[cod]
+**/*.py[cod]
 .pytest_cache
 .mypy_cache
 .ruff_cache
+.pytest-tmp*
+.coverage
+htmlcov
+
+# Local assistant state, planning notes, and worktree checkouts are not image inputs.
+.agents
+.codex
+.superpowers
+.planning
+.worktrees
+
+# Downloaded plugin runtime modules are recreated in the plugin container.
+.deno-cache
+
+# Runtime state and user-managed uploads are mounted at runtime, not copied into images.
+data
+plugins/uploads
+*.session
+*.session-journal
+*.part
+
 # The panel's dependencies and build output are rebuilt inside its own image,
 # so they must never travel in the build context.
 web/node_modules
