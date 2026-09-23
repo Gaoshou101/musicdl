@@ -131,6 +131,7 @@ curl http://127.0.0.1:8000/readyz
 |---|---|
 | `MUSICDL_REDIS__URL` | 必填的 Redis 连接地址 |
 | `MUSICDL_PORT` | 主服务绑定到宿主机的端口，默认为 `8000` |
+| `MUSICDL_ADMIN__COOKIE_SECURE` | 管理员 Cookie 是否只通过 HTTPS 发送，默认为 `true`；直接使用可信 HTTP 局域网部署时设为 `false` |
 | `MUSICDL_IMAGE_TAG` | `compose.prod.yaml` 使用的 Docker 镜像版本 |
 | `MUSICDL_AI__ENABLED` | 开启可选的 OpenAI 兼容 AI 辅助功能 |
 | `MUSICDL_AI__BASE_URL` | OpenAI 兼容 API 地址 |
@@ -138,6 +139,8 @@ curl http://127.0.0.1:8000/readyz
 | `MUSICDL_AI__MODEL` | 兼容端点使用的模型标识 |
 
 面板保存的大部分配置会触发运行时热重载，不需要重启容器。涉及启动边界的设置仍可能要求重启。
+
+如果主服务直接通过 HTTP 提供面板，请将 `MUSICDL_ADMIN__COOKIE_SECURE=false` 写入 `.env` 并重新创建主服务；如果前面有 HTTPS 反向代理，请保持默认值 `true`。
 
 ## 音源脚本与内容责任
 

@@ -132,6 +132,7 @@ The administration panel is the preferred place to manage runtime settings. Envi
 |---|---|
 | `MUSICDL_REDIS__URL` | Required Redis connection URL |
 | `MUSICDL_PORT` | Host port bound to the main service; default `8000` |
+| `MUSICDL_ADMIN__COOKIE_SECURE` | Whether administrator cookies require HTTPS; defaults to `true`, set `false` only for a trusted direct HTTP deployment |
 | `MUSICDL_IMAGE_TAG` | Docker image version used by `compose.prod.yaml` |
 | `MUSICDL_AI__ENABLED` | Enable optional OpenAI-compatible advisory features |
 | `MUSICDL_AI__BASE_URL` | OpenAI-compatible API endpoint |
@@ -139,6 +140,8 @@ The administration panel is the preferred place to manage runtime settings. Envi
 | `MUSICDL_AI__MODEL` | Model identifier supplied to the compatible endpoint |
 
 Most changes made in the panel rebuild the active runtime without restarting the container. Settings that affect startup boundaries may still require a restart.
+
+For a direct HTTP panel, set `MUSICDL_ADMIN__COOKIE_SECURE=false` in `.env` and recreate the main service. Keep the default `true` when an HTTPS reverse proxy is in front of the service.
 
 ## Source Scripts and Content Responsibility
 
