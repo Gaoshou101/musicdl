@@ -43,9 +43,9 @@ COPY --from=deno-download /out/deno /usr/bin/deno
 RUN deno --version
 
 WORKDIR /app
-COPY --from=runner-package /wheels/musicdl_plugin_runner-1.0.0-py3-none-any.whl /tmp/musicdl_plugin_runner-1.0.0-py3-none-any.whl
-RUN pip install --no-cache-dir --timeout 120 --root-user-action=ignore /tmp/musicdl_plugin_runner-1.0.0-py3-none-any.whl \
-    && rm -f /tmp/musicdl_plugin_runner-1.0.0-py3-none-any.whl
+COPY --from=runner-package /wheels/musicdl_plugin_runner-1.0.1-py3-none-any.whl /tmp/musicdl_plugin_runner-1.0.1-py3-none-any.whl
+RUN pip install --no-cache-dir --timeout 120 --root-user-action=ignore /tmp/musicdl_plugin_runner-1.0.1-py3-none-any.whl \
+    && rm -f /tmp/musicdl_plugin_runner-1.0.1-py3-none-any.whl
 RUN groupadd --gid 10001 musicdl \
     && useradd --uid 10001 --gid musicdl --create-home --shell /usr/sbin/nologin musicdl
 USER 10001:10001

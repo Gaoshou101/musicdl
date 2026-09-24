@@ -104,7 +104,7 @@ curl http://127.0.0.1:8000/readyz
 
 ## Lite 双容器部署
 
-上面的完整快速安装仍是默认方案，包含私有 Redis 和企业微信支持。仅在不需要企业微信时选择 lite：lite 只运行主服务和隔离插件运行器，不启动或连接 Redis，并会拒绝企业微信处于启用状态。AI 和 Telegram 配置仍可用。清单将 `MUSICDL_DEPLOYMENT_MODE` 设置为 `lite`。两个应用镜像都必须从源码仓库构建；目前没有已发布且支持 lite 的镜像标签。主服务使用 `docker/main/Dockerfile` 构建，运行器使用 `docker/plugin/Dockerfile` 构建；如果镜像未声明并实际启用 lite 模式，主服务会在启动 Uvicorn 前失败关闭。
+上面的完整快速安装仍是默认方案，包含私有 Redis 和企业微信支持。仅在不需要企业微信时选择 lite：lite 只运行主服务和隔离插件运行器，不启动或连接 Redis，并会拒绝企业微信处于启用状态。AI 和 Telegram 配置仍可用。清单将 `MUSICDL_DEPLOYMENT_MODE` 设置为 `lite`。已发布的 `1.0.1` 主服务和插件运行器镜像标签均支持 lite。`compose.lite.yaml` 仍会从源码检出目录分别使用 `docker/main/Dockerfile` 和 `docker/plugin/Dockerfile` 构建两个镜像；启动 lite 前请按清单先完成构建步骤。如果镜像未声明并实际启用 lite 模式，主服务会在启动 Uvicorn 前失败关闭。
 
 克隆仓库并准备私有工作目录：
 
@@ -167,7 +167,7 @@ curl http://127.0.0.1:8000/readyz
 | `wit7zz/musicdl:1.0.1` | 主服务和内置管理面板 |
 | `wit7zz/musicdl-plugin-runner:1.0.1` | 隔离的 JavaScript 插件运行环境 |
 
-`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装默认使用已包含 Cookie 策略修复的 `1.0.1` 镜像；原始 `v1.0.0` 镜像不包含该修复。`1.0.1` 是 Docker 镜像标签，不是 GitHub/源码发布标签。
+`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装默认使用已包含 Cookie 策略修复的 `1.0.1` 镜像；原始 `v1.0.0` 镜像不包含该修复。Docker 镜像标签和 GitHub 源码发布是独立的发布产物；源码发布及其附件请查看 [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases)。
 
 生产 Compose 默认只监听 `127.0.0.1`。如需从其他设备访问，请先通过支持 TLS 的反向代理对外提供服务。仓库提供了以下示例：
 
@@ -239,7 +239,7 @@ lite 没有 Redis 服务，也不会连接 Redis，因为它要求禁用企业�
 
 切换前请检查 Redis 配置来源，并查看「运行配置」→「Redis」→「Redis 地址」（`redis.url`），记录当前目标。即使 lite 不使用 Redis，该设置仍可能保存在 `admin-state.json` 中。如果来源为「面板覆盖」，旧 full 应用或 Worker 运行期间不要清除或恢复该覆盖：已保存的密钥会被隐藏，清除可能使 full 模式热重载到其他 Redis 地址。切回 full 前，应先决定 full 模式要使用哪个 Redis。
 
-停止旧栈之前，先从当前检出源码构建 lite 镜像；目前没有已发布的 lite 镜像标签。记录原 Compose 项目名、按顺序排列的清单和环境文件参数，以及实际卷名/挂载路径。保持相同项目名（默认是 `musicdl`），即可复用 `musicdl-media`、`musicdl-app-data` 和 `musicdl-telegram` 三个应用卷键。停止 full 栈并备份应用卷后再切换清单。若完整数据回滚可能涉及 full 快速安装，还应备份 `musicdl-redis-data`。不带 `-v` 的 Compose down 会保留该卷，支持服务回滚；备份则用于完整数据回滚。若完整数据回滚涉及外部 Redis，应在与应用卷备份相同的静止时间点，使用 Redis 提供方支持的方式创建一致性快照。若原 full 部署使用外部 Redis，请保持该 Redis 可用，以便恢复 full 模式时继续使用；lite 本身不会连接该 Redis 地址。
+停止旧栈之前，仍应先从当前检出源码构建 lite 镜像，尽管已发布的 `1.0.1` 镜像标签支持 lite。记录原 Compose 项目名、按顺序排列的清单和环境文件参数，以及实际卷名/挂载路径。保持相同项目名（默认是 `musicdl`），即可复用 `musicdl-media`、`musicdl-app-data` 和 `musicdl-telegram` 三个应用卷键。停止 full 栈并备份应用卷后再切换清单。若完整数据回滚可能涉及 full 快速安装，还应备份 `musicdl-redis-data`。不带 `-v` 的 Compose down 会保留该卷，支持服务回滚；备份则用于完整数据回滚。若完整数据回滚涉及外部 Redis，应在与应用卷备份相同的静止时间点，使用 Redis 提供方支持的方式创建一致性快照。若原 full 部署使用外部 Redis，请保持该 Redis 可用，以便恢复 full 模式时继续使用；lite 本身不会连接该 Redis 地址。
 
 ```bash
 docker compose -p OLD_PROJECT -f compose.lite.yaml build
@@ -332,6 +332,10 @@ python scripts/release/run_gates.py --self-test --dry-run
 - [主服务 Docker 镜像](https://hub.docker.com/r/wit7zz/musicdl)
 - [插件运行器镜像](https://hub.docker.com/r/wit7zz/musicdl-plugin-runner)
 - [第三方依赖基线](./THIRD_PARTY.md)
+
+## 发布检查清单
+
+每次发布编号版本时，同步更新包/版本元数据、两份 README、GitHub Release，以及带相同版本标签的主服务和插件运行器 Docker 镜像。所有发布产物应来自同一源码提交并核实其来源；公告发布前确认 CI 已成功完成。
 
 ## Star 历史
 

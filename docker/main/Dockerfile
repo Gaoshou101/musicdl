@@ -28,9 +28,9 @@ FROM python:3.12.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY --from=app-package /wheels/musicdl-1.0.0-py3-none-any.whl /tmp/musicdl-1.0.0-py3-none-any.whl
-RUN pip install --no-cache-dir --root-user-action=ignore /tmp/musicdl-1.0.0-py3-none-any.whl \
-    && rm -f /tmp/musicdl-1.0.0-py3-none-any.whl
+COPY --from=app-package /wheels/musicdl-1.0.1-py3-none-any.whl /tmp/musicdl-1.0.1-py3-none-any.whl
+RUN pip install --no-cache-dir --root-user-action=ignore /tmp/musicdl-1.0.1-py3-none-any.whl \
+    && rm -f /tmp/musicdl-1.0.1-py3-none-any.whl
 # The console travels in the image and the app is told where it landed. Nothing
 # else sets this: a checkout that never ran the panel build has no console, and
 # saying so is how it answers no front page instead of an empty one.

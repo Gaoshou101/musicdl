@@ -105,7 +105,7 @@ The quick Compose project name defaults to `musicdl`. To change the host port, s
 
 ## Lite Two-Container Deployment
 
-The full three-service quick install above remains the default and includes private Redis plus WeCom support. Choose lite only when WeCom is not needed: lite runs the app and isolated plugin runner, starts no Redis service, and does not connect to Redis. The app rejects WeCom being enabled in this mode; AI and Telegram settings remain available. The manifest sets `MUSICDL_DEPLOYMENT_MODE=lite`. Both application images must be built from a source checkout; there are no published lite-compatible image tags yet. The manifest builds the app with `docker/main/Dockerfile` and the runner with `docker/plugin/Dockerfile`, and the app fails closed before Uvicorn starts if the image does not declare and activate lite mode.
+The full three-service quick install above remains the default and includes private Redis plus WeCom support. Choose lite only when WeCom is not needed: lite runs the app and isolated plugin runner, starts no Redis service, and does not connect to Redis. The app rejects WeCom being enabled in this mode; AI and Telegram settings remain available. The manifest sets `MUSICDL_DEPLOYMENT_MODE=lite`. The published `1.0.1` main and plugin-runner image tags support lite. `compose.lite.yaml` still builds both images from the source checkout with `docker/main/Dockerfile` and `docker/plugin/Dockerfile`; follow its build step before starting lite. The app fails closed before Uvicorn starts if the image does not declare and activate lite mode.
 
 Clone the repository and prepare a private working directory:
 
@@ -168,7 +168,7 @@ The currently published image pair is:
 | `wit7zz/musicdl:1.0.1` | Main service and built-in administration panel |
 | `wit7zz/musicdl-plugin-runner:1.0.1` | Isolated JavaScript plugin runtime |
 
-Both `compose.quick.yaml` and `compose.prod.yaml` accept `MUSICDL_IMAGE_TAG`; use a published numbered version for predictable deployments. The quick Compose file defaults to the published `1.0.1` images, which include the cookie-policy fix. The original `v1.0.0` images do not. `1.0.1` is a Docker image tag, not a GitHub/source release tag.
+Both `compose.quick.yaml` and `compose.prod.yaml` accept `MUSICDL_IMAGE_TAG`; use a published numbered version for predictable deployments. The quick Compose file defaults to the published `1.0.1` images, which include the cookie-policy fix. The original `v1.0.0` images do not. Docker image tags and GitHub source releases are separate release outputs; see [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases) for source releases and their assets.
 
 The production Compose file binds the application to `127.0.0.1` by default. Put it behind a TLS reverse proxy before exposing it outside the host. Example configurations are available for:
 
@@ -240,7 +240,7 @@ Lite has no Redis service and does not connect to Redis because it requires WeCo
 
 Before switching, inspect Runtime Configuration → Redis → Redis Address (`redis.url`) and its source, and record the active target. The Redis setting can remain saved in `admin-state.json` even though lite does not use Redis. If its source is `Panel override`, do not clear or restore it while the full app or workers are running: a saved secret is masked and clearing it may hot-reload full mode to another Redis endpoint. Decide which Redis target full mode should use before switching back.
 
-Build the lite images from the current checkout before stopping the old stack; there is no published lite image tag. Record the old Compose project name, ordered manifests and env-file arguments, and actual volume names/mount paths. Keep the same project name (the default is `musicdl`) so the `musicdl-media`, `musicdl-app-data`, and `musicdl-telegram` application volume keys are reused. Stop the full stack and back up the app volumes before changing manifests. If you may need a full data rollback for a full quick install, also back up `musicdl-redis-data`. Compose `down` without `-v` retains that volume for a service rollback; the backup protects the Redis data for a full data rollback. If external Redis data is in scope for a full data rollback, take a consistent, provider-specific snapshot at the same quiesced point as the application-volume backups. For an existing external-Redis full deployment, keep the same intended Redis service available for when full mode is resumed; lite itself does not use that Redis endpoint.
+Build the lite images from the current checkout before stopping the old stack, even though the published `1.0.1` image tags support lite. Record the old Compose project name, ordered manifests and env-file arguments, and actual volume names/mount paths. Keep the same project name (the default is `musicdl`) so the `musicdl-media`, `musicdl-app-data`, and `musicdl-telegram` application volume keys are reused. Stop the full stack and back up the app volumes before changing manifests. If you may need a full data rollback for a full quick install, also back up `musicdl-redis-data`. Compose `down` without `-v` retains that volume for a service rollback; the backup protects the Redis data for a full data rollback. If external Redis data is in scope for a full data rollback, take a consistent, provider-specific snapshot at the same quiesced point as the application-volume backups. For an existing external-Redis full deployment, keep the same intended Redis service available for when full mode is resumed; lite itself does not use that Redis endpoint.
 
 ```bash
 docker compose -p OLD_PROJECT -f compose.lite.yaml build
@@ -333,6 +333,10 @@ Some acceptance gates require real WeCom, Redis, Telegram, or Docker deployment 
 - [Main Docker image](https://hub.docker.com/r/wit7zz/musicdl)
 - [Plugin runner image](https://hub.docker.com/r/wit7zz/musicdl-plugin-runner)
 - [Third-party dependency baseline](./THIRD_PARTY.md)
+
+## Release Checklist
+
+For each numbered release, synchronize package/version metadata, both README files, the GitHub Release, and matching version-tagged main and plugin-runner Docker images. Publish the release outputs from the same source commit and verify their provenance; confirm CI has completed successfully before announcing the release.
 
 ## Star History
 
