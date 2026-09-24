@@ -121,9 +121,9 @@ jobs:
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3999/admin/sources)" = "401" || fail
           echo "one container answered /healthz, served the console, and kept /admin behind a session"
 
-  # There is intentionally no published lite image yet. Build both services
-  # from this checkout once, then run the same project-scoped local images --
-  # never a latest tag that could hide whether this commit supports lite mode.
+  # The published 1.0.1 images support lite. Build both services from this
+  # checkout to test this commit's manifest and lite support without relying
+  # on published images or a moving latest tag.
   lite-mode-source-image:
     name: Lite-mode source image
     runs-on: ubuntu-latest
