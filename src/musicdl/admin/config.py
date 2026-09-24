@@ -285,6 +285,7 @@ class ConfigManager:
                 cleaned[key] = coerce(item, value)
             except ValueError as error:
                 rejected[key] = str(error)
+        self._reject_lite_wecom(cleaned)
         self._overrides = cleaned
         self._rejected = rejected
         self._apply(recover=True)
@@ -372,6 +373,7 @@ class ConfigManager:
                 # is an explicit null, which no text field can send by accident.
                 continue
             candidate[key] = coerce(item, value)
+        self._reject_lite_wecom(candidate)
         try:
             settings = self._materialize(candidate)
         except ValidationError as error:
@@ -389,6 +391,12 @@ class ConfigManager:
         self._rejected = {key: reason for key, reason in self._rejected.items() if key in candidate}
         return self.describe()
 
+    def _reject_lite_wecom(self, overrides: dict[str, Any]) -> None:
+        """Refuse a WeCom-enabled effective state in the lite deployment."""
+        if (self._base["deployment_mode"] == "lite"
+                and overrides.get("wecom.enabled", self._base["wecom"]["enabled"])):
+            raise ValueError("WeCom is not available in lite deployment mode")
+
     def _materialize(self, overrides: dict[str, Any]) -> AppSettings:
         """Rebuild the fields the panel owns, so every invariant still holds.
 
@@ -396,6 +404,7 @@ class ConfigManager:
         other field is validated against its own default, and never adopted.
         """
         data = deepcopy(self._defaults)
+        data["deployment_mode"] = self._base["deployment_mode"]
         for key in EDITABLE:
             parts = key.split(".")
             node, source = data, self._base

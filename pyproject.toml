@@ -29,6 +29,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
+musicdl = ["templates/*.html"]
 musicdl_plugin_runner = ["*.js"]
 
 [tool.pytest.ini_options]

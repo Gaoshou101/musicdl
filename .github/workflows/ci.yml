@@ -97,7 +97,237 @@ jobs:
             sleep 2
           done
           curl --fail --silent --show-error http://127.0.0.1:3999/healthz || fail
+          compose exec -T musicdl python - <<'PY' || fail
+          from importlib.resources import files
+          from pathlib import Path
+          import musicdl
+
+          source_root = Path("/app/src").resolve()
+          module_path = Path(musicdl.__file__).resolve()
+          assert not source_root.exists(), f"source tree leaked into final image: {source_root}"
+          assert not module_path.is_relative_to(source_root), f"musicdl imported from source tree: {module_path}"
+          assert files("musicdl").joinpath("templates", "admin_dashboard.html").is_file(), \
+              "installed wheel is missing admin_dashboard.html"
+
+          panel = Path("/app/panel")
+          assert (panel / "index.html").is_file(), "panel static export is missing index.html"
+          static_assets = panel / "_next" / "static"
+          assert static_assets.is_dir() and any(path.is_file() for path in static_assets.rglob("*")), \
+              "panel static export is missing Next.js assets"
+          print("installed package, admin template, and panel static export verified; /app/src is absent")
+          PY
           curl --fail --silent --show-error http://127.0.0.1:3999/ > /tmp/console.html || fail
           grep --quiet '管理后台' /tmp/console.html || fail
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3999/admin/sources)" = "401" || fail
           echo "one container answered /healthz, served the console, and kept /admin behind a session"
+
+  # There is intentionally no published lite image yet. Build both services
+  # from this checkout once, then run the same project-scoped local images --
+  # never a latest tag that could hide whether this commit supports lite mode.
+  lite-mode-source-image:
+    name: Lite-mode source image
+    runs-on: ubuntu-latest
+    env:
+      MUSICDL_DEPLOYMENT_MODE: lite
+      MUSICDL_ADMIN__COOKIE_SECURE: "false"
+      MUSICDL_PORT: "3997"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and exercise the source-built two-container lite deployment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          project="musicdl-lite-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          compose() { docker compose --project-name "$project" --file compose.lite.yaml "$@"; }
+          cleanup() {
+            status=$?
+            trap - EXIT
+            compose down --volumes --remove-orphans --timeout 20 || true
+            exit "$status"
+          }
+          fail() {
+            status=$?
+            echo "lite-mode smoke failed (exit ${status}); service status and bounded logs follow" >&2
+            compose ps --all >&2 || true
+            compose logs --no-color --tail=80 >&2 || true
+            exit 1
+          }
+          trap cleanup EXIT
+
+          # A unique Compose project gives both build-only services unique
+          # local project/service image tags; no published-image fallback is
+          # involved. Build each exactly once, then forbid Compose from building
+          # again during startup.
+          compose build musicdl plugin-runner || fail
+          compose up --detach --no-build --wait --wait-timeout 120 || fail
+
+          expected_services="$(printf '%s\n' musicdl plugin-runner | sort)"
+          configured_services="$(compose config --services | sort)"
+          test "$configured_services" = "$expected_services" || fail
+          running_services="$(compose ps --services --status running | sort)"
+          test "$running_services" = "$expected_services" || fail
+
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --max-time 5 http://127.0.0.1:3997/readyz > /dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:3997/healthz > /dev/null || fail
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:3997/readyz > /dev/null || fail
+          page="$(curl --fail --silent --show-error --max-time 10 http://127.0.0.1:3997/)" || fail
+          grep --quiet '管理后台' <<< "$page" || fail
+          status="$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3997/admin/config)" || fail
+          test "$status" = "401" || fail
+
+          # Seed a throwaway administrator into this job's disposable app-data
+          # volume. The password is generated in memory and never printed; this
+          # lets the authenticated policy probe avoid embedding any credential
+          # in the workflow or its output.
+          ci_user="lite-ci-${GITHUB_RUN_ID}"
+          ci_password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          compose exec -T -e LITE_CI_USER="$ci_user" -e LITE_CI_PASSWORD="$ci_password" musicdl python - <<'PY' || fail
+          import os
+          from musicdl.admin.auth import PasswordHasher
+          from musicdl.admin.store import AdminStateStore
+          from musicdl.config import AppSettings
+
+          settings = AppSettings()
+          state_path = settings.admin.state_path
+          if state_path != "/data/app/admin-state.json":
+              raise SystemExit("lite Compose admin-state path differs from the expected disposable volume")
+          AdminStateStore(state_path).save(
+              credentials={
+                  "user_id": os.environ["LITE_CI_USER"],
+                  "password_hash": PasswordHasher().hash(os.environ["LITE_CI_PASSWORD"]),
+                  "must_change": False,
+              },
+              sources=[],
+              bots=[],
+              settings={},
+          )
+          print("ephemeral lite CI administrator initialized; credential values redacted")
+          PY
+          compose restart musicdl || fail
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --max-time 5 http://127.0.0.1:3997/readyz > /dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:3997/readyz > /dev/null || fail
+
+          compose exec -T -e LITE_CI_USER="$ci_user" -e LITE_CI_PASSWORD="$ci_password" musicdl python - <<'PY' || fail
+          import json
+          import os
+          from pathlib import Path
+
+          import httpx
+
+          base_url = "http://127.0.0.1:8000"
+          state_path = Path(os.environ["MUSICDL_ADMIN__STATE_PATH"])
+
+          def setting(payload, key):
+              for group in payload["groups"]:
+                  for item in group["fields"]:
+                      if item["key"] == key:
+                          return item["value"]
+              raise SystemExit("the requested setting was absent from the admin response")
+
+          with httpx.Client(base_url=base_url, timeout=10, trust_env=False) as client:
+              login = client.post("/admin/login", json={
+                  "username": os.environ["LITE_CI_USER"],
+                  "password": os.environ["LITE_CI_PASSWORD"],
+              })
+              if login.status_code != 200:
+                  raise SystemExit("lite CI administrator authentication failed")
+              csrf = login.json().get("csrf_token")
+              if not isinstance(csrf, str) or not csrf:
+                  raise SystemExit("lite CI login did not return a CSRF token")
+
+              before = client.get("/admin/config")
+              if before.status_code != 200 or setting(before.json(), "wecom.enabled") is not False:
+                  raise SystemExit("lite WeCom setting was not disabled before the policy probe")
+              rejected = client.patch(
+                  "/admin/config",
+                  json={"values": {"wecom.enabled": True}},
+                  headers={"x-csrf-token": csrf},
+              )
+              if rejected.status_code != 422:
+                  raise SystemExit("lite policy did not reject a WeCom config update with HTTP 422")
+              after = client.get("/admin/config")
+              if after.status_code != 200 or setting(after.json(), "wecom.enabled") is not False:
+                  raise SystemExit("lite policy update changed the effective WeCom setting")
+
+          saved = json.loads(state_path.read_text(encoding="utf-8"))
+          if saved.get("settings") != {}:
+              raise SystemExit("rejected lite policy update changed saved settings")
+          print("authenticated lite policy probe returned 422; effective and saved settings stayed unchanged")
+          PY
+          echo "source-built lite stack served its panel, authenticated safely, and refused WeCom without saving a change"
+
+  # Exercise the published quick-install manifest as operators use it: one
+  # file, its default versioned images, and its bundled Redis. This is separate
+  # from the source-built image tests above and never consumes deployment data.
+  quick-install-stack:
+    name: Quick-install Compose stack
+    runs-on: ubuntu-latest
+    env:
+      MUSICDL_PORT: "3998"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start and probe the published quick-install stack
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          project="musicdl-quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          compose() { docker compose --project-name "$project" --file compose.quick.yaml "$@"; }
+          cleanup() {
+            status=$?
+            trap - EXIT
+            compose down --volumes --remove-orphans --timeout 20 || true
+            exit "$status"
+          }
+          fail() {
+            status=$?
+            echo "quick-install smoke failed (exit ${status}); service status and bounded logs follow" >&2
+            compose ps --all >&2 || true
+            compose logs --no-color --tail=100 >&2 || true
+            exit 1
+          }
+          trap cleanup EXIT
+
+          # Keep the manifest's published 1.0.1 defaults; do not accidentally
+          # inherit an image override from the hosted runner environment.
+          unset MUSICDL_IMAGE_TAG
+          compose pull || fail
+          compose up --detach --wait --wait-timeout 120 || fail
+
+          # Prove the main app can reach and use its internal Redis service,
+          # rather than only observing the Redis container's own healthcheck.
+          compose exec -T musicdl python - <<'PY' || fail
+          import os
+          from redis import Redis
+
+          client = Redis.from_url(
+              os.environ["MUSICDL_REDIS__URL"],
+              socket_connect_timeout=5,
+              socket_timeout=5,
+          )
+          key = "ci:quick-install:redis-probe"
+          try:
+              assert client.ping()
+              assert client.set(key, b"ok", ex=60)
+              assert client.get(key) == b"ok"
+              print("main app reached bundled Redis and completed SET/GET")
+          finally:
+              client.delete(key)
+              client.close()
+          PY
+
+          curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:${MUSICDL_PORT}/healthz" > /dev/null || fail
+          curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:${MUSICDL_PORT}/" > "$RUNNER_TEMP/quick-install-index.html" || fail
+          grep --quiet '管理后台' "$RUNNER_TEMP/quick-install-index.html" || fail
+          status="$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${MUSICDL_PORT}/admin/sources")" || fail
+          test "$status" = "401" || fail
+          echo "published quick-install stack became healthy, served the console, protected /admin, and used bundled Redis"
