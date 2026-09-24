@@ -97,6 +97,25 @@ jobs:
             sleep 2
           done
           curl --fail --silent --show-error http://127.0.0.1:3999/healthz || fail
+          compose exec -T musicdl python - <<'PY' || fail
+          from importlib.resources import files
+          from pathlib import Path
+          import musicdl
+
+          source_root = Path("/app/src").resolve()
+          module_path = Path(musicdl.__file__).resolve()
+          assert not source_root.exists(), f"source tree leaked into final image: {source_root}"
+          assert not module_path.is_relative_to(source_root), f"musicdl imported from source tree: {module_path}"
+          assert files("musicdl").joinpath("templates", "admin_dashboard.html").is_file(), \
+              "installed wheel is missing admin_dashboard.html"
+
+          panel = Path("/app/panel")
+          assert (panel / "index.html").is_file(), "panel static export is missing index.html"
+          static_assets = panel / "_next" / "static"
+          assert static_assets.is_dir() and any(path.is_file() for path in static_assets.rglob("*")), \
+              "panel static export is missing Next.js assets"
+          print("installed package, admin template, and panel static export verified; /app/src is absent")
+          PY
           curl --fail --silent --show-error http://127.0.0.1:3999/ > /tmp/console.html || fail
           grep --quiet '管理后台' /tmp/console.html || fail
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3999/admin/sources)" = "401" || fail

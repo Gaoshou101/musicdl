@@ -51,6 +51,26 @@ def test_plugin_image_final_stage_has_only_runtime_packages():
     assert "COPY pyproject.toml README.md ./" not in final
 
 
+def test_main_image_builds_and_installs_a_versioned_wheel_without_source_tree():
+    text = (ROOT / "docker/main/Dockerfile").read_text(encoding="utf-8")
+    package_stage = text.index("FROM python:3.12.14-slim AS app-package")
+    runtime_stage = text.rindex("FROM python:3.12.14-slim")
+    builder = text[package_stage:runtime_stage]
+    runtime = text[runtime_stage:]
+    wheel = "musicdl-1.0.0-py3-none-any.whl"
+
+    assert "COPY pyproject.toml README.md ./" in builder
+    assert "COPY src/musicdl ./src/musicdl" in builder
+    assert "COPY src/musicdl_plugin_runner ./src/musicdl_plugin_runner" in builder
+    assert "pip wheel --no-cache-dir --no-deps --wheel-dir /wheels ." in builder
+    assert f"COPY --from=app-package /wheels/{wheel} /tmp/{wheel}" in runtime
+    assert f"pip install --no-cache-dir --root-user-action=ignore /tmp/{wheel}" in runtime
+    assert f"rm -f /tmp/{wheel}" in runtime
+    assert "COPY src ./src" not in runtime
+    assert "COPY pyproject.toml README.md ./" not in runtime
+    assert "npm" not in runtime and "node_modules" not in runtime
+
+
 def test_dockerignore_excludes_secrets_sessions_media_and_caches():
     text = (ROOT / ".dockerignore").read_text(encoding="utf-8")
     for pattern in (".git", ".venv", ".env", "telegram-sessions", "data/music", "__pycache__", ".pytest_cache"):

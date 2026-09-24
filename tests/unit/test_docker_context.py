@@ -53,6 +53,12 @@ def _local_copy_sources(dockerfile: Path) -> list[Path]:
 def test_context_excludes_local_state_and_user_runtime_files():
     patterns = _dockerignore_patterns()
     for expected in (
+        ".env",
+        "**/.env",
+        ".env.*",
+        "**/.env.*",
+        ".npmrc*",
+        "**/.npmrc*",
         ".deno-cache",
         ".worktrees",
         ".planning",
@@ -70,15 +76,36 @@ def test_context_excludes_local_state_and_user_runtime_files():
         assert expected in patterns
 
 
+def test_context_excludes_environment_variants_and_npm_credentials_at_any_depth():
+    patterns = _dockerignore_patterns()
+    secret_files = (
+        ".env.local",
+        ".env.production",
+        ".env.development.local",
+        "web/.env.local",
+        "web/.env.production",
+        "docker/plugin/.env.test.local",
+        ".npmrc",
+        ".npmrc.local",
+        "web/.npmrc",
+        "docker/plugin/.npmrc.credentials",
+    )
+
+    for relative in secret_files:
+        assert _is_ignored(ROOT / relative, patterns), f"Docker context includes secret file {relative}"
+
+
 def test_dockerfile_copy_inputs_remain_in_the_build_context():
     patterns = _dockerignore_patterns()
     dockerfiles = (ROOT / "docker/main/Dockerfile", ROOT / "docker/plugin/Dockerfile")
     sources = [source for dockerfile in dockerfiles for source in _local_copy_sources(dockerfile)]
+    copied_source_dirs = {"src/musicdl", "src/musicdl_plugin_runner", "web/src"}
 
     assert {source.relative_to(ROOT).as_posix() for source in sources} >= {
         "pyproject.toml",
         "README.md",
-        "src",
+        "src/musicdl",
+        "src/musicdl_plugin_runner",
         "web/package.json",
         "web/package-lock.json",
         "web/next.config.mjs",
@@ -90,8 +117,8 @@ def test_dockerfile_copy_inputs_remain_in_the_build_context():
     for source in sources:
         assert not _is_ignored(source, patterns), f"Docker COPY source is ignored: {source.relative_to(ROOT)}"
 
-        if source.is_dir() and source.name == "src":
-            suffixes = {".py", ".js", ".ts", ".tsx", ".css"}
+        if source.is_dir() and source.relative_to(ROOT).as_posix() in copied_source_dirs:
+            suffixes = {".py", ".js", ".html", ".ts", ".tsx", ".css"}
             for nested in source.rglob("*"):
                 if nested.is_file() and nested.suffix in suffixes:
                     assert not _is_ignored(nested, patterns), (
@@ -102,7 +129,7 @@ def test_dockerfile_copy_inputs_remain_in_the_build_context():
     assert not _is_ignored(ROOT / "src/musicdl/media/download.py", patterns)
 
 
-def test_plugin_dockerfiles_and_future_plugin_packaging_files_are_not_ignored():
+def test_plugin_dockerfile_and_packaging_metadata_are_not_ignored():
     patterns = _dockerignore_patterns()
-    for relative in ("docker/plugin/Dockerfile", "docker/plugin/package.json"):
+    for relative in ("docker/plugin/Dockerfile", "docker/plugin/pyproject.toml"):
         assert not _is_ignored(ROOT / relative, patterns)

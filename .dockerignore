@@ -1,7 +1,12 @@
 .git
 .venv
+# Deployment env files and npm registry configuration may contain secrets.
 .env
 **/.env
+.env.*
+**/.env.*
+.npmrc*
+**/.npmrc*
 telegram-sessions
 data/music
 media
