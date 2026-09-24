@@ -9,13 +9,13 @@ The coordinator preserves the user's intent, dispatches the stages, and reports 
 
 ## Runtime configuration
 
-Use generic agents that permit explicit model and reasoning overrides. When full-history inheritance prevents overrides, use `fork_turns: "none"` and include a self-contained delegation contract.
+Use generic agents that permit explicit model and reasoning overrides. When full-history inheritance prevents overrides, use `fork_turns: "none"` and include a self-contained delegation contract. The repository default for coordinator and ordinary task work is `gpt-6-sol` (`medium` by default).
 
 | Stage | Model | Reasoning |
 | --- | --- | --- |
-| Plan and coordination | `gpt-6-astra` | Automatically selected; `medium` by default |
-| Concrete work | `gpt-5.6-luna` | Always `max` |
-| Independent review | `gpt-5.6-sol` | Automatically selected; `medium` by default |
+| Planning | `gpt-6-astra` | Automatically selected; `medium` by default |
+| Concrete work | `gpt-6-luna` | Always `max` |
+| Independent review | `gpt-6-sol` | Automatically selected; `medium` by default |
 
 Do not use fixed-model or fixed-effort roles when they cannot satisfy these settings. Record requested settings separately from observable runtime settings, and never claim a model, reasoning level, or provider mode that the tool did not expose or confirm.
 
@@ -79,3 +79,5 @@ Sol reviews every settled result. Its reasoning follows the automatic selection 
 ## Acceptance gate
 
 Sol must inspect the substantive final diff and authorized changed-file scope, confirm required commands completed successfully, and distinguish requested runtime configuration from observed behavior. Fresh evidence must cover corrected files. Agent completion is not acceptance, and a started test is not a passing test.
+
+After Sol accepts a change and its commit succeeds, promptly push the current branch to `origin`. Never force-push automatically or push failed or unaccepted work; report authentication, remote, rejection, or CI blockers accurately.
