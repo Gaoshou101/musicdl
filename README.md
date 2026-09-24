@@ -103,6 +103,26 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000). HTTP sends credentials and 
 
 The quick Compose project name defaults to `musicdl`. To change the host port, set `MUSICDL_PORT` before running Compose. To select a different published application image, set `MUSICDL_IMAGE_TAG`; the default published image tag is `1.0.1`. Both application images use the same version tag.
 
+## Lite Two-Container Deployment
+
+The full three-service quick install above remains the default and includes private Redis plus WeCom support. Choose lite only when WeCom is not needed: lite runs the app and isolated plugin runner, starts no Redis service, and does not connect to Redis. The app rejects WeCom being enabled in this mode; AI and Telegram settings remain available. The manifest sets `MUSICDL_DEPLOYMENT_MODE=lite`. Both application images must be built from a source checkout; there are no published lite-compatible image tags yet. The manifest builds the app with `docker/main/Dockerfile` and the runner with `docker/plugin/Dockerfile`, and the app fails closed before Uvicorn starts if the image does not declare and activate lite mode.
+
+Clone the repository and prepare a private working directory:
+
+```bash
+git clone https://github.com/Gaoshou101/musicdl.git
+cd musicdl
+cp .env.example .env
+```
+
+Set any needed deployment values in `.env` (for example `MUSICDL_PORT` or `MUSICDL_ADMIN__COOKIE_SECURE`). If you copied `.env.example`, remove or comment out its `MUSICDL_REDIS__URL` line; lite does not pass that setting to the app, start Redis, or connect to Redis. Build both images from this source and start the two-service stack:
+
+```bash
+docker compose -f compose.lite.yaml up -d --build
+```
+
+The project name is `musicdl`, matching the full quick stack, and the same three application volume names and mount paths are used. The plugin runner remains non-root, read-only, resource-limited, and reachable only over the internal plugin-control network; it receives no app secrets. The app binds to loopback on port `8000` by default. A new install uses the initial `admin` / `password` credentials; change them immediately while keeping the service private. Existing deployments should follow the mode-switch procedure below rather than starting a second project against the same port or data volumes.
+
 ## Existing Repository Deployment
 
 The repository deployment remains available for operators who already manage Redis separately or need the source-build Compose file. It requires a reachable Redis instance and a checkout of this repository:
@@ -214,16 +234,37 @@ docker compose -p OLD_PROJECT -f compose.prod.yaml up -d
 
 Replace `OLD_PROJECT` and repeat the exact original manifest and environment arguments on the second command. If the quick file is elsewhere, pass its absolute path on the first command. Shared application volumes remain in place, including `admin-state.json` on the app-data volume, so panel settings and overrides are not reset by switching Compose files. Bundled Redis writes remain in the separate quick Redis volume instead of appearing in external Redis. For a full data/configuration rollback to the pre-migration state, stop writers and restore the application-volume snapshots (including the saved admin state) and matching external Redis backup taken at the quiesced point. Preserving later writes from bundled Redis instead requires a separate Redis export/import.
 
+### Switching between full and lite mode
+
+Lite has no Redis service and does not connect to Redis because it requires WeCom to be disabled. Before moving from full to lite, disable WeCom and save that change while still in full mode; otherwise lite startup rejects the enabled setting, including an enabled value saved in the app-data volume. Keep the full three-service quick install as the default when WeCom is required.
+
+Before switching, inspect Runtime Configuration → Redis → Redis Address (`redis.url`) and its source, and record the active target. The Redis setting can remain saved in `admin-state.json` even though lite does not use Redis. If its source is `Panel override`, do not clear or restore it while the full app or workers are running: a saved secret is masked and clearing it may hot-reload full mode to another Redis endpoint. Decide which Redis target full mode should use before switching back.
+
+Build the lite images from the current checkout before stopping the old stack; there is no published lite image tag. Record the old Compose project name, ordered manifests and env-file arguments, and actual volume names/mount paths. Keep the same project name (the default is `musicdl`) so the `musicdl-media`, `musicdl-app-data`, and `musicdl-telegram` application volume keys are reused. Stop the full stack and back up the app volumes before changing manifests. If you may need a full data rollback for a full quick install, also back up `musicdl-redis-data`. Compose `down` without `-v` retains that volume for a service rollback; the backup protects the Redis data for a full data rollback. If external Redis data is in scope for a full data rollback, take a consistent, provider-specific snapshot at the same quiesced point as the application-volume backups. For an existing external-Redis full deployment, keep the same intended Redis service available for when full mode is resumed; lite itself does not use that Redis endpoint.
+
+```bash
+docker compose -p OLD_PROJECT -f compose.lite.yaml build
+docker compose -p OLD_PROJECT -f compose.quick.yaml stop
+# Back up the actual application volumes and, when needed, Redis data at the same quiesced point.
+docker compose -p OLD_PROJECT -f compose.quick.yaml down
+docker compose -p OLD_PROJECT -f compose.lite.yaml up -d
+```
+
+Replace `OLD_PROJECT` and the old-manifest commands with the exact project and arguments recorded above; when migrating from a different full manifest, use it for both `stop` and `down`. Do not add `-v`. Run the lite command from the source checkout. Verify `/healthz`, `/readyz`, panel sign-in, media, Telegram sessions, and plugin operations you use. WeCom remains disabled in the shared saved app state.
+
+For a service-only rollback, stop lite and start the original full manifest with the same project name and env-file arguments. This retains the application data and, for full quick installs, the untouched Redis volume. WeCom remains disabled until you explicitly re-enable it in full mode. Lite performs no Redis writes, but review the saved `redis.url` target before that full-mode restart. A data rollback is different: stop all writers and restore the matching pre-switch application-volume snapshots and, for full quick installs, the matching `musicdl-redis-data` backup. Never remove volumes as part of a service rollback.
+
 ## Configuration
 
 The administration panel is the preferred place to manage runtime settings. Environment variables remain available for deployment-level configuration.
 
 | Variable | Purpose |
 |---|---|
-| `MUSICDL_REDIS__URL` | Required external Redis connection for `compose.yaml` and `compose.prod.yaml`; quick install uses bundled Redis |
+| `MUSICDL_REDIS__URL` | Required external Redis connection for `compose.yaml` and `compose.prod.yaml`; full quick install uses bundled Redis; lite mode does not use Redis |
 | `MUSICDL_PORT` | Host port bound to the main service; default `8000` |
 | `MUSICDL_ADMIN__COOKIE_SECURE` | Whether administrator cookies require HTTPS; defaults to `true`, set `false` only for trusted host-local HTTP access via loopback |
-| `MUSICDL_IMAGE_TAG` | Docker image version used by `compose.quick.yaml` and `compose.prod.yaml` |
+| `MUSICDL_IMAGE_TAG` | Docker image version used by `compose.quick.yaml` and `compose.prod.yaml`; lite builds both images from source |
+| `MUSICDL_DEPLOYMENT_MODE` | `lite` is set by `compose.lite.yaml`; other manifests use the default `full` mode |
 | `MUSICDL_AI__ENABLED` | Enable optional OpenAI-compatible advisory features |
 | `MUSICDL_AI__BASE_URL` | OpenAI-compatible API endpoint |
 | `MUSICDL_AI__API_KEY` | API credential; keep it outside source control |

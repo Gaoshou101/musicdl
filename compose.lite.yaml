@@ -1,0 +1,98 @@
+name: musicdl
+
+services:
+  musicdl:
+    build:
+      context: .
+      dockerfile: docker/main/Dockerfile
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    environment:
+      MUSICDL_CONFIG__VERSION: "1"
+      MUSICDL_DEPLOYMENT_MODE: lite
+      MUSICDL_PLUGIN__SERVICE_URL: "http://plugin-runner:8080"
+      MUSICDL_MEDIA__ROOT: /data/music
+      MUSICDL_TELEGRAM__SESSION_ROOT: /data/telegram-sessions
+      MUSICDL_ADMIN__STATE_PATH: /data/app/admin-state.json
+      MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"
+      MUSICDL_WECOM__ENABLED: "false"
+    ports:
+      - "127.0.0.1:${MUSICDL_PORT:-8000}:8000"
+    volumes:
+      - musicdl-media:/data/music
+      - musicdl-app-data:/data/app
+      - musicdl-telegram:/data/telegram-sessions
+    networks:
+      - default
+      - plugin-control
+    depends_on:
+      plugin-runner:
+        condition: service_healthy
+    command:
+      - sh
+      - -ec
+      - |
+        python - <<'PY'
+        from musicdl.config import AppSettings
+
+        if "deployment_mode" not in getattr(AppSettings, "model_fields", {}):
+            raise SystemExit(
+                "This app image does not support lite mode; rebuild from source that declares AppSettings.deployment_mode."
+            )
+        settings = AppSettings()
+        if settings.deployment_mode != "lite":
+            raise SystemExit(
+                "Lite mode is not active; expected MUSICDL_DEPLOYMENT_MODE=lite."
+            )
+        PY
+        exec uvicorn musicdl.app:app --host 0.0.0.0 --port 8000 --no-access-log
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  plugin-runner:
+    build:
+      context: .
+      dockerfile: docker/plugin/Dockerfile
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 64
+    init: true
+    tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
+    networks:
+      - plugin-control
+    command: ["uvicorn", "musicdl_plugin_runner.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  musicdl-media:
+  musicdl-app-data:
+  musicdl-telegram:
+
+networks:
+  default:
+  plugin-control:
+    internal: true

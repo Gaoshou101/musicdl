@@ -102,6 +102,26 @@ curl http://127.0.0.1:8000/readyz
 
 快速安装的 Compose 项目名默认为 `musicdl`。如需更改宿主机端口，可在运行 Compose 前设置 `MUSICDL_PORT`。如需选择其他已发布的应用镜像，可设置 `MUSICDL_IMAGE_TAG`；默认使用已发布的 `1.0.1` 镜像标签。主服务与插件运行器镜像使用相同的版本标签。
 
+## Lite 双容器部署
+
+上面的完整快速安装仍是默认方案，包含私有 Redis 和企业微信支持。仅在不需要企业微信时选择 lite：lite 只运行主服务和隔离插件运行器，不启动或连接 Redis，并会拒绝企业微信处于启用状态。AI 和 Telegram 配置仍可用。清单将 `MUSICDL_DEPLOYMENT_MODE` 设置为 `lite`。两个应用镜像都必须从源码仓库构建；目前没有已发布且支持 lite 的镜像标签。主服务使用 `docker/main/Dockerfile` 构建，运行器使用 `docker/plugin/Dockerfile` 构建；如果镜像未声明并实际启用 lite 模式，主服务会在启动 Uvicorn 前失败关闭。
+
+克隆仓库并准备私有工作目录：
+
+```bash
+git clone https://github.com/Gaoshou101/musicdl.git
+cd musicdl
+cp .env.example .env
+```
+
+在 `.env` 中设置所需部署参数（例如 `MUSICDL_PORT` 或 `MUSICDL_ADMIN__COOKIE_SECURE`）。如果复制了 `.env.example`，请删除或注释其中的 `MUSICDL_REDIS__URL` 行；lite 不会将该设置传给应用，也不会启动或连接 Redis。然后从当前源码构建两个镜像并启动双服务栈：
+
+```bash
+docker compose -f compose.lite.yaml up -d --build
+```
+
+项目名为 `musicdl`，与完整快速安装一致；三个应用数据卷名称和挂载路径也相同。插件运行器仍以非 root 用户运行，根文件系统只读、资源受限，仅能通过内部 plugin-control 网络访问，并且不接收应用密钥。主服务默认只绑定到 `127.0.0.1:8000`。全新安装的初始账密为 `admin` / `password`；请立即修改并保持服务私有。已有部署请按下方模式切换步骤操作，不要使用另一个项目名启动到相同端口或数据卷。
+
 ## 现有仓库部署方式
 
 已自行管理 Redis，或需要从源码构建的用户仍可使用仓库内的 Compose 文件。该方式要求可访问的 Redis 实例以及本仓库代码副本：
@@ -213,16 +233,37 @@ docker compose -p OLD_PROJECT -f compose.prod.yaml up -d
 
 将 `OLD_PROJECT` 替换为原项目名；第二条命令需重复原来的完整清单和环境参数。如果快速安装文件在其他位置，第一条命令传入其绝对路径。共享应用卷仍会保留，其中 app-data 卷内的 `admin-state.json` 也会保留，因此切换 Compose 文件不会重置面板配置和覆盖。内置 Redis 的写入仍在快速安装的独立 Redis 卷中，不会出现在旧外部 Redis 中。若要将数据和配置完整回滚到迁移前状态，需先停止写入方，再恢复迁移前备份的应用卷（包括已保存的后台状态）和同一静止时间点的外部 Redis 备份。若要保留快速安装期间写入内置 Redis 的新数据，则需另行导出并导入 Redis 数据。
 
+### 在 full 与 lite 模式之间切换
+
+lite 没有 Redis 服务，也不会连接 Redis，因为它要求禁用企业微信。从 full 切换到 lite 前，请在 full 模式下先禁用企业微信并保存；否则 lite 启动时会拒绝已启用的设置，包括保存在 app-data 卷中的启用值。需要企业微信时，仍应使用包含三个服务的完整快速安装作为默认方案。
+
+切换前请检查 Redis 配置来源，并查看「运行配置」→「Redis」→「Redis 地址」（`redis.url`），记录当前目标。即使 lite 不使用 Redis，该设置仍可能保存在 `admin-state.json` 中。如果来源为「面板覆盖」，旧 full 应用或 Worker 运行期间不要清除或恢复该覆盖：已保存的密钥会被隐藏，清除可能使 full 模式热重载到其他 Redis 地址。切回 full 前，应先决定 full 模式要使用哪个 Redis。
+
+停止旧栈之前，先从当前检出源码构建 lite 镜像；目前没有已发布的 lite 镜像标签。记录原 Compose 项目名、按顺序排列的清单和环境文件参数，以及实际卷名/挂载路径。保持相同项目名（默认是 `musicdl`），即可复用 `musicdl-media`、`musicdl-app-data` 和 `musicdl-telegram` 三个应用卷键。停止 full 栈并备份应用卷后再切换清单。若完整数据回滚可能涉及 full 快速安装，还应备份 `musicdl-redis-data`。不带 `-v` 的 Compose down 会保留该卷，支持服务回滚；备份则用于完整数据回滚。若完整数据回滚涉及外部 Redis，应在与应用卷备份相同的静止时间点，使用 Redis 提供方支持的方式创建一致性快照。若原 full 部署使用外部 Redis，请保持该 Redis 可用，以便恢复 full 模式时继续使用；lite 本身不会连接该 Redis 地址。
+
+```bash
+docker compose -p OLD_PROJECT -f compose.lite.yaml build
+docker compose -p OLD_PROJECT -f compose.quick.yaml stop
+# 在此备份实际的应用卷；如有需要，也在同一静止时间点备份 Redis 数据。
+docker compose -p OLD_PROJECT -f compose.quick.yaml down
+docker compose -p OLD_PROJECT -f compose.lite.yaml up -d
+```
+
+将 `OLD_PROJECT` 和旧清单命令替换为上文记录的实际项目名及参数；如果从其他 full 清单迁移，`stop` 和 `down` 都使用该旧清单。不要添加 `-v`。在源码检出目录中运行 lite 命令。验证 `/healthz`、`/readyz`、面板登录、媒体、Telegram 会话以及所用插件功能。共享的保存配置中企业微信仍保持禁用。
+
+仅回滚服务时，停止 lite 并以相同项目名和环境文件参数启动原 full 清单。应用数据和 full 快速安装原有的 Redis 卷都会保留。切回 full 后，企业微信在面板中仍为禁用状态，需明确重新启用。lite 不会写入 Redis，但 full 重启前仍应检查保存的 `redis.url` 目标。完整数据回滚则不同：停止所有写入方，并恢复匹配的迁移前应用卷备份；若原 full 使用快速安装，还需恢复对应的 `musicdl-redis-data` 备份。服务回滚期间不要删除卷。
+
 ## 配置
 
 建议通过管理面板维护运行配置。环境变量主要用于部署层参数。
 
 | 变量 | 用途 |
 |---|---|
-| `MUSICDL_REDIS__URL` | `compose.yaml` 和 `compose.prod.yaml` 所需的外部 Redis 连接地址；快速安装使用内置 Redis |
+| `MUSICDL_REDIS__URL` | `compose.yaml` 和 `compose.prod.yaml` 所需的外部 Redis 连接地址；full 快速安装使用内置 Redis；lite 不使用 Redis |
 | `MUSICDL_PORT` | 主服务绑定到宿主机的端口，默认为 `8000` |
 | `MUSICDL_ADMIN__COOKIE_SECURE` | 管理员 Cookie 是否只通过 HTTPS 发送，默认为 `true`；仅可信的主机本地 HTTP（环回访问）可设为 `false` |
-| `MUSICDL_IMAGE_TAG` | `compose.quick.yaml` 和 `compose.prod.yaml` 使用的 Docker 镜像版本 |
+| `MUSICDL_IMAGE_TAG` | `compose.quick.yaml` 和 `compose.prod.yaml` 使用的 Docker 镜像版本；lite 从源码构建两个镜像 |
+| `MUSICDL_DEPLOYMENT_MODE` | `compose.lite.yaml` 设置为 `lite`；其他清单使用默认的 `full` 模式 |
 | `MUSICDL_AI__ENABLED` | 开启可选的 OpenAI 兼容 AI 辅助功能 |
 | `MUSICDL_AI__BASE_URL` | OpenAI 兼容 API 地址 |
 | `MUSICDL_AI__API_KEY` | API 凭据，不要写入版本库 |

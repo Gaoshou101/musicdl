@@ -4,6 +4,7 @@ import base64
 import binascii
 import math
 import re
+from typing import Literal
 
 from pydantic import AnyHttpUrl, AnyUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -317,6 +318,7 @@ class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MUSICDL_", env_nested_delimiter="__", extra="ignore"
     )
+    deployment_mode: Literal["full", "lite"] = "full"
     config: ConfigVersion = ConfigVersion()
     redis: RedisSettings = RedisSettings()
     media: MediaSettings = MediaSettings()
@@ -326,6 +328,12 @@ class AppSettings(BaseSettings):
     admin: AdminSettings = AdminSettings()
     ai: AISettings = AISettings()
     worker: WorkerSettings = WorkerSettings()
+
+    @model_validator(mode="after")
+    def deployment_mode_policy(self):
+        if self.deployment_mode == "lite" and self.wecom.enabled:
+            raise ValueError("WeCom is not available in lite deployment mode")
+        return self
 
     @model_validator(mode="after")
     def roots_must_differ(self):
