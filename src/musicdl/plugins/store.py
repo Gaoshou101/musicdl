@@ -113,6 +113,8 @@ class PluginStore:
             fd = os.open(temporary, flags, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
                 fd = None
+                if os.name != "nt":
+                    os.fchmod(stream.fileno(), 0o600)
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -183,6 +185,7 @@ class PluginStore:
                 if created:
                     try:
                         with os.fdopen(fd, "wb") as stream:
+                            os.fchmod(stream.fileno(), 0o600)
                             stream.write(source_bytes)
                             stream.flush()
                             os.fsync(stream.fileno())
