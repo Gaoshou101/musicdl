@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WHEEL_NAME = "musicdl-1.0.0-py3-none-any.whl"
+WHEEL_NAME = "musicdl-1.0.1-py3-none-any.whl"
 
 
 def test_installed_main_wheel_contains_importable_application_and_static_assets(tmp_path):
