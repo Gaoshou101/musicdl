@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="Monochrome prism music download banner">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#08090C"/><stop offset=".52" stop-color="#25272D"/><stop offset="1" stop-color="#0C0D10"/></linearGradient>
+    <linearGradient id="prism" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity=".95"/><stop offset=".48" stop-color="#D6D9DE" stop-opacity=".5"/><stop offset="1" stop-color="#7A7E87" stop-opacity=".12"/></linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#B7BDC7"/></linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="22" stdDeviation="28" flood-color="#000000" flood-opacity=".8"/></filter>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/><g fill="none" stroke="#FFFFFF" stroke-opacity=".08" stroke-width="2"><path d="M-60 760 410 60l1130 690"/><path d="M160 936 820 22l780 528"/><path d="M-80 298 542 894 1364 0"/><path d="M18 126 754 900 1620 170"/></g><path d="M-98 694 584 134l745 462-684 532Z" fill="none" stroke="#FFFFFF" stroke-opacity=".16" stroke-width="4"/>
+  <g transform="translate(760 120)" filter="url(#shadow)"><path d="M80 220 468 76l296 185-432 174Z" fill="url(#prism)" opacity=".9"/><path d="m332 435 432-174-92 386-430 170Z" fill="#AEB2B8" fill-opacity=".3"/><path d="m80 220 252 215-92 386L-12 606Z" fill="#FFFFFF" fill-opacity=".17"/>
+    <g fill="url(#mark)" stroke="#0B0C10" stroke-opacity=".72" stroke-width="8" stroke-linejoin="round" paint-order="stroke fill"><path d="M268 256h42v162c14-7 29-10 48-10 57 0 102 33 102 78 0 49-48 87-112 87-66 0-115-36-115-86 0-27 14-50 35-67V256Zm42 226c-27 0-49 13-49 30 0 19 23 34 57 34 35 0 60-15 60-36 0-18-26-28-68-28Z"/><path d="M544 260c0-15 12-27 27-27s27 12 27 27v170l47-47c11-11 28-11 39 0 11 11 11 28 0 39L589 517c-11 11-28 11-39 0l-89-88c-11-11-11-28 0-39 11-11 28-11 39 0l44 44V260Z"/><rect x="483" y="561" width="176" height="42" rx="21"/></g>
+  </g><path d="M160 182h300" stroke="#FFFFFF" stroke-opacity=".28" stroke-width="3"/><path d="M182 738h214" stroke="#FFFFFF" stroke-opacity=".18" stroke-width="3"/><circle cx="790" cy="178" r="5" fill="#FFFFFF" fill-opacity=".75"/><circle cx="838" cy="214" r="3" fill="#FFFFFF" fill-opacity=".45"/>
+</svg>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Cool aurora glass music download icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#07162E"/><stop offset=".52" stop-color="#0B2142"/><stop offset="1" stop-color="#10103A"/></linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#B6F6FF" stop-opacity=".25"/><stop offset=".46" stop-color="#57D8E8" stop-opacity=".11"/><stop offset="1" stop-color="#8457FF" stop-opacity=".22"/></linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F5FFFF"/><stop offset=".47" stop-color="#9CF8FF"/><stop offset="1" stop-color="#B9A4FF"/></linearGradient>
+    <radialGradient id="aura" cx=".5" cy=".25" r=".8"><stop offset="0" stop-color="#52F6FF" stop-opacity=".9"/><stop offset=".44" stop-color="#286CFF" stop-opacity=".32"/><stop offset="1" stop-color="#1A1B65" stop-opacity="0"/></radialGradient>
+    <filter id="blur" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="56"/></filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="26" stdDeviation="30" flood-color="#020817" flood-opacity=".62"/></filter>
+  </defs>
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <ellipse cx="284" cy="140" rx="420" ry="310" fill="url(#aura)" filter="url(#blur)"/>
+  <ellipse cx="780" cy="910" rx="350" ry="240" fill="#6549FF" fill-opacity=".32" filter="url(#blur)"/>
+  <rect x="105" y="105" width="814" height="814" rx="232" fill="url(#glass)" stroke="#B9F7FF" stroke-opacity=".34" stroke-width="4" filter="url(#shadow)"/>
+  <path d="M166 331C313 168 532 164 764 271" fill="none" stroke="#B6FAFF" stroke-opacity=".22" stroke-width="12" stroke-linecap="round"/>
+  <path d="M186 714C340 842 565 856 823 707" fill="none" stroke="#8E8CFF" stroke-opacity=".26" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="768" cy="250" r="14" fill="#D9FFFF" fill-opacity=".82"/>
+  <g fill="none" stroke="#B9FBFF" stroke-linecap="round" stroke-width="16" opacity=".75"><path d="M208 521h36m24 0h58m24 0h32"/><path d="M208 562h68m24 0h38m24 0h58"/><path d="M208 603h38m24 0h66m24 0h28"/></g>
+  <g fill="url(#mark)">
+    <path d="M322 355h54v210c16-8 35-12 57-12 65 0 117 38 117 90 0 57-55 101-129 101-76 0-132-42-132-99 0-31 15-58 43-77V355Zm54 289c-31 0-57 15-57 35 0 22 27 39 66 39 40 0 69-17 69-41 0-21-29-33-78-33Z"/>
+    <path d="M669 359c0-18 15-33 33-33s33 15 33 33v224l62-62c13-13 34-13 47 0 13 13 13 34 0 47L725 687c-13 13-34 13-47 0L570 579c-13-13-13-34 0-47 13-13 34-13 47 0l52 52V359Z"/><rect x="594" y="741" width="210" height="52" rx="26"/>
+  </g>
+  <path d="M263 220h202" stroke="#E9FFFF" stroke-opacity=".48" stroke-width="10" stroke-linecap="round"/>
+</svg>

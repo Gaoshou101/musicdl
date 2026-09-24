@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Monochrome prism music download icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0A0B0E"/><stop offset=".56" stop-color="#25272D"/><stop offset="1" stop-color="#101115"/></linearGradient>
+    <linearGradient id="prism" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity=".94"/><stop offset=".45" stop-color="#D3D6DC" stop-opacity=".58"/><stop offset="1" stop-color="#777C85" stop-opacity=".18"/></linearGradient>
+    <linearGradient id="blackmark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#B7BDC7"/></linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="26" stdDeviation="30" flood-color="#000000" flood-opacity=".75"/></filter>
+  </defs>
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/><path d="M106 736 311 122l606 126-208 614Z" fill="none" stroke="#FFFFFF" stroke-opacity=".08" stroke-width="2"/><path d="M128 182 812 842M242 108 916 760M94 540 450 902" stroke="#FFFFFF" stroke-opacity=".08" stroke-width="2"/>
+  <g filter="url(#shadow)"><path d="M176 269 585 139l264 164-412 167Z" fill="url(#prism)" opacity=".88"/><path d="m437 470 412-167-86 370-412 167Z" fill="#AEB2B9" fill-opacity=".34"/><path d="m176 269 261 201-86 370-261-201Z" fill="#FBFBFA" fill-opacity=".18"/></g>
+  <g fill="url(#blackmark)" stroke="#0B0C10" stroke-opacity=".72" stroke-width="10" stroke-linejoin="round" paint-order="stroke fill"><path d="M342 307h54v211c16-8 35-12 57-12 65 0 117 38 117 90 0 57-55 101-129 101-76 0-132-42-132-99 0-31 15-58 43-77V307Zm54 289c-31 0-57 15-57 35 0 22 27 39 66 39 40 0 69-17 69-41 0-21-29-33-78-33Z"/><path d="M692 335c0-18 15-33 33-33s33 15 33 33v224l62-62c13-13 34-13 47 0 13 13 13 34 0 47L748 663c-13 13-34 13-47 0L593 555c-13-13-13-34 0-47 13-13 34-13 47 0l52 52V335Z"/><rect x="620" y="717" width="210" height="52" rx="26"/></g>
+  <path d="M220 208h204" stroke="#FFFFFF" stroke-opacity=".74" stroke-width="10" stroke-linecap="round"/><path d="M198 812h176" stroke="#FFFFFF" stroke-opacity=".23" stroke-width="8" stroke-linecap="round"/>
+</svg>
