@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Cool porcelain music note icon">
+  <defs>
+    <linearGradient id="porcelain" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FCFEFF"/>
+      <stop offset="0.48" stop-color="#F1F7FB"/>
+      <stop offset="1" stop-color="#E2EDF5"/>
+    </linearGradient>
+    <radialGradient id="softLight" cx="50%" cy="31%" r="73%">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.62"/>
+      <stop offset="0.6" stop-color="#F8FBFD" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#D7E6F0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="note" x1="0.2" y1="0" x2="0.82" y2="1">
+      <stop offset="0" stop-color="#304359"/>
+      <stop offset="0.5" stop-color="#40556B"/>
+      <stop offset="1" stop-color="#5A6F83"/>
+    </linearGradient>
+    <filter id="softShadow" x="-24%" y="-20%" width="148%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#7B91A6" flood-opacity="0.24"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="220" fill="url(#porcelain)"/>
+  <rect width="1024" height="1024" rx="220" fill="url(#softLight)"/>
+  <path
+    d="M 512 236
+       C 512 214 530 196 552 196
+       H 598
+       C 694 196 756 255 756 328
+       C 756 389 721 434 670 450
+       C 700 416 706 374 690 341
+       C 671 302 635 286 588 286
+       V 625
+       C 613 642 628 665 628 692
+       C 628 776 554 829 456 829
+       C 354 829 282 777 282 690
+       C 282 621 345 569 431 561
+       C 462 558 491 565 512 578
+       Z"
+    fill="url(#note)"
+    filter="url(#softShadow)"
+    transform="translate(-8 -9)"
+  />
+</svg>

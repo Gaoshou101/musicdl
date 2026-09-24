@@ -23,6 +23,11 @@ const appearanceInitScript = `
 export const metadata: Metadata = {
   title: 'tgmusic 管理后台',
   description: 'Telegram 音乐机器人管理面板',
+  icons: {
+    icon: '/brand/icon.svg',
+    shortcut: '/brand/icon.svg',
+    apple: '/brand/icon-apple-touch.png',
+  },
 }
 
 export default function RootLayout({

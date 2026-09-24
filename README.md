@@ -7,6 +7,10 @@
 </p>
 
 <p align="center">
+  <img src="./web/public/brand-options/social-preview-cool-aurora-glass.png" alt="Cool porcelain aurora glass artwork for musicdl" width="720">
+</p>
+
+<p align="center">
   <a href="https://github.com/Gaoshou101/musicdl/actions/workflows/ci.yml"><img src="https://github.com/Gaoshou101/musicdl/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="https://github.com/Gaoshou101/musicdl/releases"><img src="https://img.shields.io/github/v/release/Gaoshou101/musicdl?style=flat-square&color=F59E0B" alt="Latest release"></a>
   <a href="https://hub.docker.com/r/wit7zz/musicdl"><img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-4B5563?style=flat-square" alt="Docker architectures"></a>

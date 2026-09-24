@@ -37,9 +37,14 @@ export function Sidebar() {
       {/* Logo */}
       <div className="p-6 max-sm:p-3 border-b border-neutral-800">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-accent-500/20 flex items-center justify-center">
-            <MusicNotes size={24} weight="duotone" className="text-accent-400" />
-          </div>
+          <img
+            src="/brand/icon.svg"
+            alt=""
+            aria-hidden="true"
+            width={40}
+            height={40}
+            className="h-10 w-10 rounded-lg object-cover shadow-sm"
+          />
           <div className="max-sm:hidden">
             <h2 className="font-semibold">tgmusic</h2>
             <p className="text-xs text-neutral-400">管理后台</p>
