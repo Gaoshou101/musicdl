@@ -76,16 +76,32 @@ docker compose -f .\compose.quick.yaml up -d
 
 This quick path uses prebuilt images and includes a private Redis service. It does not need a repository checkout, `.env` file, or separately managed Redis. Redis has no published host port, stores its data in a Docker volume, and is reachable only from the main service. The plugin runner remains isolated on its internal control network and receives no application secrets. The web service binds to `127.0.0.1:8000` by default.
 
-Check that the service is healthy:
+By default, administrator session and CSRF cookies require HTTPS (`MUSICDL_ADMIN__COOKIE_SECURE=true`); prefer an HTTPS reverse proxy. For ongoing direct HTTP access from the Docker host via `127.0.0.1` only, create or edit a `.env` file next to `compose.quick.yaml` and add:
+
+```dotenv
+MUSICDL_ADMIN__COOKIE_SECURE=false
+```
+
+Then recreate the main service:
+
+```bash
+docker compose -f compose.quick.yaml up -d --force-recreate musicdl
+```
+
+The quick-install default needs no `.env` file; if the setting is omitted, cookies remain HTTPS-only. Keeping the line in `.env` preserves the HTTP setting across later Compose recreations. To restore the secure default, remove the line and force-recreate `musicdl`. The quick manifest binds to loopback by default, so this does not expose the service to LAN peers; LAN access requires a separate intentional port-binding or proxy change.
+
+A fresh quick install starts with username `admin` and password `password`. Immediately set a new, strong password; the panel blocks the rest of the administration API until the credential change is completed. Keep the service on loopback and private while the default credentials are active.
+
+Check that the service is healthy after starting it with the intended cookie setting:
 
 ```bash
 curl http://127.0.0.1:8000/healthz
 curl http://127.0.0.1:8000/readyz
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). On a fresh install, sign in with username `admin` and password `password`; the panel requires you to replace these credentials before using the rest of the administration API. Change them immediately, and keep the service private until you have set a strong password and configured TLS for any remote access.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). HTTP sends credentials and session cookies in plaintext, so keep direct HTTP limited to trusted host-local access and use HTTPS for public access.
 
-The quick Compose project name defaults to `musicdl`. To change the host port, set `MUSICDL_PORT` before running Compose. To select a different published application image, set `MUSICDL_IMAGE_TAG`; the default is the verified `1.0.1` release. Both application images use the same version tag.
+The quick Compose project name defaults to `musicdl`. To change the host port, set `MUSICDL_PORT` before running Compose. To select a different published application image, set `MUSICDL_IMAGE_TAG`; the default published image tag is `1.0.1`. Both application images use the same version tag.
 
 ## Existing Repository Deployment
 
@@ -106,6 +122,15 @@ MUSICDL_IMAGE_TAG=1.0.1 docker compose -f compose.prod.yaml up -d
 
 The source-build `compose.yaml` is also available when you want Docker to build from the checkout.
 
+Check the service:
+
+```bash
+curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/readyz
+```
+
+By default, access the panel through an HTTPS reverse proxy. Before using [http://127.0.0.1:8000](http://127.0.0.1:8000) directly, apply the HTTP cookie settings under Configuration below. Sign in with the initial credentials supplied by your deployment. A fresh installation requires the default credentials to be replaced before the rest of the administration API can be used.
+
 From the panel you can:
 
 1. Import or manage compatible JavaScript source scripts.
@@ -116,14 +141,14 @@ From the panel you can:
 
 ## Deployment
 
-The release consists of two images:
+The currently published image pair is:
 
 | Image | Purpose |
 |---|---|
 | `wit7zz/musicdl:1.0.1` | Main service and built-in administration panel |
 | `wit7zz/musicdl-plugin-runner:1.0.1` | Isolated JavaScript plugin runtime |
 
-Both `compose.quick.yaml` and `compose.prod.yaml` accept `MUSICDL_IMAGE_TAG`; use a published numbered version for predictable deployments. The quick Compose file defaults to `1.0.1`.
+Both `compose.quick.yaml` and `compose.prod.yaml` accept `MUSICDL_IMAGE_TAG`; use a published numbered version for predictable deployments. The quick Compose file defaults to the published `1.0.1` images, which include the cookie-policy fix. The original `v1.0.0` images do not. `1.0.1` is a Docker image tag, not a GitHub/source release tag.
 
 The production Compose file binds the application to `127.0.0.1` by default. Put it behind a TLS reverse proxy before exposing it outside the host. Example configurations are available for:
 
@@ -197,6 +222,7 @@ The administration panel is the preferred place to manage runtime settings. Envi
 |---|---|
 | `MUSICDL_REDIS__URL` | Required external Redis connection for `compose.yaml` and `compose.prod.yaml`; quick install uses bundled Redis |
 | `MUSICDL_PORT` | Host port bound to the main service; default `8000` |
+| `MUSICDL_ADMIN__COOKIE_SECURE` | Whether administrator cookies require HTTPS; defaults to `true`, set `false` only for trusted host-local HTTP access via loopback |
 | `MUSICDL_IMAGE_TAG` | Docker image version used by `compose.quick.yaml` and `compose.prod.yaml` |
 | `MUSICDL_AI__ENABLED` | Enable optional OpenAI-compatible advisory features |
 | `MUSICDL_AI__BASE_URL` | OpenAI-compatible API endpoint |
@@ -204,6 +230,10 @@ The administration panel is the preferred place to manage runtime settings. Envi
 | `MUSICDL_AI__MODEL` | Model identifier supplied to the compatible endpoint |
 
 Most changes made in the panel rebuild the active runtime without restarting the container. Settings that affect startup boundaries may still require a restart.
+
+For direct HTTP from the deployment host via loopback, set `MUSICDL_ADMIN__COOKIE_SECURE=false`; keep the default `true` when an HTTPS reverse proxy is in front of the service. The Compose files bind to `127.0.0.1` by default; LAN access requires a separate intentional port-binding or proxy change. The quick-install override is shown above. Published `1.0.1` images contain this fix; the original `v1.0.0` images do not. For `compose.prod.yaml`, put the setting in `.env` and recreate the main service. When building a custom image, use source that includes the cookie-policy fix.
+
+Custom Compose files must also add `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"` under `musicdl.environment`; `.env` alone does not pass it into the container. After upgrading and verifying HTTP login and password changes, remove any temporary `panel` proxy and configuration used only to strip Secure, and map the original entry port directly to the main service's port `8000`. HTTP sends credentials and sessions in plaintext; use HTTPS for public deployments.
 
 ## Source Scripts and Content Responsibility
 

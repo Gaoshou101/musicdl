@@ -75,16 +75,32 @@ docker compose -f .\compose.quick.yaml up -d
 
 快速安装使用预构建镜像，并包含一个私有 Redis 服务。无需克隆仓库、创建 `.env` 或单独准备 Redis。Redis 不映射宿主机端口，数据保存在 Docker 卷中，只有主服务可以访问。插件运行器仍位于独立的内部控制网络中，不接收应用密钥。Web 服务默认只绑定到 `127.0.0.1:8000`。
 
-检查服务是否就绪：
+默认情况下，管理员会话和 CSRF Cookie 需要 HTTPS（`MUSICDL_ADMIN__COOKIE_SECURE=true`），建议通过 HTTPS 反向代理访问。若要持续从 Docker 主机通过 `127.0.0.1` 直接使用 HTTP，请在 `compose.quick.yaml` 同目录创建或编辑 `.env` 文件，并添加：
+
+```dotenv
+MUSICDL_ADMIN__COOKIE_SECURE=false
+```
+
+然后重新创建主服务：
+
+```bash
+docker compose -f compose.quick.yaml up -d --force-recreate musicdl
+```
+
+快速安装默认无需 `.env` 文件；未设置该变量时，Cookie 仍仅通过 HTTPS 发送。将该行保留在 `.env` 中可使后续 Compose 重建继续使用 HTTP 设置。要恢复安全默认值，请删除这一行并强制重新创建 `musicdl`。快速安装默认仅绑定到环回地址，不会向局域网其他设备开放；如需局域网访问，必须另行有意修改端口绑定或反向代理配置。
+
+全新快速安装的初始用户名为 `admin`，密码为 `password`。请立即设置新的强密码；面板会在凭据更改完成前阻止其余管理 API 的使用。默认凭据仍有效期间，请保持服务仅通过环回地址访问且不对外开放。
+
+请在使用预期的 Cookie 设置启动服务后检查状态：
 
 ```bash
 curl http://127.0.0.1:8000/healthz
 curl http://127.0.0.1:8000/readyz
 ```
 
-打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。全新部署使用用户名 `admin`、密码 `password` 登录；面板会强制要求先更换这组凭据，之后才能使用其余管理接口。请立即更换密码；设置强密码并为远程访问配置 TLS 前，应保持服务为私有状态。
+然后打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。HTTP 会以明文传输账密和会话 Cookie，因此直接 HTTP 仅限可信的主机本地访问，公网访问请使用 HTTPS。
 
-快速安装的 Compose 项目名默认为 `musicdl`。如需更改宿主机端口，可在运行 Compose 前设置 `MUSICDL_PORT`。如需选择其他已发布的应用镜像，可设置 `MUSICDL_IMAGE_TAG`；默认使用已验证的 `1.0.1` 版本。主服务与插件运行器镜像使用相同的版本标签。
+快速安装的 Compose 项目名默认为 `musicdl`。如需更改宿主机端口，可在运行 Compose 前设置 `MUSICDL_PORT`。如需选择其他已发布的应用镜像，可设置 `MUSICDL_IMAGE_TAG`；默认使用已发布的 `1.0.1` 镜像标签。主服务与插件运行器镜像使用相同的版本标签。
 
 ## 现有仓库部署方式
 
@@ -105,6 +121,15 @@ MUSICDL_IMAGE_TAG=1.0.1 docker compose -f compose.prod.yaml up -d
 
 需要从当前代码构建时，也可以使用 `compose.yaml`。
 
+检查服务状态：
+
+```bash
+curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/readyz
+```
+
+默认通过 HTTPS 反向代理访问面板。直接访问 [http://127.0.0.1:8000](http://127.0.0.1:8000) 前，请完成下方「配置」中的 HTTP Cookie 设置。使用部署提供的初始账密登录；新部署必须先修改默认账密，之后才能使用其余管理接口。
+
 进入面板后可以：
 
 1. 导入或管理兼容的 JavaScript 音源脚本。
@@ -115,14 +140,14 @@ MUSICDL_IMAGE_TAG=1.0.1 docker compose -f compose.prod.yaml up -d
 
 ## 部署
 
-正式版本包含两个镜像：
+当前已发布的镜像对为：
 
 | 镜像 | 用途 |
 |---|---|
 | `wit7zz/musicdl:1.0.1` | 主服务和内置管理面板 |
 | `wit7zz/musicdl-plugin-runner:1.0.1` | 隔离的 JavaScript 插件运行环境 |
 
-`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装默认使用 `1.0.1`。
+`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装默认使用已包含 Cookie 策略修复的 `1.0.1` 镜像；原始 `v1.0.0` 镜像不包含该修复。`1.0.1` 是 Docker 镜像标签，不是 GitHub/源码发布标签。
 
 生产 Compose 默认只监听 `127.0.0.1`。如需从其他设备访问，请先通过支持 TLS 的反向代理对外提供服务。仓库提供了以下示例：
 
@@ -196,6 +221,7 @@ docker compose -p OLD_PROJECT -f compose.prod.yaml up -d
 |---|---|
 | `MUSICDL_REDIS__URL` | `compose.yaml` 和 `compose.prod.yaml` 所需的外部 Redis 连接地址；快速安装使用内置 Redis |
 | `MUSICDL_PORT` | 主服务绑定到宿主机的端口，默认为 `8000` |
+| `MUSICDL_ADMIN__COOKIE_SECURE` | 管理员 Cookie 是否只通过 HTTPS 发送，默认为 `true`；仅可信的主机本地 HTTP（环回访问）可设为 `false` |
 | `MUSICDL_IMAGE_TAG` | `compose.quick.yaml` 和 `compose.prod.yaml` 使用的 Docker 镜像版本 |
 | `MUSICDL_AI__ENABLED` | 开启可选的 OpenAI 兼容 AI 辅助功能 |
 | `MUSICDL_AI__BASE_URL` | OpenAI 兼容 API 地址 |
@@ -203,6 +229,10 @@ docker compose -p OLD_PROJECT -f compose.prod.yaml up -d
 | `MUSICDL_AI__MODEL` | 兼容端点使用的模型标识 |
 
 面板保存的大部分配置会触发运行时热重载，不需要重启容器。涉及启动边界的设置仍可能要求重启。
+
+如需从部署主机通过环回地址直接使用 HTTP，请将 `MUSICDL_ADMIN__COOKIE_SECURE=false`；如果前面有 HTTPS 反向代理，请保持默认值 `true`。Compose 文件默认绑定到 `127.0.0.1`，局域网访问需要另行有意修改端口绑定或反向代理配置。快速安装的覆盖命令见上文。已发布的 `1.0.1` 镜像包含此修复，原始 `v1.0.0` 镜像不支持。使用 `compose.prod.yaml` 时，请将设置写入 `.env` 并重新创建主服务；构建自定义镜像时，请使用包含 Cookie 策略修复的源码。
+
+自定义 Compose 还需在 `musicdl.environment` 中加入 `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"`；只写入 `.env` 不会自动传给容器。升级并验证 HTTP 登录、改密成功后，可删除仅用于剥离 Secure 的临时 `panel` 反代服务及对应配置，把原入口端口直接映射到主服务的 `8000`。HTTP 会明文传输账密和会话，公网部署请使用 HTTPS。
 
 ## 音源脚本与内容责任
 

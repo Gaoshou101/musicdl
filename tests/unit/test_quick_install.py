@@ -27,6 +27,14 @@ def test_quick_install_uses_published_images_and_needs_no_build_or_external_redi
     assert "set an external Redis URL" not in compose_text
 
 
+def test_quick_install_defaults_admin_cookie_to_secure_and_allows_override():
+    services = quick_compose()["services"]
+    variable = "MUSICDL_ADMIN__COOKIE_SECURE"
+
+    assert services["musicdl"]["environment"][variable] == "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"
+    assert variable not in services["plugin-runner"].get("environment", {})
+
+
 def test_quick_install_keeps_application_volumes_and_persists_bundled_redis():
     data = quick_compose()
     services = data["services"]
@@ -117,8 +125,22 @@ def test_quick_install_and_migration_docs_match_the_manifest():
 
     assert "does not need a repository checkout, `.env` file, or separately managed Redis" in english
     assert "无需克隆仓库、创建 `.env` 或单独准备 Redis" in chinese
-    assert "admin` and password `password" in english
-    assert "用户名 `admin`、密码 `password`" in chinese
+    assert "MUSICDL_ADMIN__COOKIE_SECURE=false" in english
+    assert "create or edit a `.env` file next to `compose.quick.yaml`" in english
+    assert "if the setting is omitted, cookies remain HTTPS-only" in english
+    assert "Keeping the line in `.env` preserves the HTTP setting across later Compose recreations" in english
+    assert "To restore the secure default, remove the line and force-recreate `musicdl`" in english
+    assert "A fresh quick install starts with username `admin` and password `password`" in english
+    assert "Immediately set a new, strong password; the panel blocks the rest of the administration API until the credential change is completed" in english
+    assert "Keep the service on loopback and private while the default credentials are active" in english
+    assert "MUSICDL_ADMIN__COOKIE_SECURE=false" in chinese
+    assert "请在 `compose.quick.yaml` 同目录创建或编辑 `.env` 文件" in chinese
+    assert "未设置该变量时，Cookie 仍仅通过 HTTPS 发送" in chinese
+    assert "将该行保留在 `.env` 中可使后续 Compose 重建继续使用 HTTP 设置" in chinese
+    assert "要恢复安全默认值，请删除这一行并强制重新创建 `musicdl`" in chinese
+    assert "全新快速安装的初始用户名为 `admin`，密码为 `password`" in chinese
+    assert "请立即设置新的强密码；面板会在凭据更改完成前阻止其余管理 API 的使用" in chinese
+    assert "默认凭据仍有效期间，请保持服务仅通过环回地址访问且不对外开放" in chinese
     assert "External Redis contents are not copied automatically" in english_migration
     assert "外部 Redis 内容不会自动复制" in chinese_migration
     assert "repeat every `-f` in the same order" in english_migration
