@@ -1,3 +1,19 @@
+# compose.prod.yaml — repository deployment manifest (production semantics).
+#
+# Who it is for : operators who already run Redis and want a pinned release image.
+# Images        : wit7zz/musicdl + wit7zz/musicdl-plugin-runner, tag via MUSICDL_IMAGE_TAG
+#                 (default `latest` — pin a numbered release such as 1.0.2). `build:` is kept so
+#                 CI can build this exact topology from a checkout; plain `up -d` uses the image.
+# Redis         : external and mandatory — set MUSICDL_REDIS__URL.
+# Services      : 2, bound to 127.0.0.1 only; put a TLS reverse proxy in front (see deploy/).
+# Start with    : MUSICDL_IMAGE_TAG=1.0.2 MUSICDL_REDIS__URL=<your-redis-url> \
+#                 docker compose -f compose.prod.yaml up -d
+#
+# Which manifest do I want?
+#   compose.yaml       dev / source build, external Redis, no restart policy or memory ceiling
+#   compose.prod.yaml  same topology on the published images, plus restart + resource limits
+#   compose.lite.yaml  no Redis at all (MUSICDL_DEPLOYMENT_MODE=lite), source build, WeCom refused
+#   compose.quick.yaml one command: published images + bundled Redis, no checkout needed
 services:
   musicdl:
     image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-latest}
@@ -58,6 +74,8 @@ services:
     security_opt: [no-new-privileges:true]
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m
+    # Match the other manifests: the runner forks untrusted JS, so reclaim zombie children.
+    init: true
     networks: [plugin-control]
     command: ["uvicorn", "musicdl_plugin_runner.app:app", "--host", "0.0.0.0", "--port", "8080"]
     restart: unless-stopped
@@ -66,6 +84,10 @@ services:
         limits:
           cpus: "0.50"
           memory: 256M
+          # Process cap for the untrusted-JS runner. This file expresses resource limits in the
+          # `deploy` dialect, where a process cap is `pids` — `pids_limit` is the flat-syntax
+          # spelling of the same key and Compose rejects a service that sets both.
+          pids: 64
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
       interval: 30s

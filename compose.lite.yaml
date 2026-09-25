@@ -1,5 +1,20 @@
 name: musicdl
 
+# compose.lite.yaml — Lite two-container manifest: no Redis, no WeCom.
+#
+# Who it is for : hosts that cannot or should not run Redis and do not need WeCom.
+# Images        : built from this checkout (no compatible published image is assumed).
+# Redis         : none — MUSICDL_DEPLOYMENT_MODE=lite. The guard below refuses to start unless the
+#                 image declares that field and the resolved mode is lite.
+# WeCom         : forced off (MUSICDL_WECOM__ENABLED=false); AI and Telegram still work.
+# Services      : 2 (musicdl + plugin-runner).
+# Start with    : docker compose -f compose.lite.yaml up -d --build
+#
+# Which manifest do I want?
+#   compose.yaml       dev / source build, external Redis, no restart policy or memory ceiling
+#   compose.prod.yaml  same topology on the published images, plus restart + resource limits
+#   compose.lite.yaml  no Redis at all (MUSICDL_DEPLOYMENT_MODE=lite), source build, WeCom refused
+#   compose.quick.yaml one command: published images + bundled Redis, no checkout needed
 services:
   musicdl:
     build:
