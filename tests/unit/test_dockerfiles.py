@@ -43,7 +43,7 @@ def test_plugin_image_final_stage_has_only_runtime_packages():
     assert "libseccomp2=2.5.4-1+deb12u1" in final
     assert "unzip" not in final
     assert "curl" not in final
-    runner_wheel = "/tmp/musicdl_plugin_runner-1.0.1-py3-none-any.whl"
+    runner_wheel = "/tmp/musicdl_plugin_runner-1.0.2-py3-none-any.whl"
     assert f"pip install --no-cache-dir --timeout 120 --root-user-action=ignore {runner_wheel}" in final
     assert f"rm -f {runner_wheel}" in final
     assert "/tmp/musicdl-plugin-runner.whl" not in final
@@ -57,7 +57,7 @@ def test_main_image_builds_and_installs_a_versioned_wheel_without_source_tree():
     runtime_stage = text.rindex("FROM python:3.12.14-slim")
     builder = text[package_stage:runtime_stage]
     runtime = text[runtime_stage:]
-    wheel = "musicdl-1.0.1-py3-none-any.whl"
+    wheel = "musicdl-1.0.2-py3-none-any.whl"
 
     assert "COPY pyproject.toml README.md ./" in builder
     assert "COPY src/musicdl ./src/musicdl" in builder
