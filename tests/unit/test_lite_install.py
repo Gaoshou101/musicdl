@@ -91,9 +91,9 @@ def test_lite_install_docs_explain_build_mode_and_full_to_lite_rollback_boundari
         assert "compose.lite.yaml" in text
         assert "MUSICDL_DEPLOYMENT_MODE" in text
         assert "docker/plugin/Dockerfile" in text
-    assert "published `1.0.1` main and plugin-runner image tags support lite" in english_lite.lower()
+    assert "published `1.0.2` main and plugin-runner image tags support lite" in english_lite.lower()
     assert "compose.lite.yaml` still builds both images from the source checkout" in english_lite
-    assert "已发布的 `1.0.1` 主服务和插件运行器镜像标签均支持 lite" in chinese_lite
+    assert "已发布的 `1.0.2` 主服务和插件运行器镜像标签均支持 lite" in chinese_lite
     assert "compose.lite.yaml` 仍会从源码检出目录" in chinese_lite
 
     english_migration = english.split("### Switching between full and lite mode", 1)[1].split("## Configuration", 1)[0]
@@ -116,3 +116,23 @@ def test_lite_install_docs_explain_build_mode_and_full_to_lite_rollback_boundari
     assert "面板覆盖" in chinese_migration
     assert "仅回滚服务" in chinese_migration
     assert "lite 不会写入 Redis" in chinese_migration
+
+
+def test_release_docs_pin_current_images_and_keep_quick_default_override_explicit():
+    english = (ROOT / "README.md").read_text(encoding="utf-8")
+    chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    for text in (english, chinese):
+        assert "1.0.2" in text
+        assert "MUSICDL_IMAGE_TAG=1.0.2" in text
+    assert "wit7zz/musicdl:1.0.2" in english
+    assert "wit7zz/musicdl-plugin-runner:1.0.2" in english
+    assert "`wit7zz/musicdl:1.0.2`" in chinese
+    assert "`wit7zz/musicdl-plugin-runner:1.0.2`" in chinese
+    assert "MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.quick.yaml up -d" in english
+    assert "MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.quick.yaml up -d" in chinese
+    assert "still defaults to `1.0.1` until post-publication promotion" in english
+    assert "发布后完成推广前仍默认使用" in chinese
+    assert "MUSICDL_IMAGE_TAG=1.0.2" in env_example
+    assert "1.0.1" in env_example and "v1.0.0" in env_example
