@@ -5,6 +5,7 @@ import stat
 
 import pytest
 
+from musicdl.plugins import store as store_module
 from musicdl.plugins.store import PluginStore
 
 
@@ -35,6 +36,52 @@ def test_install_hashes_source_and_loads_immutable_version(tmp_path):
     loaded = store.load("demo", digest)
     assert loaded.manifest == stored.manifest
     assert loaded.path.read_bytes() == SOURCE.encode()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission assertion")
+def test_install_repairs_source_mode_when_open_ignores_requested_mode(tmp_path, monkeypatch):
+    store = PluginStore(tmp_path)
+    real_open = store_module.os.open
+    real_fchmod = store_module.os.fchmod
+
+    def open_with_insecure_mode(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if flags & store_module.os.O_CREAT and mode == 0o600:
+            real_fchmod(fd, 0o700)
+        return fd
+
+    monkeypatch.setattr(store_module.os, "open", open_with_insecure_mode)
+    stored = install(store)
+
+    assert stat.S_IMODE(stored.path.stat().st_mode) == 0o600
+    loaded = store.load("demo", stored.manifest.sha256)
+    assert loaded.manifest == stored.manifest
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission assertion")
+def test_install_rejects_unrepairable_source_mode_and_cleans_created_file(tmp_path, monkeypatch):
+    store = PluginStore(tmp_path)
+    real_open = store_module.os.open
+    real_fchmod = store_module.os.fchmod
+
+    def open_with_insecure_mode(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if flags & store_module.os.O_CREAT and mode == 0o600:
+            real_fchmod(fd, 0o700)
+        return fd
+
+    def ineffective_fchmod(fd, mode):
+        if mode != 0o600:
+            real_fchmod(fd, mode)
+
+    monkeypatch.setattr(store_module.os, "open", open_with_insecure_mode)
+    monkeypatch.setattr(store_module.os, "fchmod", ineffective_fchmod)
+    with pytest.raises(OSError) as exc_info:
+        install(store)
+
+    assert exc_info.value.args == ("plugin source mode must be 0600",)
+    digest = hashlib.sha256(SOURCE.encode()).hexdigest()
+    assert not (tmp_path / "plugins" / "demo" / f"{digest}.py").exists()
 
 
 def test_install_same_version_is_idempotent_but_mismatch_is_rejected(tmp_path):
