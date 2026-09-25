@@ -104,13 +104,7 @@ curl http://127.0.0.1:8000/readyz
 
 然后打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。HTTP 会以明文传输账密和会话 Cookie，因此直接 HTTP 仅限可信的主机本地访问，公网访问请使用 HTTPS。
 
-快速安装的 Compose 项目名默认为 `musicdl`。如需更改宿主机端口，可在运行 Compose 前设置 `MUSICDL_PORT`。如需选择其他已发布的应用镜像，可设置 `MUSICDL_IMAGE_TAG`；下载的快速安装清单在发布后完成推广前仍默认使用 `1.0.1`。如需立即使用当前的 `1.0.2` 镜像，请显式覆盖该默认值：
-
-```bash
-MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.quick.yaml up -d
-```
-
-主服务与插件运行器镜像使用相同的版本标签。
+快速安装的 Compose 项目名默认为 `musicdl`。如需更改宿主机端口，可在运行 Compose 前设置 `MUSICDL_PORT`。如需选择其他已发布的应用镜像，可设置 `MUSICDL_IMAGE_TAG`；快速安装清单现在默认使用 `1.0.2`。主服务与插件运行器镜像使用相同的版本标签。
 
 ## Lite 双容器部署
 
@@ -177,7 +171,7 @@ curl http://127.0.0.1:8000/readyz
 | `wit7zz/musicdl:1.0.2` | 主服务和内置管理面板 |
 | `wit7zz/musicdl-plugin-runner:1.0.2` | 隔离的 JavaScript 插件运行环境 |
 
-`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装清单在发布后完成推广前仍默认使用已发布的 `1.0.1` 镜像；如需立即使用当前镜像，请设置 `MUSICDL_IMAGE_TAG=1.0.2`。Cookie 策略修复是在 `1.0.1` 中引入的，`1.0.2` 继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。Docker 镜像标签和 GitHub 源码发布是独立的发布产物；源码发布及其附件请查看 [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases)。
+`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装清单现在默认使用已发布的 `1.0.2` 镜像。Cookie 策略修复是在 `1.0.1` 中引入的，`1.0.2` 继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。Docker 镜像标签和 GitHub 源码发布是独立的发布产物；源码发布及其附件请查看 [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases)。
 
 生产 Compose 默认只监听 `127.0.0.1`。如需从其他设备访问，请先通过支持 TLS 的反向代理对外提供服务。仓库提供了以下示例：
 
@@ -281,7 +275,7 @@ docker compose -p OLD_PROJECT -f compose.lite.yaml up -d
 
 面板保存的大部分配置会触发运行时热重载，不需要重启容器。涉及启动边界的设置仍可能要求重启。
 
-如需从部署主机通过环回地址直接使用 HTTP，请将 `MUSICDL_ADMIN__COOKIE_SECURE=false`；如果前面有 HTTPS 反向代理，请保持默认值 `true`。Compose 文件默认绑定到 `127.0.0.1`，局域网访问需要另行有意修改端口绑定或反向代理配置。快速安装的覆盖命令见上文。Cookie 策略修复是在已发布的 `1.0.1` 镜像中引入的，`1.0.2` 继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。使用 `compose.prod.yaml` 时，请将设置写入 `.env` 并重新创建主服务；构建自定义镜像时，请使用包含 Cookie 策略修复的源码。
+如需从部署主机通过环回地址直接使用 HTTP，请将 `MUSICDL_ADMIN__COOKIE_SECURE=false`；如果前面有 HTTPS 反向代理，请保持默认值 `true`。Compose 文件默认绑定到 `127.0.0.1`，局域网访问需要另行有意修改端口绑定或反向代理配置。快速安装清单现在默认使用 `1.0.2`。Cookie 策略修复是在已发布的 `1.0.1` 镜像中引入的，`1.0.2` 继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。使用 `compose.prod.yaml` 时，请将设置写入 `.env` 并重新创建主服务；构建自定义镜像时，请使用包含 Cookie 策略修复的源码。
 
 自定义 Compose 还需在 `musicdl.environment` 中加入 `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"`；只写入 `.env` 不会自动传给容器。升级并验证 HTTP 登录、改密成功后，可删除仅用于剥离 Secure 的临时 `panel` 反代服务及对应配置，把原入口端口直接映射到主服务的 `8000`。HTTP 会明文传输账密和会话，公网部署请使用 HTTPS。
 

@@ -2,7 +2,7 @@ name: musicdl
 
 services:
   musicdl:
-    image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.1}
+    image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.2}
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]
@@ -47,7 +47,7 @@ services:
       start_period: 10s
 
   plugin-runner:
-    image: wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.1}
+    image: wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.2}
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]

@@ -41,5 +41,5 @@ def test_ci_smokes_the_published_quick_install_stack_in_an_isolated_project():
 
     quick_compose = yaml.safe_load(QUICK_COMPOSE.read_text(encoding="utf-8"))
     services = quick_compose["services"]
-    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.1}"
-    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.1}"
+    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.2}"
+    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.2}"

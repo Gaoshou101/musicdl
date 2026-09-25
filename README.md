@@ -105,13 +105,7 @@ curl http://127.0.0.1:8000/readyz
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000). HTTP sends credentials and session cookies in plaintext, so keep direct HTTP limited to trusted host-local access and use HTTPS for public access.
 
-The quick Compose project name defaults to `musicdl`. To change the host port, set `MUSICDL_PORT` before running Compose. To select a different published application image, set `MUSICDL_IMAGE_TAG`; the downloaded quick manifest still defaults to `1.0.1` until post-publication promotion. To use the current `1.0.2` images immediately, override that default explicitly:
-
-```bash
-MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.quick.yaml up -d
-```
-
-Both application images use the same version tag.
+The quick Compose project name defaults to `musicdl`. To change the host port, set `MUSICDL_PORT` before running Compose. To select a different published application image, set `MUSICDL_IMAGE_TAG`; the quick manifest now defaults to `1.0.2`. Both application images use the same version tag.
 
 ## Lite Two-Container Deployment
 
@@ -178,7 +172,7 @@ The currently published image pair is:
 | `wit7zz/musicdl:1.0.2` | Main service and built-in administration panel |
 | `wit7zz/musicdl-plugin-runner:1.0.2` | Isolated JavaScript plugin runtime |
 
-Both `compose.quick.yaml` and `compose.prod.yaml` accept `MUSICDL_IMAGE_TAG`; use a published numbered version for predictable deployments. The quick Compose file still defaults to the published `1.0.1` images until post-publication promotion; set `MUSICDL_IMAGE_TAG=1.0.2` to use the current images immediately. The cookie-policy fix was introduced in `1.0.1` and is included in `1.0.2`; the original `v1.0.0` images do not include it. Docker image tags and GitHub source releases are separate release outputs; see [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases) for source releases and their assets.
+Both `compose.quick.yaml` and `compose.prod.yaml` accept `MUSICDL_IMAGE_TAG`; use a published numbered version for predictable deployments. The quick Compose file now defaults to the published `1.0.2` images. The cookie-policy fix was introduced in `1.0.1` and is included in `1.0.2`; the original `v1.0.0` images do not include it. Docker image tags and GitHub source releases are separate release outputs; see [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases) for source releases and their assets.
 
 The production Compose file binds the application to `127.0.0.1` by default. Put it behind a TLS reverse proxy before exposing it outside the host. Example configurations are available for:
 
@@ -282,7 +276,7 @@ The administration panel is the preferred place to manage runtime settings. Envi
 
 Most changes made in the panel rebuild the active runtime without restarting the container. Settings that affect startup boundaries may still require a restart.
 
-For direct HTTP from the deployment host via loopback, set `MUSICDL_ADMIN__COOKIE_SECURE=false`; keep the default `true` when an HTTPS reverse proxy is in front of the service. The Compose files bind to `127.0.0.1` by default; LAN access requires a separate intentional port-binding or proxy change. The quick-install override is shown above. The cookie-policy fix was introduced in the published `1.0.1` images and is included in `1.0.2`; the original `v1.0.0` images do not include it. For `compose.prod.yaml`, put the setting in `.env` and recreate the main service. When building a custom image, use source that includes the cookie-policy fix.
+For direct HTTP from the deployment host via loopback, set `MUSICDL_ADMIN__COOKIE_SECURE=false`; keep the default `true` when an HTTPS reverse proxy is in front of the service. The Compose files bind to `127.0.0.1` by default; LAN access requires a separate intentional port-binding or proxy change. The quick manifest now defaults to `1.0.2`. The cookie-policy fix was introduced in the published `1.0.1` images and is included in `1.0.2`; the original `v1.0.0` images do not include it. For `compose.prod.yaml`, put the setting in `.env` and recreate the main service. When building a custom image, use source that includes the cookie-policy fix.
 
 Custom Compose files must also add `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"` under `musicdl.environment`; `.env` alone does not pass it into the container. After upgrading and verifying HTTP login and password changes, remove any temporary `panel` proxy and configuration used only to strip Secure, and map the original entry port directly to the main service's port `8000`. HTTP sends credentials and sessions in plaintext; use HTTPS for public deployments.
 
