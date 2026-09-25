@@ -18,8 +18,8 @@ def test_quick_install_uses_published_images_and_needs_no_build_or_external_redi
     assert data["name"] == "musicdl"
     assert set(services) == {"musicdl", "plugin-runner", "redis"}
     assert all("build" not in service for service in services.values())
-    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.1}"
-    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.1}"
+    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.2}"
+    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.2}"
     assert services["musicdl"]["environment"]["MUSICDL_REDIS__URL"] == "redis://redis:6379/0"
     assert "ports" not in services["redis"]
     compose_text = QUICK_COMPOSE.read_text(encoding="utf-8")
