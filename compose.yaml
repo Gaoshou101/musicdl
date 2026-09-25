@@ -1,3 +1,16 @@
+# compose.yaml — development / source-build manifest (Docker Compose's default file).
+#
+# Who it is for : contributors running this checkout locally.
+# Images        : built from this checkout (`build:` only, no image tag).
+# Redis         : external and mandatory — set MUSICDL_REDIS__URL or Compose refuses to start.
+# Services      : 2 (musicdl + plugin-runner); the console is served by the app, not a container.
+# Start with    : MUSICDL_REDIS__URL=redis://… docker compose up -d --build
+#
+# Which manifest do I want?
+#   compose.yaml       dev / source build, external Redis, no restart policy or memory ceiling
+#   compose.prod.yaml  same topology on the published images, plus restart + resource limits
+#   compose.lite.yaml  no Redis at all (MUSICDL_DEPLOYMENT_MODE=lite), source build, WeCom refused
+#   compose.quick.yaml one command: published images + bundled Redis, no checkout needed
 services:
   musicdl:
     build:

@@ -59,6 +59,17 @@
 
 The administration panel is built into the main image. Only the plugin runner remains a separate container because it executes imported code.
 
+### Which Compose file should I use?
+
+The repository ships four manifests for four different situations. Each file's header states the same summary; pick with this table:
+
+| Your situation | Manifest | Command |
+|---|---|---|
+| Try it out first (no checkout, bundled Redis) | `compose.quick.yaml` | `docker compose -f compose.quick.yaml up -d` |
+| Already run Redis; deploy a pinned release image | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.prod.yaml up -d` |
+| Developing musicdl from this checkout | `compose.yaml` | `docker compose up -d --build` |
+| No Redis available; main service + runner only | `compose.lite.yaml` | `docker compose -f compose.lite.yaml up -d --build` |
+
 ## Quick Install
 
 Requirements:

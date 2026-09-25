@@ -58,6 +58,17 @@
 
 管理面板已经构建进主镜像。只有插件运行器保留为独立容器，因为它负责执行导入的代码。
 
+### 该用哪份 Compose 文件？
+
+仓库提供四份清单，对应四种不同场景。每份文件的头部注释都有同样的速查说明；按下表选择：
+
+| 你的情况 | 用哪份 | 命令 |
+|---|---|---|
+| 想先跑起来看看（无需检出代码，内置 Redis） | `compose.quick.yaml` | `docker compose -f compose.quick.yaml up -d` |
+| 已有 Redis，部署固定的发布版镜像 | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.prod.yaml up -d` |
+| 基于本检出目录开发 musicdl | `compose.yaml` | `docker compose up -d --build` |
+| 没有 Redis，只要主服务 + 插件运行器 | `compose.lite.yaml` | `docker compose -f compose.lite.yaml up -d --build` |
+
 ## 快速安装
 
 运行条件：
