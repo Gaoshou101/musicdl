@@ -4,7 +4,7 @@
 # Images        : built from this checkout (`build:` only, no image tag).
 # Redis         : external and mandatory — set MUSICDL_REDIS__URL or Compose refuses to start.
 # Services      : 2 (musicdl + plugin-runner); the console is served by the app, not a container.
-# Start with    : MUSICDL_REDIS__URL=redis://… docker compose up -d --build
+# Start with    : MUSICDL_REDIS__URL=<your-redis-url> docker compose up -d --build
 #
 # Which manifest do I want?
 #   compose.yaml       dev / source build, external Redis, no restart policy or memory ceiling
