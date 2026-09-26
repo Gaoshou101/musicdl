@@ -94,6 +94,9 @@ def test_the_console_is_built_into_the_app_image_and_not_into_one_of_its_own():
     assert not (ROOT / "docker/web/Dockerfile").exists()
     panel = text[text.index("FROM node:22.23.2-slim AS panel"):text.index("FROM python:3.12.14-slim")]
     assert "npm ci" in panel and "npm run build" in panel
+    assert "COPY web/public ./public" in panel
+    assert (ROOT / "web/public/brand/icon.svg").is_file()
+    assert (ROOT / "web/public/brand/icon-apple-touch.png").is_file()
     runtime = text[text.rindex("FROM python:3.12.14-slim"):]
     assert "COPY --from=panel --chown=10001:10001 /build/out /app/panel" in runtime
     assert "ENV MUSICDL_ADMIN__PANEL_ROOT=/app/panel" in runtime

@@ -99,7 +99,7 @@ def test_dockerfile_copy_inputs_remain_in_the_build_context():
     patterns = _dockerignore_patterns()
     dockerfiles = (ROOT / "docker/main/Dockerfile", ROOT / "docker/plugin/Dockerfile")
     sources = [source for dockerfile in dockerfiles for source in _local_copy_sources(dockerfile)]
-    copied_source_dirs = {"src/musicdl", "src/musicdl_plugin_runner", "web/src"}
+    copied_source_dirs = {"src/musicdl", "src/musicdl_plugin_runner", "web/src", "web/public"}
 
     assert {source.relative_to(ROOT).as_posix() for source in sources} >= {
         "pyproject.toml",
