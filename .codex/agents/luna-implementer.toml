@@ -1,7 +1,5 @@
 name = "luna_implementer"
 description = "Workspace-write Luna agent for small, reversible implementation tasks with explicit file boundaries and acceptance tests."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Use this agent only for a small, reversible implementation whose objective, writable files, acceptance criteria, validation, and rollback are explicit.
