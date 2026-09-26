@@ -552,3 +552,38 @@ def test_a_prepared_reservation_pins_the_category_directory(monkeypatch,tmp_path
     async def advisor(candidate): return "华语"
     seen=reserved_download(monkeypatch,tmp_path,advisor=advisor,state=st)
     assert seen["target"]=="未知/Artist/Song - Artist.mp3" and seen["language"]=="未知"
+
+
+def test_an_unpinned_job_uses_the_shared_language_resolver_without_an_advisor(monkeypatch):
+    calls = []
+
+    async def resolve(candidate, advisor=None):
+        calls.append((candidate, advisor))
+        return "华语"
+
+    monkeypatch.setattr("musicdl.worker.workers.resolve_language", resolve)
+    candidate = cand()
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=State())
+
+    assert run(worker._download_language("job-1", candidate)) == "华语"
+    assert calls == [(candidate, None)]
+
+
+def test_a_prepared_reservation_takes_priority_over_the_shared_language_resolver(monkeypatch):
+    state = State()
+    state.script.hashes["{tenant}:artifact:job-1"] = {
+        "job_id": "job-1", "candidate_id": "id",
+        "temporary_relative_path": ".musicdl-staging/a.4.part",
+        "target_relative_path": "日韩/Artist/Song - Artist.mp3",
+        "allocation_slot": "1", "extension": ".mp3", "media_type": "audio/mpeg",
+        "owner": "earlier", "fence": "1", "state": "prepared",
+    }
+
+    async def resolve(*_args, **_kwargs):
+        raise AssertionError("a pinned reservation must bypass language resolution")
+
+    monkeypatch.setattr("musicdl.worker.workers.resolve_language", resolve)
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=state,
+                       language_advisor=lambda _candidate: "华语")
+
+    assert run(worker._download_language("job-1", cand())) == "日韩"

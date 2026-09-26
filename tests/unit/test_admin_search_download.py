@@ -13,6 +13,7 @@ import logging
 from urllib.parse import quote
 
 import httpx
+import pytest
 from fastapi import FastAPI
 
 from musicdl.admin.auth import AdminAuth
@@ -57,16 +58,21 @@ class Source:
 
 
 class Runtime:
-    def __init__(self, registry, resolvers) -> None:
+    def __init__(self, registry, resolvers, *, language_advisor=None) -> None:
         self.registry, self.resolvers = registry, resolvers
+        # Deliberately leave this absent for the no-advisor fixtures.  The
+        # portal must tolerate the lightweight runtime used by existing tests.
+        if language_advisor is not None:
+            self.language_advisor = language_advisor
 
 
-def build(tmp_path, *, wired: bool = True):
+def build(tmp_path, *, wired: bool = True, language_advisor=None):
     source = Source()
     auth, events = AdminAuth(), EventLogStore()
     auth.change_credentials("admin", "operator", "new-password")
     app = FastAPI()
-    service = (Runtime(SourceRegistry([SourceEntry("primary", "1.0.0", source)]), {"primary": source})
+    service = (Runtime(SourceRegistry([SourceEntry("primary", "1.0.0", source)]), {"primary": source},
+                       language_advisor=language_advisor)
                if wired else None)
     app.include_router(create_admin_router(auth=auth, events=events, runtime=lambda: service,
                                            media_root=tmp_path, worker=WorkerSettings()))
@@ -160,11 +166,56 @@ def test_download_writes_the_artifact_below_the_media_root_and_serves_it_back(tm
     assert payload["sha256"] == hashlib.sha256(AUDIO).hexdigest()
     assert payload["size_bytes"] == len(AUDIO) and payload["media_type"] == "audio/mpeg"
     assert payload["relative_path"].endswith(".mp3")
+    assert payload["relative_path"].startswith("华语/")
+    assert payload["language"] == "华语"
     assert (tmp_path / payload["relative_path"]).read_bytes() == AUDIO
     assert played.status_code == 200 and played.content == AUDIO
     assert source.downloaded == ["1"]
     assert blocked.status_code == 403
     assert events.page()["items"][0]["source_id"] == "primary"
+
+
+def test_download_uses_the_runtime_advisor_for_the_directory_and_response(tmp_path):
+    async def advisor(candidate):
+        return "日韩"
+
+    async def scenario():
+        app, _, _ = build(tmp_path, language_advisor=advisor)
+        async with client_for(app) as client:
+            token = await signed_in(client)
+            candidate = await first_candidate(client)
+            return await client.post("/admin/download", json={"candidate": candidate},
+                                     headers={"x-csrf-token": token})
+
+    response = run(scenario())
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["relative_path"].startswith("日韩/")
+    assert payload["language"] == "日韩"
+
+
+@pytest.mark.parametrize("answer", ["Unknown", "zh", [], {}], ids=["unknown", "zh", "list", "dict"])
+def test_download_falls_back_to_deterministic_language_for_bad_advice(tmp_path, answer):
+    async def advisor(candidate):
+        if answer == "Unknown":
+            raise RuntimeError("advisor unavailable")
+        if answer == "zh":
+            raise TimeoutError("advisor timed out")
+        return answer
+
+    async def scenario():
+        app, _, _ = build(tmp_path, language_advisor=advisor)
+        async with client_for(app) as client:
+            token = await signed_in(client)
+            candidate = await first_candidate(client)
+            return await client.post("/admin/download", json={"candidate": candidate},
+                                     headers={"x-csrf-token": token})
+
+    response = run(scenario())
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["relative_path"].startswith("华语/")
+    assert payload["language"] == "华语"
 
 
 def test_download_of_a_candidate_no_source_can_resolve_is_refused(tmp_path):
@@ -234,8 +285,8 @@ class BrokenSource(Source):
 class FallbackRuntime(Runtime):
     """The runtime a real deployment assembles, refresh callback included."""
 
-    def __init__(self, registry, resolvers, refreshed) -> None:
-        super().__init__(registry, resolvers)
+    def __init__(self, registry, resolvers, refreshed, *, language_advisor=None) -> None:
+        super().__init__(registry, resolvers, language_advisor=language_advisor)
         self.refreshed, self.queries = refreshed, []
 
     async def refresh(self, query, failed_source_ids=frozenset()):
@@ -249,10 +300,11 @@ def copy_of(source: Source, *, duration: int = 210) -> Candidate:
                      title="稻香", artist="周杰伦", album="魔杰座", duration=duration, format="mp3")
 
 
-def fallback_app(tmp_path, sources, refreshed):
+def fallback_app(tmp_path, sources, refreshed, *, language_advisor=None):
     """Mount the panel over a runtime whose download can fall back."""
     registry = SourceRegistry([SourceEntry(s.source_id, s.version, s) for s in sources])
-    service = FallbackRuntime(registry, {s.source_id: s for s in sources}, refreshed)
+    service = FallbackRuntime(registry, {s.source_id: s for s in sources}, refreshed,
+                              language_advisor=language_advisor)
     auth = AdminAuth()
     auth.change_credentials("admin", "operator", "new-password")
     app = FastAPI()
@@ -284,6 +336,48 @@ def test_download_retries_on_another_channel_that_has_the_same_track(tmp_path):
     assert broken.downloaded == ["1"] and backup.downloaded == ["1"]
     assert service.queries == ["稻香 周杰伦"]
     assert (tmp_path / payload["relative_path"]).read_bytes() == AUDIO
+
+
+def test_fallback_reuses_one_advised_language_for_every_attempt(tmp_path, monkeypatch):
+    calls = []
+
+    async def advisor(candidate):
+        calls.append(candidate.item_id)
+        return "日韩"
+
+    broken, backup = BrokenSource(), Source("backup")
+    app, service = fallback_app(tmp_path, [broken, backup],
+                                SearchResult((copy_of(backup),), (), "v"),
+                                language_advisor=advisor)
+
+    # Both the fallback helper's first attempt and the portal's replacement
+    # attempt must receive the same already-resolved value.
+    from musicdl.admin import portal
+    from musicdl.media import fallback as fallback_module
+
+    seen = []
+    portal_download = portal.download_candidate
+    fallback_download = fallback_module.download_candidate
+
+    async def record_portal_download(*args, **kwargs):
+        seen.append(("replacement", kwargs.get("language")))
+        return await portal_download(*args, **kwargs)
+
+    async def record_fallback_download(*args, **kwargs):
+        seen.append(("fallback", kwargs.get("language")))
+        return await fallback_download(*args, **kwargs)
+
+    monkeypatch.setattr(portal, "download_candidate", record_portal_download)
+    monkeypatch.setattr(fallback_module, "download_candidate", record_fallback_download)
+
+    response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["relative_path"].startswith("日韩/")
+    assert payload["language"] == "日韩"
+    assert calls == ["1"]
+    assert seen == [("fallback", "日韩"), ("replacement", "日韩")]
 
 
 def test_the_retry_searches_the_title_when_the_panel_hands_no_query(tmp_path):

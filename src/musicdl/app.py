@@ -197,7 +197,7 @@ def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
 class _Runtime:
     def __init__(self, *, redis, state, service, wecom, plugin_client, transport, registry,
                  message_worker, job_worker, telegram=None, plugin_registry=None, telegram_sources=0,
-                 resolvers=None, refresh=None, preference=None):
+                 resolvers=None, refresh=None, preference=None, language_advisor=None):
         self.redis, self.state, self.service = redis, state, service
         self.wecom, self.plugin_client, self.registry = wecom, plugin_client, registry
         self.transport = transport
@@ -210,6 +210,7 @@ class _Runtime:
         # channel roll-up has observed. Both are optional: a runtime assembled
         # without them serves the panel exactly as it did before.
         self.refresh, self.preference = refresh, preference
+        self.language_advisor = language_advisor
         self.telegram, self.telegram_sources = telegram, telegram_sources
         # Only plugin sources are published to the portal. A Telegram bot is
         # configured as a bot, so a second copy under "sources" would be a
@@ -397,7 +398,7 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                     message_worker=message_worker, job_worker=job_worker,
                     telegram=telegram, plugin_registry=plugin_registry,
                     telegram_sources=telegram_sources, resolvers=resolvers,
-                    refresh=refresh, preference=preference)
+                    refresh=refresh, preference=preference, language_advisor=language_advisor)
 
 
 def _panel_root(settings: AppSettings) -> str | None:

@@ -14,6 +14,7 @@ from typing import Any, Callable
 from musicdl.config import AppSettings
 from musicdl.ai.diagnose import probe_endpoint
 from musicdl.media import download_candidate, download_with_fallback
+from musicdl.media.language import resolve_language
 from musicdl.media.models import MediaError
 from musicdl.admin.source_fetch import (
     SOURCE_FETCH_CONCURRENCY,
@@ -659,6 +660,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             candidate = Candidate.model_validate(body.get("candidate"))
         except ValidationError:
             raise HTTPException(422, "invalid candidate") from None
+        language = await resolve_language(candidate, getattr(service, "language_advisor", None))
         resolvers = getattr(service, "resolvers", None) or {}
         refresh = getattr(service, "refresh", None)
         request_id = secrets.token_hex(16)
@@ -699,7 +701,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             try:
                 async with asyncio.timeout(_stream_budget(source, resolve_timeout)):
                     result = await download_candidate(candidate, source, media_root,
-                                                      request_id=request_id, record=recorded)
+                                                      request_id=request_id, language=language,
+                                                      record=recorded)
             except MediaError as exc:
                 raise failed(exc.code) from None
             except TimeoutError:
@@ -712,7 +715,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         attempt = await download_with_fallback(
             candidate, resolvers, media_root, request_id=request_id, query=query, refresh=refresh,
             resolve_stream_timeout=_stream_budget(resolvers.get(candidate.source_id), resolve_timeout),
-            refresh_timeout=search_timeout,
+            refresh_timeout=search_timeout, language=language,
             health_timeout=health_timeout, record=recorded)
         if attempt.download is not None:
             return report(candidate.source_id, None, attempt.download)
@@ -723,7 +726,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                 replacement_source = resolvers[replacement.source_id]
                 async with asyncio.timeout(_stream_budget(replacement_source, resolve_timeout)):
                     result = await download_candidate(replacement, replacement_source,
-                                                      media_root, request_id=request_id, record=recorded)
+                                                      media_root, request_id=request_id, language=language,
+                                                      record=recorded)
             except MediaError as exc:
                 code = exc.code
             except TimeoutError:
