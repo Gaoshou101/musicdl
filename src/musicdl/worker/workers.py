@@ -12,7 +12,7 @@ from typing import Any, Callable
 from musicdl.ai.models import AIRankResult
 from musicdl.config import REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS
 from musicdl.media.fallback import download_with_fallback
-from musicdl.media.language import classify_language
+from musicdl.media.language import resolve_language
 from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, MediaError
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult, search_sources
@@ -501,16 +501,7 @@ class JobWorker(_StreamWorker):
         pinned = _recorded_language(await self.state.get_artifact(job_id))
         if pinned is not None:
             return pinned
-        baseline = classify_language(candidate.title, candidate.artist, candidate.album)
-        if self.language_advisor is None:
-            return baseline
-        try:
-            advised = await _call(self.language_advisor, candidate)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return baseline
-        return advised if advised in LANGUAGES else baseline
+        return await resolve_language(candidate, self.language_advisor)
 
     async def _reserve(self, job_id: str, candidate: Candidate, owner: str, lease: EffectLease,
                        deadline: float, language: str) -> ArtifactRecord | None:

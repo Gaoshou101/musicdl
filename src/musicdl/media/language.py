@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from typing import Final
 
-from .models import Language
+from .models import LANGUAGES, Language
 
 # Each category is decided by script evidence, and the order is the precedence:
 # kana and hangul are unambiguously 日韩, han characters are 华语, and Latin
@@ -42,3 +44,19 @@ def classify_language(title: str | None, artist: str | None = None, album: str |
         if decided is not None:
             return decided
     return "未知"
+
+
+async def resolve_language(candidate, advisor=None) -> Language:
+    """Resolve one candidate's category with deterministic fallback semantics."""
+    baseline = classify_language(candidate.title, candidate.artist, candidate.album)
+    if advisor is None:
+        return baseline
+    try:
+        advised = advisor(candidate)
+        if inspect.isawaitable(advised):
+            advised = await advised
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return baseline
+    return advised if isinstance(advised, str) and advised in LANGUAGES else baseline

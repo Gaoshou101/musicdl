@@ -518,3 +518,27 @@ def test_build_runtime_publishes_the_refresh_and_preference_the_panel_downloads_
 
     default = runtime_fakes._build_runtime(_settings())
     assert default.preference is None and default.refresh is not None
+
+
+def test_build_runtime_exposes_the_same_language_advisor_to_panel_and_worker(runtime_fakes):
+    runtime = runtime_fakes._build_runtime(_settings())
+
+    assert runtime.language_advisor is runtime.job_worker.kwargs["language_advisor"]
+
+
+def test_build_runtime_exposes_language_advisor_when_wecom_is_disabled(runtime_fakes, monkeypatch):
+    settings = _settings()
+    settings.wecom.enabled = False
+    seen = []
+
+    async def advise(candidate, baseline, ai_settings, *, client):
+        seen.append((candidate, baseline, ai_settings, client))
+        return SimpleNamespace(language="日韩")
+
+    monkeypatch.setattr(runtime_fakes, "advise_language", advise)
+    runtime = runtime_fakes._build_runtime(settings)
+    candidate = SimpleNamespace(title="稻香", artist="周杰伦", album=None)
+
+    assert runtime.job_worker is None
+    assert asyncio.run(runtime.language_advisor(candidate)) == "日韩"
+    assert seen and seen[0][0] is candidate and seen[0][1] == "华语"
