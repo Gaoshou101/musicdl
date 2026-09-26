@@ -202,6 +202,12 @@ export type SourceImport = {
   allowed_ports?: number[]
 }
 
+export type SourceFetchReport = {
+  script: string
+  filename: string
+  language: 'javascript' | 'python'
+}
+
 export type ImportPreview = {
   id: { value: string | null; valid: boolean; reason: string | null; suggested: string }
   install_path: 'lx' | 'generic'
@@ -352,6 +358,25 @@ const DETAIL_TEXT: Record<string, string> = {
   'invalid id': 'ID 无效',
   'invalid request': '请求内容无效',
   'script is required': '请先选择音源脚本文件',
+  invalid_url: '请输入有效的音源 URL',
+  url_denied: 'URL 不符合安全导入规则',
+  scheme_denied: '只允许导入受支持的 HTTP(S) 地址',
+  port_denied: 'URL 只能使用 HTTP/HTTPS 标准端口',
+  host_denied: 'URL 的域名不允许直接使用 IP 地址',
+  address_denied: 'URL 解析到了不允许访问的地址',
+  dns_error: 'URL 域名解析失败',
+  connect_error: '连接音源地址失败',
+  tls_error: '音源地址的 TLS 握手失败',
+  redirect_denied: '音源地址的跳转已被拒绝',
+  body_too_large: '音源文件超过传输体积上限',
+  http_error: '音源服务器返回了无法导入的响应',
+  source_too_large: '音源脚本超过 256 KiB 限制',
+  source_empty: '音源脚本为空',
+  source_nul: '音源脚本包含不允许的空字节',
+  source_encoding: '音源脚本不是有效的 UTF-8 文本',
+  source_html: 'URL 返回的是 HTML 页面，不是音源脚本',
+  fetch_failed: '获取音源脚本失败',
+  timeout: '获取音源脚本超时',
   'language must be javascript or python': '语言必须是 javascript 或 python',
   'invalid pagination': '分页参数无效',
   'invalid limit': '条数取值范围为 1-200',
@@ -620,6 +645,10 @@ export function listSources(): Promise<{ items: SourceItem[] }> {
 
 export function analyzeSource(source: SourceImport): Promise<ImportPreview> {
   return request<ImportPreview>('/sources/analyze', { method: 'POST', body: source })
+}
+
+export function fetchSource(url: string): Promise<SourceFetchReport> {
+  return request<SourceFetchReport>('/sources/fetch', { method: 'POST', body: { url } })
 }
 
 export function installSource(source: SourceImport): Promise<MutationReport<SourceItem>> {

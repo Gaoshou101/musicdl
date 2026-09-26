@@ -7,6 +7,7 @@
     "build": "next build",
     "lint": "next lint",
     "check:api:build": "tsc src/lib/api.ts --outDir .next/contract --module esnext --moduleResolution bundler --target es2022 --skipLibCheck && node -e \"require('node:fs').renameSync('.next/contract/api.js', '.next/contract/api.mjs')\"",
+    "check:source-import": "tsc src/lib/api.ts src/lib/sourceImport.ts --outDir .next/source-import-contract --module esnext --moduleResolution bundler --target es2022 --skipLibCheck && node scripts/check-source-import.mjs",
     "check:api:remote": "npm run check:api:build && node scripts/check-api-contract.mjs",
     "check:api:local": "npm run check:api:build && node scripts/check-api-contract.mjs http://127.0.0.1:3101 local",
     "check:api:local-nostore": "npm run check:api:build && node scripts/check-api-contract.mjs http://127.0.0.1:3101 local-nostore"

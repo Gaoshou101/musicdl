@@ -15,6 +15,12 @@ from musicdl.config import AppSettings
 from musicdl.ai.diagnose import probe_endpoint
 from musicdl.media import download_candidate, download_with_fallback
 from musicdl.media.models import MediaError
+from musicdl.admin.source_fetch import (
+    SOURCE_FETCH_CONCURRENCY,
+    SOURCE_FETCH_DEADLINE,
+    SourceFetchError,
+    fetch_source,
+)
 from musicdl.plugins.install import install_source, preview_source
 from musicdl.sources.models import Candidate, normalize_text
 from musicdl.sources.search import search_sources
@@ -172,12 +178,15 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                         runtime: Callable[[], Any] | None = None,
                         reloader: Callable[[], Any] | None = None,
                         media_root: str | Path | None = None,
-                        worker: Any | None = None) -> APIRouter:
+                        worker: Any | None = None,
+                        source_broker: Any | None = None,
+                        source_fetcher: Callable[[str], Any] | None = None) -> APIRouter:
     auth, sources, health, events, limiter = auth or AdminAuth(), sources or SourceManager(), health or HealthAggregator({}), events or EventLogStore(), limiter or RateLimiter()
     bots, audit = bots or BotManager(), audit or EventLogStore()
     config = config or ConfigManager(AppSettings())
     source_health = source_health or SourceHealthStore()
     logs = logs or LogBuffer()
+    source_fetch_slots = asyncio.Semaphore(SOURCE_FETCH_CONCURRENCY)
     router = APIRouter(prefix="/admin")
     search_timeout = _positive(getattr(worker, "search_timeout", None), 10.0)
     resolve_timeout = _positive(getattr(worker, "resolve_stream_timeout", None), 30.0)
@@ -451,6 +460,71 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             return preview_source(body)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+
+    @router.post("/sources/fetch")
+    async def fetch_import(request: Request):
+        """Fetch one source URL without storing or auditing anything.
+
+        The browser session is authenticated and CSRF-bound before the request
+        body is parsed or the blocking broker is offloaded.  The fetch helper
+        returns the same ``script``/``filename``/``language`` shape consumed by
+        the analyze and install calls, while this endpoint itself has no
+        storage, source-manager, runtime-reload, or audit side effects.
+        """
+        mutate(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - malformed JSON gets one stable code
+            raise HTTPException(422, "invalid_url") from None
+        url = body.get("url") if isinstance(body, dict) else None
+        if not isinstance(url, str) or not url:
+            raise HTTPException(422, "invalid_url")
+
+        def run_fetch():
+            if source_fetcher is not None:
+                return source_fetcher(url)
+            return fetch_source(url, broker=source_broker)
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SOURCE_FETCH_DEADLINE
+        try:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            await asyncio.wait_for(source_fetch_slots.acquire(), remaining)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "timeout") from None
+
+        worker = asyncio.create_task(asyncio.to_thread(run_fetch))
+
+        def release_fetch_slot(done: asyncio.Future) -> None:
+            # A timed-out wait is shielded below, so the synchronous worker can
+            # finish and release the admission slot without holding a stale
+            # permit or leaving its exception unobserved.
+            if not done.cancelled():
+                done.exception()
+            source_fetch_slots.release()
+
+        worker.add_done_callback(release_fetch_slot)
+        try:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            return await asyncio.wait_for(asyncio.shield(worker), remaining)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "timeout") from None
+        except SourceFetchError as exc:
+            if exc.code in {"url_denied", "scheme_denied", "port_denied", "host_denied",
+                            "source_too_large", "source_empty", "source_nul", "source_encoding",
+                            "source_html"}:
+                status = 422
+            elif exc.code == "timeout":
+                status = 504
+            else:
+                status = 502
+            raise HTTPException(status, exc.code) from None
+        except Exception:  # noqa: BLE001 - injected seams cannot leak exception text
+            raise HTTPException(502, "fetch_failed") from None
 
     @router.post("/sources")
     async def create_source(body: dict, request: Request):

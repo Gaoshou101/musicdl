@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   MusicNote,
   Plus,
@@ -9,28 +9,44 @@ import {
   Check,
   X,
   UploadSimple,
+  LinkSimple,
+  SpinnerGap,
   FileCode,
   CheckCircle,
   WarningCircle,
   Power,
 } from '@phosphor-icons/react'
 import {
-  ImportPreview,
-  SourceImport,
   SourceHealthRow,
   SourceHealthVerdict,
-  SourceItem,
   analyzeSource,
+  fetchSource,
   deleteSource,
   errorMessage,
   installSource,
   listSourceHealth,
   listSources,
-  MutationReport,
   reloadNote,
   updateSource,
 } from '@/lib/api'
-import { formatBytes, shortHash } from '@/lib/format'
+import type { SourceItem } from '@/lib/api'
+import { formatBytes } from '@/lib/format'
+import {
+  cloneImportGrants,
+  duplicateSourceIds,
+  hasTooManySourceUrls,
+  isSupportedSourceFilename,
+  importRowIsInstallable,
+  installSourceQueueSequentially,
+  NO_IMPORT_GRANTS,
+  parseSourceUrlLines,
+  requiredGrantKeys,
+  sourceImportDraft,
+  SOURCE_IMPORT_MAX_BYTES,
+  SOURCE_IMPORT_MAX_URLS,
+  sourceLanguageForFilename,
+} from '@/lib/sourceImport'
+import type { ImportGrantState, SourceImportRow } from '@/lib/sourceImport'
 
 /** The egress widenings a preview can ask the operator to grant, in one order. */
 const GRANTS = ['allow_insecure_http', 'allow_ip_hosts', 'allow_any_host', 'allowed_ports'] as const
@@ -54,18 +70,17 @@ const GRANT_LABELS: Record<string, { title: string; detail: string }> = {
   },
 }
 
-type GrantState = {
-  allow_insecure_http: boolean
-  allow_ip_hosts: boolean
-  allow_any_host: boolean
-  allowed_ports: number[] | null
-}
+type GrantState = ImportGrantState
 
-const NO_GRANTS: GrantState = {
-  allow_insecure_http: false,
-  allow_ip_hosts: false,
-  allow_any_host: false,
-  allowed_ports: null,
+const NO_GRANTS: GrantState = NO_IMPORT_GRANTS
+
+const BATCH_STATUS_TEXT: Record<SourceImportRow['status'], string> = {
+  fetching: '获取中…',
+  analyzing: '分析中…',
+  ready: '待安装',
+  installing: '安装中…',
+  installed: '已安装',
+  failed: '失败',
 }
 
 type AnalysisSummary = {
@@ -141,130 +156,270 @@ function EgressLine({ source }: { source: SourceItem }) {
 
 function ImportDialog({
   onClose,
-  onInstalled,
+  onBatchChanged,
+  existingIds,
 }: {
   onClose: () => void
-  onInstalled: (result: MutationReport<SourceItem>) => void
+  onBatchChanged: () => void
+  existingIds: ReadonlySet<string>
 }) {
-  const [script, setScript] = useState('')
-  const [filename, setFilename] = useState('')
-  const [sourceId, setSourceId] = useState('')
-  const [language, setLanguage] = useState<'javascript' | 'python'>('javascript')
-  const [grants, setGrants] = useState<GrantState>(NO_GRANTS)
-  const [preview, setPreview] = useState<ImportPreview | null>(null)
-  const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [urlText, setUrlText] = useState('')
+  const [batch, setBatch] = useState<SourceImportRow[]>([])
+  const [batchBusy, setBatchBusy] = useState(false)
+  const analysisTokens = useRef<Record<string, number>>({})
+  const batchGeneration = useRef(0)
 
-  const draft = useCallback(
-    (): SourceImport => ({
-      id: sourceId.trim(),
-      script,
-      filename: filename || undefined,
-      language,
-      allow_insecure_http: grants.allow_insecure_http || undefined,
-      allow_ip_hosts: grants.allow_ip_hosts || undefined,
-      allow_any_host: grants.allow_any_host || undefined,
-      allowed_ports: grants.allowed_ports ?? undefined,
-    }),
-    [sourceId, script, filename, language, grants],
-  )
+  const updateBatchRow = (key: string, update: (row: SourceImportRow) => SourceImportRow) => {
+    setBatch((current) => current.map((row) => (row.key === key ? update(row) : row)))
+  }
 
-  const runAnalyze = useCallback(async () => {
-    if (!script.trim()) return
-    setBusy(true)
-    setError('')
+  const analyzeBatchRow = async (candidate: SourceImportRow) => {
+    const token = (analysisTokens.current[candidate.key] ?? 0) + 1
+    analysisTokens.current[candidate.key] = token
+    updateBatchRow(candidate.key, (row) => ({ ...row, status: 'analyzing', error: null, preview: null }))
     try {
-      setPreview(await analyzeSource(draft()))
+      const draft = sourceImportDraft(candidate)
+      const first = await analyzeSource(draft)
+      if (analysisTokens.current[candidate.key] !== token) return
+      const suggested = candidate.id.trim() || first.id.suggested
+      const final = !candidate.id.trim() && suggested
+        ? await analyzeSource({ ...draft, id: suggested })
+        : first
+      if (analysisTokens.current[candidate.key] !== token) return
+      updateBatchRow(candidate.key, (row) => ({
+        ...row,
+        id: suggested,
+        preview: final,
+        status: 'ready',
+        error: null,
+        existing: existingIds.has(suggested),
+      }))
     } catch (err) {
-      setPreview(null)
-      setError(errorMessage(err))
-    } finally {
-      setBusy(false)
+      if (analysisTokens.current[candidate.key] !== token) return
+      updateBatchRow(candidate.key, (row) => ({ ...row, status: 'failed', error: errorMessage(err) }))
     }
-  }, [draft, script])
+  }
 
-  const handleFile = async (file: File) => {
+  const analyzeFetchedRow = async (
+    empty: SourceImportRow,
+    fetched: { script: string; filename: string; language: 'javascript' | 'python' },
+  ) => {
+    const candidate: SourceImportRow = {
+      ...empty,
+      script: fetched.script,
+      filename: fetched.filename,
+      language: fetched.language,
+      status: 'analyzing',
+    }
+    updateBatchRow(empty.key, () => candidate)
+    await analyzeBatchRow(candidate)
+  }
+
+  const handleBatchUrls = async () => {
+    if (batchBusy) return
+    const remaining = SOURCE_IMPORT_MAX_URLS - batch.length
+    if (hasTooManySourceUrls(urlText, remaining)) {
+      setError(`导入队列最多保留 ${SOURCE_IMPORT_MAX_URLS} 项，请先安装或清理已有项目。`)
+      return
+    }
+    const urls = parseSourceUrlLines(urlText, remaining)
+    if (!urls.length) {
+      setError('请先输入音源 URL，每行一个。')
+      return
+    }
+    const generation = batchGeneration.current + 1
+    batchGeneration.current = generation
+    setBatchBusy(true)
     setError('')
-    // A new script declares its own needs; nothing carries over from the last.
-    setGrants(NO_GRANTS)
-    try {
-      const text = await file.text()
-      setScript(text)
-      setFilename(file.name)
-      setBusy(true)
-      const next = await analyzeSource({
-        id: sourceId.trim(),
-        script: text,
+    setUrlText('')
+    for (const [index, url] of urls.entries()) {
+      if (batchGeneration.current !== generation) break
+      const key = 'url-' + generation + '-' + index
+      const empty: SourceImportRow = {
+        key,
+        url,
+        script: '',
+        filename: '',
+        language: sourceLanguageForFilename(url),
+        id: '',
+        grants: cloneImportGrants(NO_GRANTS),
+        preview: null,
+        status: 'fetching',
+        error: null,
+        result: null,
+        reload: null,
+        existing: false,
+      }
+      setBatch((current) => [...current, empty])
+      try {
+        const fetched = await fetchSource(url)
+        if (batchGeneration.current !== generation) break
+        await analyzeFetchedRow(empty, fetched)
+      } catch (err) {
+        if (batchGeneration.current !== generation) break
+        updateBatchRow(key, (row) => ({ ...row, status: 'failed', error: errorMessage(err) }))
+      }
+    }
+    if (batchGeneration.current === generation) setBatchBusy(false)
+  }
+
+  const handleFiles = async (fileList: FileList | null) => {
+    const files = Array.from(fileList ?? [])
+    if (!files.length || batchBusy) return
+    const remaining = SOURCE_IMPORT_MAX_URLS - batch.length
+    if (files.length > remaining) {
+      setError(`导入队列最多保留 ${SOURCE_IMPORT_MAX_URLS} 项，请先安装或清理已有项目。`)
+      return
+    }
+    const generation = batchGeneration.current + 1
+    batchGeneration.current = generation
+    setBatchBusy(true)
+    setError('')
+    for (const [index, file] of files.entries()) {
+      if (batchGeneration.current !== generation) break
+      const key = 'file-' + generation + '-' + index
+      const empty: SourceImportRow = {
+        key,
+        url: file.name,
+        file,
+        script: '',
         filename: file.name,
-        language,
-      })
-      setPreview(next)
-      if (!sourceId.trim() && next.id.suggested) setSourceId(next.id.suggested)
-    } catch (err) {
-      setPreview(null)
-      setError(errorMessage(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const toggleGrant = async (key: string) => {
-    const next: GrantState = { ...grants }
-    if (key === 'allowed_ports') {
-      next.allowed_ports = grants.allowed_ports ? null : declaredPorts ?? [443]
-    } else {
-      next[key as 'allow_insecure_http' | 'allow_ip_hosts' | 'allow_any_host'] = !grants[
-        key as 'allow_insecure_http' | 'allow_ip_hosts' | 'allow_any_host'
-      ]
-    }
-    setGrants(next)
-    if (!script.trim()) return
-    setBusy(true)
-    setError('')
-    try {
-      setPreview(
-        await analyzeSource({
-          id: sourceId.trim(),
+        language: sourceLanguageForFilename(file.name),
+        id: '',
+        grants: cloneImportGrants(NO_GRANTS),
+        preview: null,
+        status: 'fetching',
+        error: null,
+        result: null,
+        reload: null,
+        existing: false,
+      }
+      setBatch((current) => [...current, empty])
+      try {
+        if (!isSupportedSourceFilename(file.name)) {
+          throw new Error('只支持 .js、.mjs、.cjs 和 .py 文件。')
+        }
+        if (file.size > SOURCE_IMPORT_MAX_BYTES) {
+          throw new Error(`脚本超过 ${formatBytes(SOURCE_IMPORT_MAX_BYTES)} 限制，请缩小后再导入。`)
+        }
+        const script = await file.text()
+        if (batchGeneration.current !== generation) break
+        await analyzeFetchedRow(empty, {
           script,
-          filename: filename || undefined,
-          language,
-          allow_insecure_http: next.allow_insecure_http || undefined,
-          allow_ip_hosts: next.allow_ip_hosts || undefined,
-          allow_any_host: next.allow_any_host || undefined,
-          allowed_ports: next.allowed_ports ?? undefined,
-        }),
-      )
-    } catch (err) {
-      setError(errorMessage(err))
-    } finally {
-      setBusy(false)
+          filename: file.name,
+          language: sourceLanguageForFilename(file.name),
+        })
+      } catch (err) {
+        if (batchGeneration.current !== generation) break
+        updateBatchRow(key, (row) => ({
+          ...row,
+          status: 'failed',
+          error: err instanceof Error ? err.message : errorMessage(err),
+        }))
+      }
     }
+    if (batchGeneration.current === generation) setBatchBusy(false)
   }
 
-  const analysis = (preview?.analysis ?? {}) as AnalysisSummary
-  const requiredGrants = preview ? GRANTS.filter((key) => key in (preview.required_grants ?? {})) : []
-  const declaredPorts = analysis.allowed_ports?.length ? analysis.allowed_ports : null
-  const granted = (key: string): boolean =>
-    key === 'allowed_ports' ? Boolean(grants.allowed_ports?.length) : Boolean(grants[key as keyof GrantState])
+  const editBatchRow = (row: SourceImportRow, changes: Partial<SourceImportRow>) => {
+    const next: SourceImportRow = {
+      ...row,
+      ...changes,
+      preview: null,
+      status: 'analyzing',
+      error: null,
+      result: null,
+      reload: null,
+      existing: existingIds.has(String(changes.id ?? row.id).trim()),
+    }
+    updateBatchRow(row.key, () => next)
+    void analyzeBatchRow(next)
+  }
 
-  const handleInstall = async () => {
-    setBusy(true)
-    setError('')
+  const retryBatchRow = async (row: SourceImportRow) => {
+    if (batchBusy || row.status === 'installing') return
+    updateBatchRow(row.key, (current) => ({
+      ...current,
+      status: 'fetching',
+      error: null,
+      preview: null,
+      result: null,
+      reload: null,
+    }))
     try {
-      onInstalled(await installSource(draft()))
+      const fetched = row.file
+        ? {
+            script: await row.file.text(),
+            filename: row.file.name,
+            language: sourceLanguageForFilename(row.file.name),
+          }
+        : await fetchSource(row.url)
+      await analyzeFetchedRow({
+        ...row,
+        error: null,
+        preview: null,
+        result: null,
+        reload: null,
+      }, fetched)
     } catch (err) {
-      setError(errorMessage(err))
-    } finally {
-      setBusy(false)
+      updateBatchRow(row.key, (current) => ({ ...current, status: 'failed', error: errorMessage(err) }))
     }
   }
+
+  const toggleBatchGrant = (row: SourceImportRow, key: string) => {
+    const grants = cloneImportGrants(row.grants)
+    if (key === 'allowed_ports') {
+      const ports = row.preview?.analysis && typeof row.preview.analysis === 'object'
+        ? (row.preview.analysis as AnalysisSummary).allowed_ports
+        : null
+      grants.allowed_ports = grants.allowed_ports ? null : (ports?.length ? ports : [443])
+    } else {
+      const grant = key as keyof Omit<GrantState, 'allowed_ports'>
+      grants[grant] = !grants[grant]
+    }
+    editBatchRow(row, { grants })
+  }
+
+  const handleBatchInstall = async () => {
+    if (batchBusy) return
+    const duplicateIds = duplicateSourceIds(batch)
+    const ready = batch.filter((row) => importRowIsInstallable(row, duplicateIds) && !row.result)
+    if (!ready.length) {
+      setError(duplicateIds.size ? '存在重复的音源 ID，请先修改后再安装。' : '没有可安装的音源，请先完成获取与预览。')
+      return
+    }
+    setBatchBusy(true)
+    setError('')
+    await installSourceQueueSequentially(
+      batch,
+      (source) => installSource(source),
+      (row, patch) => {
+        updateBatchRow(row.key, (current) => {
+          const next = { ...current, ...patch }
+          if (patch.status === 'installed' && patch.result) {
+            next.reload = reloadNote(patch.result.reload) || null
+          }
+          return next
+        })
+        if (patch.status === 'installed') onBatchChanged()
+      },
+      errorMessage,
+    )
+    setBatchBusy(false)
+  }
+
+  const batchDuplicates = duplicateSourceIds(batch)
+  const batchReadyCount = batch.filter((row) => importRowIsInstallable(row, batchDuplicates)).length
+  const batchCompletedCount = batch.filter((row) => row.status === 'installed').length
+  const importBusy = batchBusy
 
   return (
     <div className="fixed inset-0 bg-neutral-950/80 backdrop-blur-sm flex items-start justify-center p-4 z-50 overflow-y-auto">
       <div className="glass glass-highlight rounded-2xl p-6 w-full max-w-2xl my-8">
         <h2 className="text-xl font-semibold mb-1">导入音源脚本</h2>
         <p className="text-neutral-400 text-sm mb-5">
-          先选择脚本文件，服务会解析它声明的身份与需要的出口授权，确认后再写入。
+          可选择本地脚本或粘贴 URL 批量加入队列；服务会逐个解析身份与出口授权，确认后再写入。
         </p>
 
         <label className="block mb-4">
@@ -272,159 +427,233 @@ function ImportDialog({
             <input
               type="file"
               accept=".js,.mjs,.cjs,.py"
+              multiple
               className="hidden"
+              disabled={importBusy}
               onChange={(e) => {
-                const file = e.target.files?.[0]
-                if (file) void handleFile(file)
+                void handleFiles(e.target.files)
+                e.currentTarget.value = ''
               }}
             />
             <UploadSimple size={40} weight="duotone" className="text-neutral-600 mx-auto mb-3" />
-            <p className="font-medium mb-1">{filename || '选择 JS / PY 文件'}</p>
-            <p className="text-neutral-400 text-sm">
-              {script
-                ? `${script.length.toLocaleString('zh-CN')} 个字符，${formatBytes(analysis.size_bytes ?? null)}`
-                : '支持 lx-music 音源脚本与普通 JS / Python 脚本'}
-            </p>
+            <p className="font-medium mb-1">选择 JS / PY 文件（可多选）</p>
+            <p className="text-neutral-400 text-sm">支持 lx-music 音源脚本与普通 JS / Python 脚本，单个文件不超过 256 KiB</p>
           </div>
         </label>
 
-        <div className="grid gap-4 sm:grid-cols-2 mb-4">
-          <div>
-            <label htmlFor="source-id" className="block text-sm font-medium mb-2">
-              音源 ID
-            </label>
-            <input
-              id="source-id"
-              value={sourceId}
-              onChange={(e) => setSourceId(e.target.value)}
-              onBlur={() => void runAnalyze()}
-              placeholder="例如 lx-xinghai"
-              className="w-full px-3 py-2 rounded-lg bg-neutral-900/50 border border-neutral-800 focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/20 transition-colors font-mono text-sm"
-            />
-            <p className="text-neutral-500 text-xs mt-1">
-              小写字母、数字与中划线；同一音源的新版本要沿用同一个 ID。
-            </p>
+        <section className="border-t border-neutral-800 pt-5 mb-5">
+          <div className="flex items-start gap-3 mb-3">
+            <LinkSimple size={24} weight="duotone" className="text-accent-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <h3 className="font-medium">从 URL 批量获取</h3>
+              <p className="text-neutral-400 text-sm mt-1">
+                每行输入一个音源脚本 URL，服务会按顺序获取并逐个分析，最多 {SOURCE_IMPORT_MAX_URLS} 个。
+              </p>
+            </div>
           </div>
-          <div>
-            <label htmlFor="source-language" className="block text-sm font-medium mb-2">
-              脚本语言
-            </label>
-            <select
-              id="source-language"
-              value={language}
-              onChange={(e) => {
-                setLanguage(e.target.value as 'javascript' | 'python')
-                void runAnalyze()
-              }}
-              className="w-full px-3 py-2 rounded-lg bg-neutral-900/50 border border-neutral-800 focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/20 transition-colors text-sm"
+          <textarea
+            value={urlText}
+            onChange={(e) => setUrlText(e.target.value)}
+            disabled={importBusy}
+            rows={4}
+            placeholder={'https://example.com/source.js\nhttps://example.org/source.py'}
+            className="w-full px-3 py-2 rounded-lg bg-neutral-900/50 border border-neutral-800 focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/20 transition-colors font-mono text-sm resize-y disabled:opacity-50"
+          />
+          <div className="flex flex-wrap items-center justify-between gap-3 mt-3">
+            <p className="text-neutral-500 text-xs">仅支持受安全策略保护的 HTTP(S) 地址，单个脚本不超过 256 KiB。</p>
+            <button
+              type="button"
+              onClick={() => void handleBatchUrls()}
+              disabled={importBusy || !urlText.trim()}
+              className="px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center gap-2"
             >
-              <option value="javascript">javascript</option>
-              <option value="python">python</option>
-            </select>
-            <p className="text-neutral-500 text-xs mt-1">lx 音源固定为 javascript，无需改动。</p>
+              {batchBusy ? <SpinnerGap size={18} className="animate-spin" /> : <LinkSimple size={18} />}
+              获取并预览
+            </button>
           </div>
-        </div>
+        </section>
 
-        {preview && (
-          <div className="glass rounded-xl p-4 mb-4 space-y-4">
-            <div className="flex items-start gap-3">
-              {preview.installable ? (
-                <CheckCircle size={24} weight="fill" className="text-success flex-shrink-0" />
-              ) : (
-                <WarningCircle size={24} weight="fill" className="text-warning flex-shrink-0" />
-              )}
-              <div className="flex-1 min-w-0">
-                <h4 className="font-medium">
-                  {analysis.name || filename || '未命名音源'}
-                  {analysis.version ? <span className="text-neutral-400 font-normal"> v{analysis.version}</span> : null}
-                </h4>
-                <p className="text-neutral-400 text-sm mt-1">
-                  类型 {preview.install_path === 'lx' ? 'lx 自定义音源' : '通用脚本'} · 语言 {preview.language ?? '—'} ·
-                  操作 {(preview.operations ?? []).join('/') || '—'}
+        {batch.length > 0 && (
+          <section className="space-y-3 mb-5" aria-label="批量导入队列">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="font-medium">导入队列</h3>
+                <p className="text-neutral-500 text-xs mt-1">
+                  已安装 {batchCompletedCount}/{batch.length} · 当前可安装 {batchReadyCount}
                 </p>
-                {analysis.sha256 && (
-                  <p className="text-neutral-500 text-xs mt-1 font-mono">sha256 {shortHash(analysis.sha256, 24)}</p>
-                )}
               </div>
-              <span
-                className={`text-xs px-2 py-1 rounded-md whitespace-nowrap ${
-                  preview.installable ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'
-                }`}
+              <button
+                type="button"
+                onClick={() => void handleBatchInstall()}
+                disabled={importBusy || batchReadyCount === 0}
+                className="px-3 py-2 rounded-lg bg-accent-500 hover:bg-accent-600 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center gap-2"
               >
-                {preview.installable ? '可安装' : '需处理'}
-              </span>
+                {batchBusy ? <SpinnerGap size={18} className="animate-spin" /> : <Check size={18} weight="bold" />}
+                安装可用音源
+              </button>
             </div>
 
-            {!preview.id.valid && (
-              <p className="text-warning text-sm">
-                ID 不合法：{preview.id.reason || '请改用小写字母、数字与中划线的组合'}
-                {preview.id.suggested ? `（建议：${preview.id.suggested}）` : ''}
-              </p>
-            )}
-
-            {(analysis.blockers ?? []).map((finding) => (
-              <p key={finding.code} className="text-danger text-sm">
-                拒绝原因 {finding.code}：{finding.detail}
-              </p>
-            ))}
-            {(analysis.caveats ?? []).length > 0 && (
-              <ul className="text-neutral-400 text-sm space-y-1">
-                {(analysis.caveats ?? []).map((finding) => (
-                  <li key={finding.code}>提示 {finding.code}：{finding.detail}</li>
-                ))}
-              </ul>
-            )}
-
-            <dl className="grid gap-2 sm:grid-cols-3 text-sm">
-              <div>
-                <dt className="text-neutral-400">声明域名</dt>
-                <dd className="font-mono text-xs break-all">
-                  {(analysis.allowed_hosts ?? []).join('、') || '—'}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-neutral-400">声明端口</dt>
-                <dd className="font-mono text-xs">{(analysis.allowed_ports ?? [443]).join('/')}</dd>
-              </div>
-              <div>
-                <dt className="text-neutral-400">引用域名</dt>
-                <dd className="font-mono text-xs break-all">
-                  {(analysis.referenced_hosts ?? []).length} 个
-                </dd>
-              </div>
-            </dl>
-
-            {requiredGrants.length > 0 && (
-              <div className="border-t border-neutral-800 pt-4">
-                <h5 className="text-sm font-medium mb-3">该脚本需要以下出口授权</h5>
-                <div className="space-y-3">
-                  {requiredGrants.map((key) => (
-                    <label key={key} className="flex items-start gap-3 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={granted(key)}
-                        onChange={() => void toggleGrant(key)}
-                        className="mt-1 w-4 h-4 rounded border-neutral-700 bg-neutral-900 text-accent-500 focus:ring-2 focus:ring-accent-500/20"
-                      />
-                      <span>
-                        <span className="text-sm font-medium">{GRANT_LABELS[key]?.title ?? key}</span>
-                        <span className="block text-neutral-400 text-xs mt-0.5">
-                          {GRANT_LABELS[key]?.detail ?? ''}
-                        </span>
+            {batch.map((row, index) => {
+              const rowAnalysis = (row.preview?.analysis ?? {}) as AnalysisSummary
+              const rowRequiredGrants = requiredGrantKeys(row.preview).filter((key) =>
+                GRANTS.includes(key as (typeof GRANTS)[number]),
+              )
+              const rowDuplicate = batchDuplicates.has(row.id.trim())
+              const rowBusy = row.status === 'fetching' || row.status === 'analyzing' ||
+                row.status === 'installing'
+              const rowStatusClass = row.status === 'failed'
+                ? 'bg-danger/15 text-danger'
+                : row.status === 'installed'
+                  ? 'bg-success/15 text-success'
+                  : row.status === 'ready'
+                    ? 'bg-accent-500/15 text-accent-300'
+                    : 'bg-neutral-800 text-neutral-400'
+              return (
+                <div key={row.key} className="glass rounded-xl p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3 min-w-0">
+                      <span className="w-6 h-6 rounded-md bg-neutral-800 text-neutral-400 text-xs flex items-center justify-center flex-shrink-0">
+                        {index + 1}
                       </span>
-                    </label>
-                  ))}
-                </div>
-                {preview.missing_grants.length > 0 && (
-                  <p className="text-warning text-sm mt-3">还缺：{preview.missing_grants.join('、')}</p>
-                )}
-              </div>
-            )}
+                      <div className="min-w-0">
+                        <p className="font-medium truncate">{row.filename || '待获取文件名'}</p>
+                        <p className="text-neutral-500 text-xs font-mono truncate" title={row.url}>{row.url}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <span className={`text-xs px-2 py-1 rounded-md ${rowStatusClass}`}>
+                        {BATCH_STATUS_TEXT[row.status]}
+                      </span>
+                      {row.status === 'failed' && (
+                        <button
+                          type="button"
+                          onClick={() => void retryBatchRow(row)}
+                          disabled={importBusy}
+                          className="text-xs px-2 py-1 rounded-md bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 transition-colors"
+                        >
+                          重试
+                        </button>
+                      )}
+                    </div>
+                  </div>
 
-            {preview.refusal && !preview.installable && (
-              <p className="text-danger text-sm">服务拒绝安装：{preview.refusal}</p>
-            )}
-          </div>
+                  {row.error && <p role="alert" className="text-danger text-sm">{row.error}</p>}
+
+                  {(row.script || row.status === 'ready' || row.status === 'installed') && (
+                    <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]">
+                      <div>
+                        <label htmlFor={`batch-id-${row.key}`} className="block text-xs text-neutral-400 mb-1">
+                          音源 ID
+                        </label>
+                        <input
+                          id={`batch-id-${row.key}`}
+                          value={row.id}
+                          disabled={rowBusy || row.status === 'installed'}
+                          onChange={(e) => {
+                            const id = e.target.value
+                            updateBatchRow(row.key, (current) => ({
+                              ...current,
+                              id,
+                              preview: null,
+                              error: null,
+                              existing: existingIds.has(id.trim()),
+                            }))
+                          }}
+                          onBlur={() => {
+                            const current = batch.find((candidate) => candidate.key === row.key)
+                            if (current && current.id.trim() !== row.id.trim()) void editBatchRow(current, { id: current.id })
+                            else if (current && !current.preview) void editBatchRow(current, { id: current.id })
+                          }}
+                          className="w-full px-3 py-2 rounded-lg bg-neutral-900/50 border border-neutral-800 focus:border-accent-500 focus:outline-none text-sm font-mono disabled:opacity-50"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor={`batch-language-${row.key}`} className="block text-xs text-neutral-400 mb-1">
+                          脚本语言
+                        </label>
+                        <select
+                          id={`batch-language-${row.key}`}
+                          value={row.language}
+                          disabled={rowBusy || row.status === 'installed'}
+                          onChange={(e) => void editBatchRow(row, {
+                            language: e.target.value as 'javascript' | 'python',
+                          })}
+                          className="w-full px-3 py-2 rounded-lg bg-neutral-900/50 border border-neutral-800 focus:border-accent-500 focus:outline-none text-sm disabled:opacity-50"
+                        >
+                          <option value="javascript">javascript</option>
+                          <option value="python">python</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {row.preview && (
+                    <div className="border-t border-neutral-800 pt-3 space-y-3">
+                      <div className="flex items-start gap-2">
+                        {row.preview.installable ? (
+                          <CheckCircle size={20} weight="fill" className="text-success flex-shrink-0" />
+                        ) : (
+                          <WarningCircle size={20} weight="fill" className="text-warning flex-shrink-0" />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium">
+                            {rowAnalysis.name || row.id || row.filename || '未命名音源'}
+                            {rowAnalysis.version ? <span className="text-neutral-400 font-normal"> v{rowAnalysis.version}</span> : null}
+                          </p>
+                          <p className="text-neutral-400 text-xs mt-1">
+                            {row.preview.installable ? '可安装' : '还需要处理'} · {row.preview.install_path === 'lx' ? 'lx 自定义音源' : '通用脚本'}
+                          </p>
+                        </div>
+                        {row.existing && (
+                          <span className="text-xs px-2 py-1 rounded-md bg-warning/15 text-warning whitespace-nowrap">
+                            将替换现有版本
+                          </span>
+                        )}
+                        {rowDuplicate && (
+                          <span className="text-xs px-2 py-1 rounded-md bg-danger/15 text-danger whitespace-nowrap">
+                            ID 重复
+                          </span>
+                        )}
+                      </div>
+
+                      {(rowAnalysis.blockers ?? []).map((finding) => (
+                        <p key={finding.code} className="text-danger text-xs">拒绝原因 {finding.code}：{finding.detail}</p>
+                      ))}
+                      {(rowAnalysis.caveats ?? []).map((finding) => (
+                        <p key={finding.code} className="text-neutral-400 text-xs">提示 {finding.code}：{finding.detail}</p>
+                      ))}
+
+                      {rowRequiredGrants.length > 0 && (
+                        <div className="space-y-2">
+                          <p className="text-xs text-neutral-400">该脚本需要以下出口授权：</p>
+                          {rowRequiredGrants.map((key) => (
+                            <label key={key} className="flex items-start gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={key === 'allowed_ports'
+                                  ? Boolean(row.grants.allowed_ports?.length)
+                                  : Boolean(row.grants[key as keyof Omit<GrantState, 'allowed_ports'>])}
+                                onChange={() => void toggleBatchGrant(row, key)}
+                                disabled={rowBusy || row.status === 'installed'}
+                                className="mt-0.5 w-4 h-4 rounded border-neutral-700 bg-neutral-900 text-accent-500 disabled:opacity-50"
+                              />
+                              <span className="text-xs">
+                                <span className="font-medium">{GRANT_LABELS[key]?.title ?? key}</span>
+                                <span className="block text-neutral-500 mt-0.5">{GRANT_LABELS[key]?.detail ?? ''}</span>
+                              </span>
+                            </label>
+                          ))}
+                          {row.preview.missing_grants.length > 0 && (
+                            <p className="text-warning text-xs">还缺：{row.preview.missing_grants.join('、')}</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </section>
         )}
 
         {error && (
@@ -437,18 +666,19 @@ function ImportDialog({
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 px-4 py-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 font-medium transition-colors"
+            disabled={importBusy}
+            className="flex-1 px-4 py-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
           >
             取消
           </button>
           <button
             type="button"
-            onClick={() => void handleInstall()}
-            disabled={busy || !script.trim() || !preview?.installable}
+            onClick={() => void handleBatchInstall()}
+            disabled={importBusy || batchReadyCount === 0}
             className="flex-1 px-4 py-3 rounded-lg bg-accent-500 hover:bg-accent-600 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center justify-center gap-2"
           >
-            <Check size={20} weight="bold" />
-            {busy ? '处理中…' : '确认导入'}
+            {batchBusy ? <SpinnerGap size={20} className="animate-spin" /> : <Check size={20} weight="bold" />}
+            {batchBusy ? '处理中…' : '安装可用音源'}
           </button>
         </div>
       </div>
@@ -741,11 +971,8 @@ export default function SourcesPage() {
       {showImport && (
         <ImportDialog
           onClose={() => setShowImport(false)}
-          onInstalled={(item) => {
-            setShowImport(false)
-            setNotice({ tone: 'ok', text: `已导入 ${item.id}${reloadNote(item.reload)}` })
-            void load()
-          }}
+          existingIds={new Set(sources.map((source) => source.id))}
+          onBatchChanged={() => void load()}
         />
       )}
     </div>
