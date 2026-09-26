@@ -121,7 +121,7 @@ jobs:
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3999/admin/sources)" = "401" || fail
           echo "one container answered /healthz, served the console, and kept /admin behind a session"
 
-  # The published 1.0.2 images support lite. Build both services from this
+  # The published 1.0.3 images support lite. Build both services from this
   # checkout to test this commit's manifest and lite support without relying
   # on published images or a moving latest tag.
   lite-mode-source-image:
@@ -297,7 +297,7 @@ jobs:
           }
           trap cleanup EXIT
 
-          # Keep the manifest's published 1.0.2 defaults; do not accidentally
+          # Keep the manifest's published 1.0.3 defaults; do not accidentally
           # inherit an image override from the hosted runner environment.
           unset MUSICDL_IMAGE_TAG
           compose pull || fail

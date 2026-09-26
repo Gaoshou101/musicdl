@@ -1,7 +1,7 @@
 # compose.quick.yaml — one-command install: published images + a private Redis.
 #
 # Who it is for : first-time users. No checkout, no .env, no external Redis.
-# Images        : wit7zz/musicdl + wit7zz/musicdl-plugin-runner at MUSICDL_IMAGE_TAG (default 1.0.2).
+# Images        : wit7zz/musicdl + wit7zz/musicdl-plugin-runner at MUSICDL_IMAGE_TAG (default 1.0.3).
 # Redis         : bundled `redis` service on an internal `state` network — never published to the
 #                 host, data in the musicdl-redis-data volume, reachable only by musicdl.
 # Services      : 3 (musicdl + plugin-runner + redis), bound to 127.0.0.1; use TLS for remote access.
@@ -18,7 +18,7 @@ name: musicdl
 
 services:
   musicdl:
-    image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.2}
+    image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.3}
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]
@@ -63,7 +63,7 @@ services:
       start_period: 10s
 
   plugin-runner:
-    image: wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.2}
+    image: wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.3}
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]

@@ -118,7 +118,7 @@ def test_lite_install_docs_explain_build_mode_and_full_to_lite_rollback_boundari
     assert "lite 不会写入 Redis" in chinese_migration
 
 
-def test_release_docs_pin_current_images_and_keep_quick_default_override_explicit():
+def test_release_docs_pin_current_images_and_document_quick_default():
     english = (ROOT / "README.md").read_text(encoding="utf-8")
     chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
@@ -130,12 +130,10 @@ def test_release_docs_pin_current_images_and_keep_quick_default_override_explici
     assert "wit7zz/musicdl-plugin-runner:1.0.3" in english
     assert "`wit7zz/musicdl:1.0.3`" in chinese
     assert "`wit7zz/musicdl-plugin-runner:1.0.3`" in chinese
-    assert "MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.quick.yaml up -d" in english
-    assert "MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.quick.yaml up -d" in chinese
-    assert "still defaults to `1.0.2` until post-publication promotion" in english
-    assert "发布后完成推广前仍默认使用" in chinese
-    assert "now defaults to" not in english
-    assert "现在默认使用" not in chinese
+    assert "quick manifest now defaults to `1.0.3`" in english
+    assert "快速安装清单现在默认使用 `1.0.3`" in chinese
+    assert "still defaults to `1.0.2` until post-publication promotion" not in english
+    assert "发布后完成推广前仍默认使用" not in chinese
     assert "MUSICDL_IMAGE_TAG=1.0.3" in env_example
     assert "1.0.1" in env_example and "v1.0.0" in env_example
     assert "python-socks" in english and "python-socks" in chinese
