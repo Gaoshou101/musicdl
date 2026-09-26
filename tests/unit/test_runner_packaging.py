@@ -13,7 +13,7 @@ def test_runner_package_declares_only_its_runtime_dependencies():
     project = tomllib.loads(PACKAGE_CONFIG.read_text(encoding="utf-8"))["project"]
 
     assert project["name"] == "musicdl-plugin-runner"
-    assert project["version"] == "1.0.2"
+    assert project["version"] == "1.0.3"
     assert project["dependencies"] == [
         "fastapi==0.141.1",
         "pydantic==2.13.5",
@@ -46,7 +46,7 @@ def test_plugin_image_builds_and_installs_the_scoped_wheel():
     assert "pip wheel --no-cache-dir --no-deps --wheel-dir /wheels ." in text
     assert "COPY src ./src" not in text
     assert "COPY pyproject.toml README.md ./" not in text
-    runner_wheel = "musicdl_plugin_runner-1.0.2-py3-none-any.whl"
+    runner_wheel = "musicdl_plugin_runner-1.0.3-py3-none-any.whl"
     assert f"COPY --from=runner-package /wheels/{runner_wheel} /tmp/{runner_wheel}" in text
     assert f"/tmp/{runner_wheel}" in text
     assert "/tmp/musicdl-plugin-runner.whl" not in text

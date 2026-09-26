@@ -65,7 +65,7 @@
 | 你的情况 | 用哪份 | 命令 |
 |---|---|---|
 | 想先跑起来看看（无需检出代码，内置 Redis） | `compose.quick.yaml` | `docker compose -f compose.quick.yaml up -d` |
-| 已有 Redis，部署固定的发布版镜像 | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.prod.yaml up -d` |
+| 已有 Redis，部署固定的发布版镜像 | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.prod.yaml up -d` |
 | 基于本检出目录开发 musicdl | `compose.yaml` | `docker compose up -d --build` |
 | 没有 Redis，只要主服务 + 插件运行器 | `compose.lite.yaml` | `docker compose -f compose.lite.yaml up -d --build` |
 
@@ -115,11 +115,17 @@ curl http://127.0.0.1:8000/readyz
 
 然后打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。HTTP 会以明文传输账密和会话 Cookie，因此直接 HTTP 仅限可信的主机本地访问，公网访问请使用 HTTPS。
 
-快速安装的 Compose 项目名默认为 `musicdl`。如需更改宿主机端口，可在运行 Compose 前设置 `MUSICDL_PORT`。如需选择其他已发布的应用镜像，可设置 `MUSICDL_IMAGE_TAG`；快速安装清单现在默认使用 `1.0.2`。主服务与插件运行器镜像使用相同的版本标签。
+快速安装的 Compose 项目名默认为 `musicdl`。如需更改宿主机端口，可在运行 Compose 前设置 `MUSICDL_PORT`。如需选择其他已发布的应用镜像，可设置 `MUSICDL_IMAGE_TAG`；下载的快速安装清单在发布后完成推广前仍默认使用 `1.0.2`。如需立即使用当前的 `1.0.3` 镜像，请显式覆盖该默认值：
+
+```bash
+MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.quick.yaml up -d
+```
+
+主服务与插件运行器镜像使用相同的版本标签。
 
 ## Lite 双容器部署
 
-上面的完整快速安装仍是默认方案，包含私有 Redis 和企业微信支持。仅在不需要企业微信时选择 lite：lite 只运行主服务和隔离插件运行器，不启动或连接 Redis，并会拒绝企业微信处于启用状态。AI 和 Telegram 配置仍可用。清单将 `MUSICDL_DEPLOYMENT_MODE` 设置为 `lite`。已发布的 `1.0.2` 主服务和插件运行器镜像标签均支持 lite。`compose.lite.yaml` 仍会从源码检出目录分别使用 `docker/main/Dockerfile` 和 `docker/plugin/Dockerfile` 构建两个镜像；启动 lite 前请按清单先完成构建步骤。如果镜像未声明并实际启用 lite 模式，主服务会在启动 Uvicorn 前失败关闭。
+上面的完整快速安装仍是默认方案，包含私有 Redis 和企业微信支持。仅在不需要企业微信时选择 lite：lite 只运行主服务和隔离插件运行器，不启动或连接 Redis，并会拒绝企业微信处于启用状态。AI 和 Telegram 配置仍可用。清单将 `MUSICDL_DEPLOYMENT_MODE` 设置为 `lite`。已发布的 `1.0.3` 主服务和插件运行器镜像标签均支持 lite。`compose.lite.yaml` 仍会从源码检出目录分别使用 `docker/main/Dockerfile` 和 `docker/plugin/Dockerfile` 构建两个镜像；启动 lite 前请按清单先完成构建步骤。如果镜像未声明并实际启用 lite 模式，主服务会在启动 Uvicorn 前失败关闭。
 
 克隆仓库并准备私有工作目录：
 
@@ -150,8 +156,8 @@ cp .env.example .env
 将 `.env` 中的 `MUSICDL_REDIS__URL` 设置为你的 Redis 地址。不要提交真实凭据。然后拉取并启动已发布镜像：
 
 ```bash
-MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.prod.yaml pull
-MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.prod.yaml up -d
+MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.prod.yaml pull
+MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.prod.yaml up -d
 ```
 
 需要从当前代码构建时，也可以使用 `compose.yaml`。
@@ -179,10 +185,10 @@ curl http://127.0.0.1:8000/readyz
 
 | 镜像 | 用途 |
 |---|---|
-| `wit7zz/musicdl:1.0.2` | 主服务和内置管理面板 |
-| `wit7zz/musicdl-plugin-runner:1.0.2` | 隔离的 JavaScript 插件运行环境 |
+| `wit7zz/musicdl:1.0.3` | 主服务和内置管理面板 |
+| `wit7zz/musicdl-plugin-runner:1.0.3` | 隔离的 JavaScript 插件运行环境 |
 
-`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装清单现在默认使用已发布的 `1.0.2` 镜像。Cookie 策略修复是在 `1.0.1` 中引入的，`1.0.2` 继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。Docker 镜像标签和 GitHub 源码发布是独立的发布产物；源码发布及其附件请查看 [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases)。
+`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装清单在发布后完成推广前仍默认使用已发布的 `1.0.2` 镜像；如需立即使用当前镜像，请设置 `MUSICDL_IMAGE_TAG=1.0.3`。Cookie 策略修复是在 `1.0.1` 中引入的，`1.0.3` 继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。`1.0.3` 还让面板配置的 `telegram.proxy` 真正生效：镜像现在包含 `python-socks` 隧道依赖，并把面板填写的代理地址转换成 Telethon 接受的形式；依赖缺失或 scheme 不支持会直接在面板报错，而不再被静默忽略。Docker 镜像标签和 GitHub 源码发布是独立的发布产物；源码发布及其附件请查看 [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases)。
 
 生产 Compose 默认只监听 `127.0.0.1`。如需从其他设备访问，请先通过支持 TLS 的反向代理对外提供服务。仓库提供了以下示例：
 
@@ -254,7 +260,7 @@ lite 没有 Redis 服务，也不会连接 Redis，因为它要求禁用企业�
 
 切换前请检查 Redis 配置来源，并查看「运行配置」→「Redis」→「Redis 地址」（`redis.url`），记录当前目标。即使 lite 不使用 Redis，该设置仍可能保存在 `admin-state.json` 中。如果来源为「面板覆盖」，旧 full 应用或 Worker 运行期间不要清除或恢复该覆盖：已保存的密钥会被隐藏，清除可能使 full 模式热重载到其他 Redis 地址。切回 full 前，应先决定 full 模式要使用哪个 Redis。
 
-停止旧栈之前，仍应先从当前检出源码构建 lite 镜像，尽管已发布的 `1.0.2` 镜像标签支持 lite。记录原 Compose 项目名、按顺序排列的清单和环境文件参数，以及实际卷名/挂载路径。保持相同项目名（默认是 `musicdl`），即可复用 `musicdl-media`、`musicdl-app-data` 和 `musicdl-telegram` 三个应用卷键。停止 full 栈并备份应用卷后再切换清单。若完整数据回滚可能涉及 full 快速安装，还应备份 `musicdl-redis-data`。不带 `-v` 的 Compose down 会保留该卷，支持服务回滚；备份则用于完整数据回滚。若完整数据回滚涉及外部 Redis，应在与应用卷备份相同的静止时间点，使用 Redis 提供方支持的方式创建一致性快照。若原 full 部署使用外部 Redis，请保持该 Redis 可用，以便恢复 full 模式时继续使用；lite 本身不会连接该 Redis 地址。
+停止旧栈之前，仍应先从当前检出源码构建 lite 镜像，尽管已发布的 `1.0.3` 镜像标签支持 lite。记录原 Compose 项目名、按顺序排列的清单和环境文件参数，以及实际卷名/挂载路径。保持相同项目名（默认是 `musicdl`），即可复用 `musicdl-media`、`musicdl-app-data` 和 `musicdl-telegram` 三个应用卷键。停止 full 栈并备份应用卷后再切换清单。若完整数据回滚可能涉及 full 快速安装，还应备份 `musicdl-redis-data`。不带 `-v` 的 Compose down 会保留该卷，支持服务回滚；备份则用于完整数据回滚。若完整数据回滚涉及外部 Redis，应在与应用卷备份相同的静止时间点，使用 Redis 提供方支持的方式创建一致性快照。若原 full 部署使用外部 Redis，请保持该 Redis 可用，以便恢复 full 模式时继续使用；lite 本身不会连接该 Redis 地址。
 
 ```bash
 docker compose -p OLD_PROJECT -f compose.lite.yaml build
@@ -286,7 +292,7 @@ docker compose -p OLD_PROJECT -f compose.lite.yaml up -d
 
 面板保存的大部分配置会触发运行时热重载，不需要重启容器。涉及启动边界的设置仍可能要求重启。
 
-如需从部署主机通过环回地址直接使用 HTTP，请将 `MUSICDL_ADMIN__COOKIE_SECURE=false`；如果前面有 HTTPS 反向代理，请保持默认值 `true`。Compose 文件默认绑定到 `127.0.0.1`，局域网访问需要另行有意修改端口绑定或反向代理配置。快速安装清单现在默认使用 `1.0.2`。Cookie 策略修复是在已发布的 `1.0.1` 镜像中引入的，`1.0.2` 继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。使用 `compose.prod.yaml` 时，请将设置写入 `.env` 并重新创建主服务；构建自定义镜像时，请使用包含 Cookie 策略修复的源码。
+如需从部署主机通过环回地址直接使用 HTTP，请将 `MUSICDL_ADMIN__COOKIE_SECURE=false`；如果前面有 HTTPS 反向代理，请保持默认值 `true`。Compose 文件默认绑定到 `127.0.0.1`，局域网访问需要另行有意修改端口绑定或反向代理配置。快速安装清单在发布后完成推广前仍默认使用 `1.0.2`。Cookie 策略修复是在已发布的 `1.0.1` 镜像中引入的，`1.0.3` 继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。使用 `compose.prod.yaml` 时，请将设置写入 `.env` 并重新创建主服务；构建自定义镜像时，请使用包含 Cookie 策略修复的源码。
 
 自定义 Compose 还需在 `musicdl.environment` 中加入 `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"`；只写入 `.env` 不会自动传给容器。升级并验证 HTTP 登录、改密成功后，可删除仅用于剥离 Secure 的临时 `panel` 反代服务及对应配置，把原入口端口直接映射到主服务的 `8000`。HTTP 会明文传输账密和会话，公网部署请使用 HTTPS。
 

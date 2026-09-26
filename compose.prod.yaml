@@ -2,11 +2,11 @@
 #
 # Who it is for : operators who already run Redis and want a pinned release image.
 # Images        : wit7zz/musicdl + wit7zz/musicdl-plugin-runner, tag via MUSICDL_IMAGE_TAG
-#                 (default `latest` — pin a numbered release such as 1.0.2). `build:` is kept so
+#                 (default `latest` — pin a numbered release such as 1.0.3). `build:` is kept so
 #                 CI can build this exact topology from a checkout; plain `up -d` uses the image.
 # Redis         : external and mandatory — set MUSICDL_REDIS__URL.
 # Services      : 2, bound to 127.0.0.1 only; put a TLS reverse proxy in front (see deploy/).
-# Start with    : MUSICDL_IMAGE_TAG=1.0.2 MUSICDL_REDIS__URL=<your-redis-url> \
+# Start with    : MUSICDL_IMAGE_TAG=1.0.3 MUSICDL_REDIS__URL=<your-redis-url> \
 #                 docker compose -f compose.prod.yaml up -d
 #
 # Which manifest do I want?
