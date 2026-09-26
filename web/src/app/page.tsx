@@ -56,7 +56,7 @@ export default function LoginPage() {
       </div>
 
       <main className="relative mx-auto flex min-h-[100dvh] w-full max-w-6xl items-center justify-center px-5 py-10 sm:px-8 lg:justify-between lg:gap-16 lg:py-16">
-        <section className="hidden max-w-md flex-1 lg:block" aria-label="tgmusic 简介">
+        <section className="hidden max-w-md flex-1 lg:block" aria-label="musicdl 简介">
           <div className="mb-7 flex items-center gap-3">
             <img
               src="/brand/icon.svg"
@@ -67,7 +67,7 @@ export default function LoginPage() {
               className="h-11 w-11 rounded-2xl object-cover shadow-sm"
             />
             <div>
-              <p className="text-sm font-semibold tracking-wide">tgmusic</p>
+              <p className="text-sm font-semibold tracking-wide">musicdl</p>
               <p className="text-xs text-neutral-500">Telegram 音乐服务</p>
             </div>
           </div>
@@ -103,7 +103,7 @@ export default function LoginPage() {
                 className="h-10 w-10 rounded-xl object-cover shadow-sm"
               />
               <div>
-                <p className="text-sm font-semibold">tgmusic</p>
+                <p className="text-sm font-semibold">musicdl</p>
                 <p className="text-xs text-neutral-500">管理后台</p>
               </div>
             </div>

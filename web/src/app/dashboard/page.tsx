@@ -108,7 +108,7 @@ export default function DashboardPage() {
           <div>
             <p className="text-sm font-medium text-accent-300">工作台</p>
             <h1 className="mt-2 text-3xl font-semibold tracking-[-0.03em] text-neutral-50 sm:text-4xl">仪表板</h1>
-            <p className="mt-2 text-sm leading-6 text-neutral-400">tgmusic 服务概览，关键状态集中在这里。</p>
+            <p className="mt-2 text-sm leading-6 text-neutral-400">musicdl 服务概览，关键状态集中在这里。</p>
           </div>
           <div className={`inline-flex w-fit items-center gap-2 rounded-full border px-3 py-2 text-xs font-medium ${statusTone}`}>
             <span className={`h-1.5 w-1.5 rounded-full ${statusDotTone}`} />

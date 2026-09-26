@@ -46,7 +46,7 @@ export function Sidebar() {
             className="h-10 w-10 rounded-lg object-cover shadow-sm"
           />
           <div className="max-sm:hidden">
-            <h2 className="font-semibold">tgmusic</h2>
+            <h2 className="font-semibold">musicdl</h2>
             <p className="text-xs text-neutral-400">管理后台</p>
           </div>
         </div>
