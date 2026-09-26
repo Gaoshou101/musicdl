@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .models import TelegramResult, TelegramStatus
+from .proxy import TelegramProxyError, resolve_proxy
 
 
 _PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -21,12 +22,18 @@ class TelegramClientProtocol(Protocol):
 
 
 def telethon_client_factory(api_id: int, api_hash: str, proxy: Any = None) -> Callable[[Path], TelegramClientProtocol]:
-    """Build a lazy Telethon factory; importing Telethon is deferred until use."""
+    """Build a lazy Telethon factory; importing Telethon is deferred until use.
+
+    The operator's proxy is translated here rather than at the settings layer:
+    Telethon needs a tuple and refuses the URL string the panel collects, and a
+    setting it cannot honour has to fail loudly instead of being dropped.
+    """
     def factory(session_path: Path) -> TelegramClientProtocol:
         from telethon import TelegramClient
-        kwargs = {"flood_sleep_threshold": 0}
-        if proxy is not None:
-            kwargs["proxy"] = proxy
+        kwargs: dict[str, Any] = {"flood_sleep_threshold": 0}
+        resolved = resolve_proxy(proxy)
+        if resolved is not None:
+            kwargs["proxy"] = resolved
         return TelegramClient(session_path, api_id, api_hash, **kwargs)
     return factory
 
@@ -246,6 +253,10 @@ class TelegramConnector:
             return TelegramResult(TelegramStatus.INVALID_SESSION)
         if name in {"SessionPasswordNeededError"}:
             return TelegramResult(TelegramStatus.PASSWORD_REQUIRED)
+        if isinstance(exc, TelegramProxyError):
+            # A proxy the operator configured is a deployment fact they have to
+            # act on, and the message is written without the setting's value.
+            return TelegramResult(TelegramStatus.ERROR, error=str(exc))
         return TelegramResult(TelegramStatus.ERROR, error="telegram operation failed")
 
     async def begin_login(self, profile: str, phone: str) -> TelegramResult:

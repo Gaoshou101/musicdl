@@ -113,7 +113,7 @@ GROUPS: tuple[ConfigGroup, ...] = (
             ConfigField("telegram.api_id", "API ID", "int", "Telegram 应用的 api_id。"),
             ConfigField("telegram.api_hash", "API Hash", "secret", "Telegram 应用的 api_hash，留空表示不修改。"),
             ConfigField("telegram.profile", "Session 配置名", "text", "默认 default，只能是简单名称。"),
-            ConfigField("telegram.proxy", "代理", "text", "可选，例如 socks5://127.0.0.1:1080。"),
+            ConfigField("telegram.proxy", "代理", "text", "可选，格式 scheme://[用户名:密码@]主机:端口，scheme 支持 socks5、socks4、http、https（http/https 需要对方支持 CONNECT 隧道）。"),
         ),
     ),
     ConfigGroup(
