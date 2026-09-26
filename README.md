@@ -66,7 +66,7 @@ The repository ships four manifests for four different situations. Each file's h
 | Your situation | Manifest | Command |
 |---|---|---|
 | Try it out first (no checkout, bundled Redis) | `compose.quick.yaml` | `docker compose -f compose.quick.yaml up -d` |
-| Already run Redis; deploy a pinned release image | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.prod.yaml up -d` |
+| Already run Redis; deploy a pinned release image | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.prod.yaml up -d` |
 | Developing musicdl from this checkout | `compose.yaml` | `docker compose up -d --build` |
 | No Redis available; main service + runner only | `compose.lite.yaml` | `docker compose -f compose.lite.yaml up -d --build` |
 
@@ -116,11 +116,17 @@ curl http://127.0.0.1:8000/readyz
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000). HTTP sends credentials and session cookies in plaintext, so keep direct HTTP limited to trusted host-local access and use HTTPS for public access.
 
-The quick Compose project name defaults to `musicdl`. To change the host port, set `MUSICDL_PORT` before running Compose. To select a different published application image, set `MUSICDL_IMAGE_TAG`; the quick manifest now defaults to `1.0.2`. Both application images use the same version tag.
+The quick Compose project name defaults to `musicdl`. To change the host port, set `MUSICDL_PORT` before running Compose. To select a different published application image, set `MUSICDL_IMAGE_TAG`; the downloaded quick manifest still defaults to `1.0.2` until post-publication promotion. To use the current `1.0.3` images immediately, override that default explicitly:
+
+```bash
+MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.quick.yaml up -d
+```
+
+Both application images use the same version tag.
 
 ## Lite Two-Container Deployment
 
-The full three-service quick install above remains the default and includes private Redis plus WeCom support. Choose lite only when WeCom is not needed: lite runs the app and isolated plugin runner, starts no Redis service, and does not connect to Redis. The app rejects WeCom being enabled in this mode; AI and Telegram settings remain available. The manifest sets `MUSICDL_DEPLOYMENT_MODE=lite`. The published `1.0.2` main and plugin-runner image tags support lite. `compose.lite.yaml` still builds both images from the source checkout with `docker/main/Dockerfile` and `docker/plugin/Dockerfile`; follow its build step before starting lite. The app fails closed before Uvicorn starts if the image does not declare and activate lite mode.
+The full three-service quick install above remains the default and includes private Redis plus WeCom support. Choose lite only when WeCom is not needed: lite runs the app and isolated plugin runner, starts no Redis service, and does not connect to Redis. The app rejects WeCom being enabled in this mode; AI and Telegram settings remain available. The manifest sets `MUSICDL_DEPLOYMENT_MODE=lite`. The published `1.0.3` main and plugin-runner image tags support lite. `compose.lite.yaml` still builds both images from the source checkout with `docker/main/Dockerfile` and `docker/plugin/Dockerfile`; follow its build step before starting lite. The app fails closed before Uvicorn starts if the image does not declare and activate lite mode.
 
 Clone the repository and prepare a private working directory:
 
@@ -151,8 +157,8 @@ cp .env.example .env
 Set `MUSICDL_REDIS__URL` in `.env` to your Redis endpoint. Do not commit credentials. Then pull and start the published images:
 
 ```bash
-MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.prod.yaml pull
-MUSICDL_IMAGE_TAG=1.0.2 docker compose -f compose.prod.yaml up -d
+MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.prod.yaml pull
+MUSICDL_IMAGE_TAG=1.0.3 docker compose -f compose.prod.yaml up -d
 ```
 
 The source-build `compose.yaml` is also available when you want Docker to build from the checkout.
@@ -180,10 +186,10 @@ The currently published image pair is:
 
 | Image | Purpose |
 |---|---|
-| `wit7zz/musicdl:1.0.2` | Main service and built-in administration panel |
-| `wit7zz/musicdl-plugin-runner:1.0.2` | Isolated JavaScript plugin runtime |
+| `wit7zz/musicdl:1.0.3` | Main service and built-in administration panel |
+| `wit7zz/musicdl-plugin-runner:1.0.3` | Isolated JavaScript plugin runtime |
 
-Both `compose.quick.yaml` and `compose.prod.yaml` accept `MUSICDL_IMAGE_TAG`; use a published numbered version for predictable deployments. The quick Compose file now defaults to the published `1.0.2` images. The cookie-policy fix was introduced in `1.0.1` and is included in `1.0.2`; the original `v1.0.0` images do not include it. Docker image tags and GitHub source releases are separate release outputs; see [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases) for source releases and their assets.
+Both `compose.quick.yaml` and `compose.prod.yaml` accept `MUSICDL_IMAGE_TAG`; use a published numbered version for predictable deployments. The quick Compose file still defaults to the published `1.0.2` images until post-publication promotion; set `MUSICDL_IMAGE_TAG=1.0.3` to use the current images immediately. The cookie-policy fix was introduced in `1.0.1` and is included in `1.0.3`; the original `v1.0.0` images do not include it. `1.0.3` also makes a configured `telegram.proxy` take effect: the images carry the `python-socks` tunnel dependency and translate the panel proxy URL into the shape Telethon accepts, and a missing dependency or an unsupported scheme is reported in the panel instead of being ignored. Docker image tags and GitHub source releases are separate release outputs; see [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases) for source releases and their assets.
 
 The production Compose file binds the application to `127.0.0.1` by default. Put it behind a TLS reverse proxy before exposing it outside the host. Example configurations are available for:
 
@@ -255,7 +261,7 @@ Lite has no Redis service and does not connect to Redis because it requires WeCo
 
 Before switching, inspect Runtime Configuration → Redis → Redis Address (`redis.url`) and its source, and record the active target. The Redis setting can remain saved in `admin-state.json` even though lite does not use Redis. If its source is `Panel override`, do not clear or restore it while the full app or workers are running: a saved secret is masked and clearing it may hot-reload full mode to another Redis endpoint. Decide which Redis target full mode should use before switching back.
 
-Build the lite images from the current checkout before stopping the old stack, even though the published `1.0.2` image tags support lite. Record the old Compose project name, ordered manifests and env-file arguments, and actual volume names/mount paths. Keep the same project name (the default is `musicdl`) so the `musicdl-media`, `musicdl-app-data`, and `musicdl-telegram` application volume keys are reused. Stop the full stack and back up the app volumes before changing manifests. If you may need a full data rollback for a full quick install, also back up `musicdl-redis-data`. Compose `down` without `-v` retains that volume for a service rollback; the backup protects the Redis data for a full data rollback. If external Redis data is in scope for a full data rollback, take a consistent, provider-specific snapshot at the same quiesced point as the application-volume backups. For an existing external-Redis full deployment, keep the same intended Redis service available for when full mode is resumed; lite itself does not use that Redis endpoint.
+Build the lite images from the current checkout before stopping the old stack, even though the published `1.0.3` image tags support lite. Record the old Compose project name, ordered manifests and env-file arguments, and actual volume names/mount paths. Keep the same project name (the default is `musicdl`) so the `musicdl-media`, `musicdl-app-data`, and `musicdl-telegram` application volume keys are reused. Stop the full stack and back up the app volumes before changing manifests. If you may need a full data rollback for a full quick install, also back up `musicdl-redis-data`. Compose `down` without `-v` retains that volume for a service rollback; the backup protects the Redis data for a full data rollback. If external Redis data is in scope for a full data rollback, take a consistent, provider-specific snapshot at the same quiesced point as the application-volume backups. For an existing external-Redis full deployment, keep the same intended Redis service available for when full mode is resumed; lite itself does not use that Redis endpoint.
 
 ```bash
 docker compose -p OLD_PROJECT -f compose.lite.yaml build
@@ -287,7 +293,7 @@ The administration panel is the preferred place to manage runtime settings. Envi
 
 Most changes made in the panel rebuild the active runtime without restarting the container. Settings that affect startup boundaries may still require a restart.
 
-For direct HTTP from the deployment host via loopback, set `MUSICDL_ADMIN__COOKIE_SECURE=false`; keep the default `true` when an HTTPS reverse proxy is in front of the service. The Compose files bind to `127.0.0.1` by default; LAN access requires a separate intentional port-binding or proxy change. The quick manifest now defaults to `1.0.2`. The cookie-policy fix was introduced in the published `1.0.1` images and is included in `1.0.2`; the original `v1.0.0` images do not include it. For `compose.prod.yaml`, put the setting in `.env` and recreate the main service. When building a custom image, use source that includes the cookie-policy fix.
+For direct HTTP from the deployment host via loopback, set `MUSICDL_ADMIN__COOKIE_SECURE=false`; keep the default `true` when an HTTPS reverse proxy is in front of the service. The Compose files bind to `127.0.0.1` by default; LAN access requires a separate intentional port-binding or proxy change. The quick manifest still defaults to `1.0.2` until post-publication promotion. The cookie-policy fix was introduced in the published `1.0.1` images and is included in `1.0.3`; the original `v1.0.0` images do not include it. For `compose.prod.yaml`, put the setting in `.env` and recreate the main service. When building a custom image, use source that includes the cookie-policy fix.
 
 Custom Compose files must also add `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"` under `musicdl.environment`; `.env` alone does not pass it into the container. After upgrading and verifying HTTP login and password changes, remove any temporary `panel` proxy and configuration used only to strip Secure, and map the original entry port directly to the main service's port `8000`. HTTP sends credentials and sessions in plaintext; use HTTPS for public deployments.
 
