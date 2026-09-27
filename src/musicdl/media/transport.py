@@ -17,7 +17,7 @@ from musicdl.plugins.broker import (
     _resolve_global_addresses, coerce_egress_policy,
 )
 
-from .models import MAX_MEDIA_BYTES, DownloadMetadata, MediaError, _CloseOnce
+from .models import MAX_MEDIA_BYTES, DeclaredSize, DownloadMetadata, MediaError, _CloseOnce
 from .validation import detect_media
 
 MAX_RESPONSE_HEADER_COUNT = 64
@@ -451,6 +451,16 @@ class SecureMediaTransport:
                 raise MediaError("size_mismatch")
             if advisory_size is not None and content_length is not None and content_length < advisory_size:
                 raise MediaError("size_mismatch")
+            # An accepted reference size is never echoed back: the panel, the
+            # download record and the success message all read the length this
+            # download is answerable for, and they have to agree with the bytes
+            # on disk.  An answer that states its own ``Content-Length`` gives
+            # that length up front; an answer that states none (a chunked body)
+            # only gives it while the bytes arrive, so the stream fills a cell
+            # the caller reads once the body has been delivered.
+            reported_size: int | DeclaredSize | None = content_length if advisory_size is not None else exact_size
+            if advisory_size is not None and content_length is None:
+                reported_size = DeclaredSize()
 
             async def close_response() -> None:
                 await self._close_handles((response, wrapped, raw), close_once)
@@ -501,6 +511,10 @@ class SecureMediaTransport:
                         raise MediaError("size_mismatch")
                     if advisory_size is not None and observed < advisory_size:
                         raise MediaError("size_mismatch")
+                    if isinstance(reported_size, DeclaredSize):
+                        # Every byte the body held has been handed over, so the
+                        # length it really is is now known.
+                        reported_size.value = observed
                 except BaseException as exc:
                     primary = exc
                     raise
@@ -511,10 +525,6 @@ class SecureMediaTransport:
                         if primary is None:
                             raise
 
-            # An accepted advisory size must never be echoed back: the panel,
-            # the download record and the success message all read this value,
-            # and they have to agree with the bytes on disk.
-            reported_size = content_length if advisory_size is not None else exact_size
             return DownloadMetadata(chunks=chunks(), extension=extension,
                                     media_type=media_type, declared_size=reported_size,
                                     _close_once=close_once)
