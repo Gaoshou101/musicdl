@@ -49,8 +49,11 @@ async def download_with_fallback(
     fence: int | None = None,
     language: str | None = None,
     max_bytes: int = MAX_MEDIA_BYTES,
+    verify_duration: str = "lenient",
     record: Callable[[DownloadEvent], None] | None = None,
 ) -> FallbackResult:
+    if verify_duration not in {"lenient", "strict"}:
+        raise ValueError("invalid_verify_duration")
     resolve_stream_budget = _budget(resolve_stream_timeout)
     refresh_budget = _budget(refresh_timeout)
     health_budget = _budget(health_timeout, default=10.0)
@@ -66,13 +69,13 @@ async def download_with_fallback(
                 downloaded = await download_candidate(
                     candidate, source, media_root, request_id=request_id, reservation=reservation,
                     artifact_store=artifact_store, owner=owner, fence=fence, language=language,
-                    max_bytes=max_bytes, record=record)
+                    max_bytes=max_bytes, verify_duration=verify_duration, record=record)
             else:
                 async with asyncio.timeout(resolve_stream_budget):
                     downloaded = await download_candidate(
                         candidate, source, media_root, request_id=request_id, reservation=reservation,
                         artifact_store=artifact_store, owner=owner, fence=fence, language=language,
-                        max_bytes=max_bytes, record=record)
+                        max_bytes=max_bytes, verify_duration=verify_duration, record=record)
             return FallbackResult(download=downloaded)
         except asyncio.CancelledError:
             raise

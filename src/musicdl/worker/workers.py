@@ -27,6 +27,9 @@ TERMINAL_FAILURE_TEXT = "处理失败，请稍后重试。"
 # A re-prompt answers the same question a second time, so it says why the first
 # answer is gone: the refreshed list may be rows the user has already read.
 FALLBACK_NOTICE = "上一次的结果下载失败，这里是最新的结果："
+# A refusal a person can act on is said in words they can act on, instead of
+# the internal code that caused it.
+REFUSAL_TEXT = {"incomplete_audio": "取到的是试听片段或文件不完整，请换一个音源"}
 EFFECT_REPLAY_LIMIT = 100
 _MEDIA_TYPES = {"mp3": "audio/mpeg", "flac": "audio/flac", "m4a": "audio/mp4", "ogg": "audio/ogg"}
 
@@ -127,6 +130,23 @@ def _positive_seconds(value, name: str):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
         raise ValueError(name)
     return float(value)
+
+
+def _success_text(download) -> str:
+    """The success notice, with a measured rate only when there really is one.
+
+    ``DownloadResult.bitrate_kbps`` is the delivered byte count over the real
+    playing time, so it is a measurement rather than a channel's claim.  A file
+    whose container could not be read leaves the notice exactly as it was:
+    showing a number nobody measured would be the same lie this feature exists
+    to stop.
+    """
+    text = f"下载成功：{download.relative_path}"
+    bitrate = getattr(download, "bitrate_kbps", None)
+    if bitrate is None:
+        return text
+    container = str(getattr(download, "extension", "") or "").lstrip(".").upper()
+    return f"{text}（{container} {bitrate}kbps）" if container else f"{text}（{bitrate}kbps）"
 
 
 def _retry_window(value) -> int:
@@ -365,6 +385,7 @@ class JobWorker(_StreamWorker):
                  job_timeout: float = 10.0, resolve_stream_timeout: float | None = None,
                  refresh_timeout: float | None = None, health_timeout: float = 10.0,
                  retry_window_seconds: int = 86400, selection_ttl: int = 600, max_results: int = 10,
+                 verify_duration: str = "lenient",
                  redis_overhead_seconds: float = REDIS_OVERHEAD_SECONDS,
                  wecom_notice_timeout: float = WECOM_NOTICE_TIMEOUT_SECONDS):
         self.redis, self.wecom, self.sources, self.media_root = redis, wecom, sources, media_root
@@ -375,6 +396,9 @@ class JobWorker(_StreamWorker):
         if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= 100:
             raise ValueError("invalid max results")
         self.max_results = max_results
+        if verify_duration not in {"lenient", "strict"}:
+            raise ValueError("invalid verify duration")
+        self.verify_duration = verify_duration
         self.redis_overhead_seconds = _positive_seconds(redis_overhead_seconds, "invalid redis overhead")
         self.wecom_notice_timeout = _positive_seconds(wecom_notice_timeout, "invalid wecom notice timeout")
         self.resolve_stream_timeout = _positive_seconds(resolve_stream_timeout, "invalid resolve stream timeout")
@@ -469,7 +493,7 @@ class JobWorker(_StreamWorker):
             user = str(payload.get("from_user") or payload.get("user") or "")
             if result.download is not None:
                 await self._notify(job_id, "success_notice", owner, deadline, user,
-                                   f"下载成功：{result.download.relative_path}")
+                                   _success_text(result.download))
                 return result
             await self._finish_failure(job_id, payload, candidate, owner, deadline, result, user)
             return result
@@ -559,7 +583,8 @@ class JobWorker(_StreamWorker):
                 request_id=str(payload["request_id"]), query=str(payload.get("query") or candidate.title),
                 refresh=self._guarded_refresh(job_id, owner, deadline),
                 resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
-                health_timeout=self.health_timeout, language=language, **reserved)
+                health_timeout=self.health_timeout, language=language,
+                verify_duration=self.verify_duration, **reserved)
         except asyncio.CancelledError:
             await guard.uncertain_quietly(lease, "download_cancelled")
             raise
@@ -595,7 +620,8 @@ class JobWorker(_StreamWorker):
             refresh=self._guarded_refresh(job_id, owner, deadline),
             resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
             health_timeout=self.health_timeout, reservation=record, artifact_store=self.state,
-            owner=owner, fence=record.fence, language=_recorded_language(record))
+            owner=owner, fence=record.fence, language=_recorded_language(record),
+            verify_duration=self.verify_duration)
         if result.download is None:
             raise EffectUncertain(result.download_error or "artifact_uncertain")
         return result
@@ -643,7 +669,8 @@ class JobWorker(_StreamWorker):
             return
         await self._notify(job_id, "selection_prompt", owner, deadline, user,
                            selection_message(str(payload.get("query") or ""), refreshed.candidates,
-                                             max_items=self.max_results, notice=FALLBACK_NOTICE))
+                                             max_items=self.max_results,
+                                             notice=self._refreshed_notice(result)))
 
     async def _rebind(self, job_id: str, payload: dict[str, Any], refreshed, owner: str, deadline: float,
                       user: str, corp_id: str) -> str | None:
@@ -671,8 +698,23 @@ class JobWorker(_StreamWorker):
         return token
 
     @staticmethod
+    def _refusal(result) -> str | None:
+        """The words a person can act on, when the reason is one they can act on."""
+        return REFUSAL_TEXT.get(result.download_error or result.refresh_error or "")
+
+    @staticmethod
     def _failure_text(result) -> str:
-        return f"下载失败，已重试：{result.download_error or result.refresh_error or 'unknown'}"
+        code = result.download_error or result.refresh_error or "unknown"
+        return JobWorker._refusal(result) or f"下载失败，已重试：{code}"
+
+    @staticmethod
+    def _refreshed_notice(result) -> str:
+        """The line above a refreshed list: why the first answer is gone.
+
+        A refusal a person can act on keeps its own words here too, so offering
+        a second list never swallows the reason the first one failed.
+        """
+        return JobWorker._refusal(result) or FALLBACK_NOTICE
 
     async def _notify(self, job_id: str, effect: str, owner: str, deadline: float, user: str, text: str) -> None:
         """Send one bounded WeCom notice under its own fence; never resend an uncertain send."""

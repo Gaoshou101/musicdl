@@ -14,6 +14,11 @@ _DOWNLOAD_CODES = frozenset({
     "invalid_max_bytes", "invalid_chunk", "file_too_large", "download_failed", "empty_download",
     "size_mismatch", "unsupported_extension", "signature_mismatch", "extension_mismatch",
     "mime_mismatch", "path_escape", "path_too_long", "artifact_uncertain", "media_url_denied", "media_host_denied",
+    # ``incomplete_audio`` refuses a preview or a stream that stopped early;
+    # ``duration_unverified`` records an accepted download whose length could
+    # not be checked, and ``invalid_verify_duration`` refuses a policy this
+    # build does not know.
+    "incomplete_audio", "duration_unverified", "invalid_verify_duration",
     "media_dns_failed", "media_address_denied", "media_connect_failed", "media_tls_failed",
     "media_timeout", "media_redirect_denied", "media_response_invalid",
 })
@@ -166,6 +171,11 @@ class DownloadResult:
     media_type: str
     extension: str
     language: Language
+    # What the delivered bytes really measure, and the rate they really
+    # carried.  Both stay ``None`` when the container could not be read, so a
+    # caller that shows them never repeats a channel's claim as a measurement.
+    duration_seconds: float | None = None
+    bitrate_kbps: int | None = None
 
 
 @dataclass(frozen=True)

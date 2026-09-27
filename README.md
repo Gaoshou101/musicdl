@@ -280,6 +280,7 @@ The administration panel is the preferred place to manage runtime settings. Envi
 | `MUSICDL_ADMIN__COOKIE_SECURE` | Whether administrator cookies require HTTPS; defaults to `true`, set `false` only for trusted host-local HTTP access via loopback |
 | `MUSICDL_IMAGE_TAG` | Docker image version used by `compose.quick.yaml` and `compose.prod.yaml`; lite builds both images from source |
 | `MUSICDL_DEPLOYMENT_MODE` | `lite` is set by `compose.lite.yaml`; other manifests use the default `full` mode |
+| `MUSICDL_MEDIA__VERIFY_DURATION` | How a finished download is checked against the catalogue duration: `lenient` (default) refuses a preview or a half-length file when both lengths are known and accepts what it cannot measure, recording a `duration_unverified` event; `strict` refuses what it cannot measure |
 | `MUSICDL_AI__ENABLED` | Enable optional OpenAI-compatible advisory features |
 | `MUSICDL_AI__BASE_URL` | OpenAI-compatible API endpoint |
 | `MUSICDL_AI__API_KEY` | API credential; keep it outside source control |

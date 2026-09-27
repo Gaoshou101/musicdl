@@ -88,6 +88,7 @@ class _AdminState:
                                                runtime=lambda: getattr(app.state, "runtime", None),
                                                reloader=lambda: getattr(app.state, "reload_runtime", None),
                                                media_root=settings.media.root,
+                                               verify_duration=settings.media.verify_duration,
                                                worker=settings.worker))
         app.add_middleware(CSRFMiddleware, auth=self.auth)
 
@@ -392,6 +393,7 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                                job_ttl=worker_settings.job_ttl,
                                retry_window_seconds=worker_settings.retry_window_seconds,
                                max_attempts=worker_settings.max_attempts,
+                               verify_duration=settings.media.verify_duration,
                                selection_ttl=settings.wecom.selection_ttl)
     return _Runtime(redis=redis, state=state, service=service, wecom=wecom,
                     plugin_client=plugin_client, transport=transport, registry=registry,

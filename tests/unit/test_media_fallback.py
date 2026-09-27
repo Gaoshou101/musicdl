@@ -68,7 +68,9 @@ def test_success_does_not_enter_fallback(tmp_path):
     assert outcome.failed_source_id is None
     assert calls == []
     assert source.health_calls == 0
-    assert [(e.stage, e.status) for e in events] == [("download", "success")]
+    # No playing time was stated or measurable, so lenient mode records the
+    # gap and still delivers the file.
+    assert [(e.stage, e.status) for e in events] == [("duration", "unverified"), ("download", "success")]
 
 
 def test_failure_refreshes_once_excludes_source_and_checks_health(tmp_path):

@@ -391,6 +391,8 @@ const DETAIL_TEXT: Record<string, string> = {
   empty_download: '音源返回了空文件',
   file_too_large: '音频文件超过体积上限',
   size_mismatch: '下载体积与音源声明的不一致',
+  incomplete_audio: '取到的是试听片段或文件不完整，请换一个音源',
+  duration_unverified: '未能校验音频时长，已按原样保存',
   unsupported_extension: '音频扩展名不受支持',
   signature_mismatch: '文件内容与扩展名不符',
   extension_mismatch: '文件内容与扩展名不符',

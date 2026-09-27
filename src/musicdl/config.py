@@ -39,6 +39,12 @@ class RedisSettings(BaseModel):
 class MediaSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     root: str = "/data/music"
+    # ``lenient`` accepts a finished download whose length could not be checked
+    # and records ``duration_unverified``; ``strict`` refuses the same file.
+    # The default is deliberately unlike the upstream policy: many supplied lx
+    # sources never state a duration, so failing closed would refuse them
+    # wholesale.
+    verify_duration: Literal["lenient", "strict"] = "lenient"
 
 
 class TelegramSettings(BaseModel):

@@ -76,6 +76,7 @@ const ERROR_TEXT: Record<string, string> = {
   search_error: '搜索失败',
   search_invalid: '返回内容不合法',
   download_failed: '取不到音频',
+  incomplete_audio: '试听片段或文件不完整',
   media_timeout: '下载超时',
   health_failed: '探活失败',
   refresh_failed: '刷新失败',
