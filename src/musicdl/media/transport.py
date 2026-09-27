@@ -291,7 +291,8 @@ class SecureMediaTransport:
         return value
 
     async def _fetch_hop(self, url: str, egress: EgressPolicy, deadline: float, *,
-                         method: str = "GET", range_probe: bool = False) -> _Hop:
+                         method: str = "GET", range_probe: bool = False,
+                         guard: Callable[[], None] | None = None) -> _Hop:
         """Open one hop and read nothing past its status line and headers.
 
         The caller owns the returned handles on success; every failure path
@@ -359,6 +360,13 @@ class SecureMediaTransport:
                            + "Connection: close\r\n\r\n").encode("ascii")
                 wrapped.sendall(request)
 
+            if guard is not None:
+                # The descriptor's stated instant is asked again here, with
+                # DNS done and the socket ready to write: the address lookup
+                # and the handshake are the two steps that can outlast the
+                # door check and still put a request on the wire for a link
+                # the source has withdrawn.
+                guard()
             await run(send_request, deadline)
             try:
                 response = await self._run_acquire(lambda: self.response_factory(wrapped), deadline)
@@ -431,7 +439,7 @@ class SecureMediaTransport:
             url = media.url
             for redirects in range(self.max_redirects + 1):
                 refuse_expired()
-                hop = await self._fetch_hop(url, egress, deadline)
+                hop = await self._fetch_hop(url, egress, deadline, guard=refuse_expired)
                 response, wrapped, raw = hop.response, hop.wrapped, hop.raw
                 if not 300 <= hop.status < 400:
                     break
@@ -526,6 +534,11 @@ class SecureMediaTransport:
                             raise
                         except (OSError, http.client.HTTPException, ValueError) as exc:
                             raise MediaTransportError("media_response_invalid") from exc
+                        # Even the last read can begin while the URL is live
+                        # and return after the instant has passed, so the
+                        # bytes it produced are neither yielded nor answered
+                        # as a finished transfer.
+                        refuse_expired()
                         if not chunk:
                             break
                         observed += len(chunk)

@@ -90,16 +90,24 @@ def test_quality_switch_is_bounded_and_retains_obtainable_audio(tmp_path, altern
         assert alternate.closed == 1
 
 
-def test_unknown_actual_quality_never_asserts_downgrade(tmp_path):
+def test_a_source_that_states_no_tier_is_judged_by_the_bytes_it_sent(tmp_path):
+    """An unstated tier is not evidence of a downgrade; the verified file is.
+
+    The source answers a lossless request with no tier at all and sends MP3
+    bytes.  Nothing is retried -- the alternate-source switch is only ever
+    triggered by a tier the source itself declared -- but the report still
+    says the lossless request was not answered with lossless audio, because
+    the verdict is read off the container the bytes proved.
+    """
     source = AudioSource(None)
     async def refresh(*args):
-        pytest.fail('unknown is not evidence of downgrade')
+        pytest.fail('an unstated tier is not evidence of downgrade')
     result = asyncio.run(download_with_fallback(lossless_candidate(), {'source': source}, tmp_path,
         request_id='r', query='Song', refresh=refresh, quality='flac'))
-    assert not result.download.quality_downgraded
-    # ``quality`` keeps its one meaning -- the tier the source stated -- because
-    # the downgrade verdict is read off stated tiers only.  The tier that really
-    # arrived is named separately, so the report is never emptier than the file.
+    assert result.download.quality_downgraded
+    # ``quality`` keeps its one meaning -- the tier the source stated -- while
+    # the tier that really arrived is named separately, so the report is never
+    # emptier than the file.
     assert result.download.quality is None
     assert result.download.actual_quality == 'mp3'
     assert result.download.extension == '.mp3'
@@ -152,6 +160,9 @@ def test_a_label_the_verified_container_contradicts_never_reaches_the_report(tmp
     assert delivered[0].actual_quality == 'mp3'
     assert result.download.actual_quality == 'mp3'
     assert result.download.extension == '.mp3'
+    # The source labelled the answer lossless and the file is not, so the
+    # downgrade verdict follows the bytes rather than the label.
+    assert result.download.quality_downgraded
     # ``quality`` keeps the tier the source claimed; only the reconciliation
     # onto the verified container is new.
     assert result.download.quality == 'flac'
@@ -256,6 +267,33 @@ def test_a_replay_reconciles_a_stored_label_with_the_bytes_on_disk(tmp_path):
     assert replayed.download.relative_path.suffix == '.mp3'
     assert replayed.download.actual_quality == 'mp3'
     assert replayed.download.quality == 'mp3'
+
+
+def test_a_replay_re_derives_the_downgrade_from_the_artifact(tmp_path):
+    """A stored verdict cannot outlive the bytes it was written about.
+
+    The record was written when the label said ``flac``; the artifact on disk
+    is MP3.  The replay reports what the file is, so the stale ``False`` does
+    not reach the report.
+    """
+    from test_worker_job import Redis, State, WeCom
+    from musicdl.worker.workers import JobWorker
+    state, wecom = State(), WeCom()
+    original, alternate = AudioSource(), AudioSource()
+    async def refresh(query, excluded):
+        return SearchResult((lossless_candidate('alternate'),), (), 'v', (('alternate',),))
+    worker = JobWorker(Redis(), wecom, {'source': original, 'alternate': alternate}, str(tmp_path),
+                       state=state, refresh=refresh)
+    job = {'request_id': 'r', 'from_user': 'u', 'candidate': lossless_candidate().model_dump(mode='json')}
+    async def scenario():
+        await worker.handle_job(job, job_id='quality-1')
+        return await worker._replay_download('quality-1', job, lossless_candidate(), 'u',
+                                             asyncio.get_running_loop().time() + 5,
+                                             outcome={'requested_quality': 'flac', 'actual_quality': 'flac',
+                                                      'quality_downgraded': False})
+    replayed = asyncio.run(scenario())
+    assert replayed.download.actual_quality == 'mp3'
+    assert replayed.download.quality_downgraded
 
 
 @pytest.mark.parametrize('policy,preference,expected', [

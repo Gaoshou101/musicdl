@@ -131,7 +131,7 @@ async def download_with_fallback(
                                             downloaded = await stream(sources[alternate.source_id], alternate,
                                                                       alternate_quality, alternate_metadata)
                                             return replace(downloaded,
-                                                           quality_downgraded=proven_lossy(downloaded.quality))
+                                                           quality_downgraded=proven_lossy(downloaded.actual_quality))
                                     finally:
                                         await _close_metadata(alternate_metadata)
                         except MediaError as exc:
@@ -145,8 +145,11 @@ async def download_with_fallback(
                     # have re-resolved an answer whose URL had died, and the
                     # file that comes back then is the fresh one: a source that
                     # answered 320k, retired that URL, and answered FLAC on the
-                    # second resolve has downgraded nothing.
-                    return replace(downloaded, quality_downgraded=proven_lossy(downloaded.quality))
+                    # second resolve has downgraded nothing.  The tier read here
+                    # is the one the report prints -- the source's label while the
+                    # verified container can carry it, the container otherwise --
+                    # so a label the file contradicts cannot hide a downgrade.
+                    return replace(downloaded, quality_downgraded=proven_lossy(downloaded.actual_quality))
                 finally:
                     await _close_metadata(metadata)
 

@@ -14,7 +14,8 @@ from musicdl.ai.models import AIRankResult
 from musicdl.config import REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS
 from musicdl.media.fallback import download_with_fallback
 from musicdl.media.download import source_download
-from musicdl.sources.quality import QUALITY_REVISION, requested_quality, served_quality
+from musicdl.sources.quality import (QUALITY_REVISION, is_lossless, proven_lossy, requested_quality,
+                                     served_quality)
 from musicdl.media.language import resolve_language
 from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, MediaError
 from musicdl.sources.models import Candidate
@@ -648,7 +649,9 @@ class JobWorker(_StreamWorker):
                        actual_quality=actual_quality,
                        requested_quality=(outcome.get("requested_quality")
                                           or result.download.requested_quality),
-                       quality_downgraded=bool(outcome.get("quality_downgraded", False)),
+                       quality_downgraded=(is_lossless(outcome.get("requested_quality")
+                                                       or result.download.requested_quality)
+                                           and proven_lossy(actual_quality)),
                        quality_revision=int(outcome.get("quality_revision") or 0)))
 
     def _guarded_sources(self, job_id: str, owner: str, deadline: float) -> dict:

@@ -474,6 +474,112 @@ def test_transport_refuses_a_url_that_dies_before_its_body_is_read(monkeypatch):
     error_code(instance.open(live, policy=("xn--tst-qla.example",)), "media_url_expired")
 
 
+def test_transport_asks_again_after_dns_before_the_request_is_written(monkeypatch):
+    """The instant is asked again with the address resolved, before the write.
+
+    DNS and the handshake happen after the door check, so a link can be retired
+    between the two.  Nothing is written to the socket in that case, which is
+    what the caller needs to tell a withdrawn link from a served one.
+    """
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, _tls, seen = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    # Live at the door, dead by the time the address is known.
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: "resolve" in seen)
+    error_code(instance.open(live, policy=("xn--tst-qla.example",)), "media_url_expired")
+    assert sock.sent == b""
+
+
+def test_transport_stops_a_body_read_that_only_finishes_after_the_expiry(monkeypatch):
+    """A blocking read is asked about after it returns, not only before it starts.
+
+    The read begins while the URL is live and returns its bytes after the
+    instant has passed, so the chunk it produced is not handed over: only the
+    head that was read to classify the body reaches the caller.
+    """
+    body = ID3_BODY + b"\x00" * 4000
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: "
+           + str(len(body)).encode() + b"\r\n\r\n" + body)
+    instance, _sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    state = {"reads": 0, "expired": False}
+    factory = instance.response_factory
+
+    class LateRead:
+        """Counts the body reads and lets the second one outlive the instant."""
+
+        def __init__(self, fp):
+            self._inner = factory(fp)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def read(self, *args):
+            value = self._inner.read(*args)
+            state["reads"] += 1
+            if state["reads"] == 2:
+                state["expired"] = True
+            return value
+
+    instance.response_factory = LateRead
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: state["expired"])
+    metadata = asyncio.run(instance.open(live, policy=("xn--tst-qla.example",)))
+
+    async def read():
+        delivered = 0
+        with pytest.raises(MediaError, match="media_url_expired"):
+            async for _chunk in metadata.chunks:
+                delivered += 1
+        return delivered
+
+    assert asyncio.run(read()) == 1
+
+
+def test_transport_refuses_an_eof_read_that_only_finishes_after_the_expiry(monkeypatch):
+    """A transfer is not finished on a link that was retired while it read.
+
+    The last read returns end-of-body after the instant has passed.  The bytes
+    may be complete, but the URL is not, so the caller gets the same refusal and
+    re-resolves instead of being told the withdrawn link delivered a file.
+    """
+    body = ID3_BODY
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: "
+           + str(len(body)).encode() + b"\r\n\r\n" + body)
+    instance, _sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    state = {"expired": False}
+    factory = instance.response_factory
+
+    class LateEof:
+        def __init__(self, fp):
+            self._inner = factory(fp)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def read(self, *args):
+            value = self._inner.read(*args)
+            if value == b"":
+                state["expired"] = True
+            return value
+
+    instance.response_factory = LateEof
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: state["expired"])
+    metadata = asyncio.run(instance.open(live, policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    with pytest.raises(MediaError, match="media_url_expired"):
+        asyncio.run(read())
+
+
 def test_transport_stops_a_body_whose_url_dies_mid_stream(monkeypatch):
     """The read that would extend the transfer asks again and refuses.
 
