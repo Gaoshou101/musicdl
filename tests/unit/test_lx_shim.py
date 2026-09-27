@@ -185,6 +185,7 @@ def test_resolve_uses_only_candidate_supported_quality_and_its_own_declared_size
     assert step.response.ok, step.response.error
     assert step.response.result["quality"] == used
     assert step.response.result["declared_size"] == size
+    assert step.response.result["size_is_advisory"] is True
 
 
 @requires_deno
@@ -194,7 +195,7 @@ def test_resolve_maps_a_candidate_back_into_the_sources_own_id():
     assert step.response.result == {"candidate_id": "lx:qsvip:42",
                                     "url": "https://cdn.zhihu.example/42/song.mp3",
                                     "extension": "mp3", "media_type": "audio/mpeg", "declared_size": None,
-                                    "quality": "320k"}
+                                    "size_is_advisory": False, "quality": "320k"}
 
 
 DIRECT_LINK_SOURCE = """

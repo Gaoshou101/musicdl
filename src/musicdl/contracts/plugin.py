@@ -10,7 +10,9 @@ from urllib.parse import urlsplit
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator,
+)
 
 PROTOCOL = "musicdl.plugin/v1"
 Operation = Literal["capabilities", "search", "resolve", "download", "health"]
@@ -158,6 +160,15 @@ class ResolvedMedia(BaseModel):
     extension: ResolvedExtension
     media_type: StrictStr
     declared_size: StrictInt | None = Field(default=None, ge=0, le=RESOLVED_MEDIA_MAX_BYTES)
+    # A size the source itself states is a reference, not a contract: measured
+    # 2026-09-27, one QQ Music FLAC answer carried 15 bytes more than the
+    # `_types[quality].size` entry its source repeats.  An advisory size still
+    # refuses a body that never reaches it (that is what an incomplete file
+    # looks like) but never refuses a longer one, and the transport then records
+    # the length the server really sent.  A size the main process observed
+    # itself, in the response's own `Content-Length`, is authoritative and stays
+    # an exact equality -- one byte more is still a refusal.
+    size_is_advisory: StrictBool = False
     quality: StrictStr | None = Field(default=None, max_length=16, pattern=r"^[A-Za-z0-9_+-]{1,16}$")
 
     @field_validator("url", mode="before")
