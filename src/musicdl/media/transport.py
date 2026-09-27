@@ -25,7 +25,7 @@ MAX_RESPONSE_HEADER_FIELD_BYTES = 8 * 1024
 MAX_RESPONSE_HEADERS_BYTES = 64 * 1024
 # The response fields whose single reading this product acts on, so a repeat
 # has to agree with itself instead of being combined into a list.
-_SINGLE_VALUE_HEADERS = frozenset({"content-length", "location"})
+_SINGLE_VALUE_HEADERS = frozenset({"content-length", "content-range", "location"})
 # Enough bytes for every signature `detect_container` knows, except the one that
 # states its own length: an ISO base media file is a 4-byte size, `ftyp`, a
 # major brand, a minor version, and then the brand list -- 16 bytes before the
@@ -290,19 +290,25 @@ class SecureMediaTransport:
                     value += chunk
         return value
 
-    async def _fetch_hop(self, url: str, egress: EgressPolicy, deadline: float) -> _Hop:
+    async def _fetch_hop(self, url: str, egress: EgressPolicy, deadline: float, *,
+                         method: str = "GET", range_probe: bool = False) -> _Hop:
         """Open one hop and read nothing past its status line and headers.
 
         The caller owns the returned handles on success; every failure path
         closes whatever this hop already acquired, so a redirect chain that
         ends in a refusal leaves no socket behind.
         """
+        if method not in {"GET", "HEAD"} or (range_probe and method != "GET"):
+            raise ValueError("invalid_probe_method")
+        # Probes keep their admission slot until blocking header operations
+        # drain, even after their caller has returned an unknown result.
+        run = self._run_acquire if method == "HEAD" or range_probe else self._run
         target = _target_for_url(url, egress)
         approved, port = target.host, target.port
         raw = wrapped = response = None
         try:
             try:
-                candidates = await self._run(
+                candidates = await run(
                     lambda: _resolve_global_addresses(self.resolver, approved, port), deadline)
             except ActionDenied as exc:
                 code = "media_address_denied" if exc.code == "address_denied" else "media_dns_failed"
@@ -346,13 +352,14 @@ class SecureMediaTransport:
                 setter = getattr(wrapped, "settimeout", None)
                 if setter is not None:
                     setter(max(0.001, remaining))
-                request = (f"GET {target.target} HTTP/1.1\r\nHost: {target.authority}\r\n"
+                request = (f"{method} {target.target} HTTP/1.1\r\nHost: {target.authority}\r\n"
                            "Accept: application/octet-stream\r\n"
                            "Accept-Encoding: identity\r\n"
-                           "Connection: close\r\n\r\n").encode("ascii")
+                           + ("Range: bytes=0-0\r\n" if range_probe else "")
+                           + "Connection: close\r\n\r\n").encode("ascii")
                 wrapped.sendall(request)
 
-            await self._run(send_request, deadline)
+            await run(send_request, deadline)
             try:
                 response = await self._run_acquire(lambda: self.response_factory(wrapped), deadline)
             except MediaError:
@@ -369,8 +376,8 @@ class SecureMediaTransport:
                     setter(max(0.001, remaining))
                 response.begin()
 
-            await self._run(begin_response, deadline)
-            headers, content_length, content_type = await self._run(
+            await run(begin_response, deadline)
+            headers, content_length, content_type = await run(
                 lambda: self._response_headers(response), deadline)
             return _Hop(target=target, status=int(getattr(response, "status", 0)), headers=headers,
                         content_length=content_length, content_type=content_type,

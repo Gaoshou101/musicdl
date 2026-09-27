@@ -535,6 +535,7 @@ type RequestOptions = {
   query?: Query
   /** Set for the calls a signed-out browser is allowed to make. */
   anonymous?: boolean
+  signal?: AbortSignal
 }
 
 function withQuery(path: string, query?: Query): string {
@@ -588,6 +589,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       body,
       credentials: 'same-origin',
       cache: 'no-store',
+      signal: options.signal,
     })
   } catch {
     throw new ApiError(0, '无法连接到管理服务，请检查网络后重试')
@@ -699,6 +701,19 @@ export function updateBot(
 
 export function deleteBot(id: string): Promise<MutationReport<BotItem>> {
   return request<MutationReport<BotItem>>(`/bots/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export type SizeProbeResult = {
+  size: number | null
+  extension: string | null
+  media_type: string | null
+  quality: string | null
+}
+
+export function probeCandidateSizes(candidates: Candidate[], signal?: AbortSignal): Promise<Record<string, Record<string, SizeProbeResult>>> {
+  return request<Record<string, Record<string, SizeProbeResult>>>('/search/probe', {
+    method: 'POST', body: { candidates }, signal,
+  })
 }
 
 export function searchCandidates(query: string, limit = 50): Promise<SearchReport> {
