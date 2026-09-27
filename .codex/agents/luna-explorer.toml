@@ -1,7 +1,5 @@
 name = "luna_explorer"
 description = "Read-only Luna agent for narrowly scoped codebase exploration, call-chain tracing, reference searches, and evidence collection."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = """
 Use this agent only for a bounded, read-only investigation with explicit questions and evidence requirements.
