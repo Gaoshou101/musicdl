@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from musicdl.contracts.plugin import PluginManifest, PluginRequest, PluginResponse, ResolvedMedia
-from musicdl.media.models import DownloadMetadata
+from musicdl.media.models import DownloadMetadata, MediaError
 from musicdl.plugins.store import StoredPlugin
 from musicdl.plugins.source import PluginSource
 from musicdl.sources.models import Candidate
@@ -28,13 +28,15 @@ class ResolveClient:
         self.timeout = 30.0
         self.operations = []
         self.resolve_timeouts = []
+        self.qualities = []
         self.health_timeouts = []
 
     async def invoke(self, stored, request):
         self.operations.append(request.operation)
         raise AssertionError(f"operation {request.operation} must not be invoked")
 
-    async def resolve(self, stored, candidate, *, timeout_ms=None):
+    async def resolve(self, stored, candidate, *, timeout_ms=None, quality=None):
+        self.qualities.append(quality)
         self.resolve_timeouts.append(timeout_ms)
         if self.resolve_error is not None:
             raise self.resolve_error
@@ -57,8 +59,9 @@ class FakeTransport:
         return self.metadata
 
 
-def descriptor(candidate_id="1", url="https://cdn.example/song.mp3"):
-    return ResolvedMedia(candidate_id=candidate_id, url=url, extension="mp3", media_type="audio/mpeg")
+def descriptor(candidate_id="1", url="https://cdn.example/song.mp3", expires_at=None):
+    return ResolvedMedia(candidate_id=candidate_id, url=url, extension="mp3", media_type="audio/mpeg",
+                         expires_at=expires_at)
 
 
 def selected():
@@ -166,3 +169,70 @@ def test_health_returns_valid_false_and_raises_stable_failure(tmp_path):
     failing = ResolveClient(health_error=RuntimeError("plugin_health_failed"))
     with pytest.raises(RuntimeError, match="plugin_health_failed"):
         asyncio.run(PluginSource(p, failing, FakeTransport()).health())
+
+
+@pytest.mark.parametrize("quality", [None, "flac", "320k"])
+def test_source_propagates_optional_quality(tmp_path, quality):
+    client = ResolveClient(descriptor=descriptor())
+    transport = FakeTransport(DownloadMetadata(()))
+    asyncio.run(PluginSource(plugin(tmp_path), client, transport).download(selected(), quality=quality))
+    assert client.qualities == [quality]
+    assert transport.calls[0][0].quality is None
+
+
+class SequenceResolveClient(ResolveClient):
+    """A resolve client that answers a different descriptor every time it is asked."""
+
+    def __init__(self, descriptors):
+        super().__init__()
+        self.descriptors = list(descriptors)
+
+    async def resolve(self, stored, candidate, *, timeout_ms=None, quality=None):
+        self.qualities.append(quality)
+        self.resolve_timeouts.append(timeout_ms)
+        return self.descriptors.pop(0)
+
+
+RETIRED = "2000-01-01T00:00:00Z"
+
+
+def test_download_never_opens_a_descriptor_the_source_already_retired(tmp_path):
+    """A retired URL is resolved again, and a second retired answer ends the attempt."""
+    p = plugin(tmp_path, hosts=("cdn.example",))
+    transport = FakeTransport(metadata=DownloadMetadata(chunks=()))
+    client = ResolveClient(descriptor=descriptor(expires_at=RETIRED))
+    source = PluginSource(p, client, transport, resolve_stream_timeout_ms=15000)
+
+    with pytest.raises(MediaError) as caught:
+        asyncio.run(source.download(selected()))
+    assert caught.value.code == "media_url_expired"
+    assert transport.calls == []
+    assert len(client.resolve_timeouts) == 2
+    assert 0 < client.resolve_timeouts[1] <= client.resolve_timeouts[0] <= 15000
+
+
+def test_download_streams_the_fresh_answer_after_the_first_one_expired(tmp_path):
+    """The live second answer is what reaches the transport, under one shrinking budget."""
+    p = plugin(tmp_path, hosts=("cdn.example",))
+    metadata = DownloadMetadata(chunks=())
+    transport = FakeTransport(metadata=metadata)
+    fresh = descriptor(url="https://cdn.example/fresh.mp3")
+    client = SequenceResolveClient([descriptor(expires_at=RETIRED), fresh])
+    source = PluginSource(p, client, transport, resolve_stream_timeout_ms=15000)
+
+    assert asyncio.run(source.download(selected())) is metadata
+    assert len(transport.calls) == 1 and transport.calls[0][0] == fresh
+    assert len(client.resolve_timeouts) == 2
+    assert 0 < client.resolve_timeouts[1] <= client.resolve_timeouts[0] <= 15000
+
+
+def test_download_without_a_stated_expiry_resolves_once(tmp_path):
+    """An unstated lifetime is never treated as expired, so nothing resolves twice."""
+    p = plugin(tmp_path, hosts=("cdn.example",))
+    metadata = DownloadMetadata(chunks=())
+    transport = FakeTransport(metadata=metadata)
+    client = ResolveClient(descriptor=descriptor())
+    source = PluginSource(p, client, transport, resolve_stream_timeout_ms=15000)
+
+    assert asyncio.run(source.download(selected())) is metadata
+    assert len(client.resolve_timeouts) == 1 and len(transport.calls) == 1

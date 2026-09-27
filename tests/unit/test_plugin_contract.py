@@ -274,6 +274,7 @@ def test_resolved_media_accepts_supported_descriptor_formats(extension, media_ty
         "declared_size": 123,
         "quality": None,
         "size_is_advisory": False,
+        "expires_at": None,
     }
 
 
@@ -370,12 +371,29 @@ def test_resolved_media_rejects_invalid_declared_sizes(declared_size):
         _resolved_media(declared_size=declared_size)
 
 
-def test_resolved_media_is_frozen_and_uses_only_the_six_contract_fields():
+def test_resolved_media_is_frozen_and_uses_only_the_eight_contract_fields():
     media = _resolved_media()
 
     with pytest.raises(ValidationError):
         media.extension = "flac"
-    assert set(media.model_dump()) == {"candidate_id", "url", "extension", "media_type", "declared_size", "quality", "size_is_advisory"}
+    assert set(media.model_dump()) == {
+        "candidate_id", "url", "extension", "media_type", "declared_size", "quality",
+        "size_is_advisory", "expires_at"}
+
+
+def test_resolved_media_keeps_only_an_absolute_expiry_instant():
+    # A stated lifetime rides along; anything that is not an absolute instant
+    # is refused outright rather than silently read as "no lifetime".
+    from musicdl.contracts.plugin import ResolvedMedia
+
+    assert _resolved_media(expires_at="2026-09-28T01:02:03Z").expires_at == "2026-09-28T01:02:03Z"
+    # One canonical spelling, so an offset and its UTC equivalent compare equal.
+    assert _resolved_media(expires_at="2026-09-28T09:02:03+08:00").expires_at == "2026-09-28T01:02:03Z"
+    assert _resolved_media(expires_at=None).expires_at is None
+    assert _resolved_media(expires_at="").expires_at is None
+    for value in ("soon", "2026-09-28T01:02:03", "2026-09-28", 12345, "x" * 33):
+        with pytest.raises(ValidationError):
+            _resolved_media(expires_at=value)
 
 
 @pytest.mark.parametrize("quality", ["", "bad value", "quality!", "q" * 17])

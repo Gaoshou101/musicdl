@@ -1,7 +1,7 @@
 import asyncio, json, time, pytest
 from types import SimpleNamespace
 from test_wecom_state import ID3, ScriptRedis, Source, playable_metadata
-from musicdl.media.models import FallbackResult
+from musicdl.media.models import FallbackResult, DownloadResult
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
 from musicdl.wecom.state import RedisStateStore
@@ -308,8 +308,7 @@ def refresh_result(count=1,version="v2"):
                         statuses=(),version=version)
 
 def ok_download():
-    return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3", extension="mp3", media_type="audio/mpeg", size_bytes=1024),download_error=None,
-                           refresh_error=None,refreshed=None)
+    return FallbackResult(download=DownloadResult("Song.mp3", "a" * 64, 1024, "audio/mpeg", "mp3", "未知"))
 
 def test_job_claims_the_download_effect_and_reserves_before_the_source_call(monkeypatch,tmp_path):
     st=State(); seen={}
@@ -587,3 +586,41 @@ def test_a_prepared_reservation_takes_priority_over_the_shared_language_resolver
                        language_advisor=lambda _candidate: "华语")
 
     assert run(worker._download_language("job-1", cand())) == "日韩"
+
+
+def published_artifact(state, job_id="1-0"):
+    """A finished download whose bytes are already on disk, as a replay finds them."""
+    state.script.hashes[f"{{tenant}}:artifact:{job_id}"] = {
+        "job_id": job_id, "candidate_id": "id",
+        "temporary_relative_path": ".musicdl-staging/a.1.part",
+        "target_relative_path": "未知/Artist/Song.mp3",
+        "allocation_slot": "1", "extension": ".mp3", "media_type": "audio/mpeg", "size_bytes": "10",
+        "sha256": "a" * 64, "owner": "earlier", "fence": "1", "state": "published"}
+
+
+def test_replay_of_a_record_without_a_quality_revision_reports_revision_zero(monkeypatch):
+    """A record written before this verifier existed must not look like it passed it."""
+    st = State()
+    seed_effect(st, "1-0", "download", owner="earlier", fence=1, result='{"ok":true}')
+    published_artifact(st)
+    async def download(candidate, sources, root, **kwargs):
+        return ok_download()
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", download)
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=st, refresh=lambda *a: None)
+    result = run(worker.handle_job(job_payload(), job_id="1-0"))
+    assert result.download.quality_revision == 0
+
+
+def test_replay_repeats_the_quality_verdict_the_record_holds(monkeypatch):
+    """Both tiers and the revision that verified them survive a replay unchanged."""
+    st = State()
+    seed_effect(st, "1-0", "download", owner="earlier", fence=1,
+                result='{"ok":true,"requested_quality":"flac","actual_quality":"320k","quality_revision":7}')
+    published_artifact(st)
+    async def download(candidate, sources, root, **kwargs):
+        return ok_download()
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", download)
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=st, refresh=lambda *a: None)
+    result = run(worker.handle_job(job_payload(), job_id="1-0"))
+    assert (result.download.requested_quality, result.download.actual_quality) == ("flac", "320k")
+    assert result.download.quality_revision == 7

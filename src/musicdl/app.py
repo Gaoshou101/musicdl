@@ -375,16 +375,22 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
         """
         excluded = set(failed_source_ids or ())
         return await search_sources(SourceRegistry(e for e in entries if e.source_id not in excluded),
-                                     query, timeout=search_timeout, preference=preference)
+                                     query, timeout=search_timeout, preference=preference,
+                                     quality_policy=worker_settings.quality_policy,
+                                     quality_preference=worker_settings.quality_preference)
 
     message_worker = job_worker = None
     if settings.wecom.enabled:
         message_worker = MessageWorker(redis, registry, wecom, state=state, ai_ranker=ranker,
+                                       quality_policy=worker_settings.quality_policy,
+                                       quality_preference=worker_settings.quality_preference,
                                        search_timeout=search_timeout,
                                        selection_ttl=settings.wecom.selection_ttl)
         job_worker = JobWorker(redis, wecom, sources=resolvers, media_root=settings.media.root, state=state,
                                refresh=refresh, job_timeout=worker_settings.job_timeout,
                                language_advisor=language_advisor,
+                               quality_policy=worker_settings.quality_policy,
+                               quality_preference=worker_settings.quality_preference,
                                resolve_stream_timeout=worker_settings.resolve_stream_timeout,
                                refresh_timeout=worker_settings.search_timeout,
                                health_timeout=worker_settings.health_timeout,

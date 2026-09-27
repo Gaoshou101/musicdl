@@ -34,8 +34,8 @@ LOGIN = {"username": "operator", "password": "new-password"}
 class Source:
     """An lx-shaped source: it answers search with one hit and streams it back."""
 
-    def __init__(self, source_id: str = "primary", version: str = "1.0.0") -> None:
-        self.source_id, self.version = source_id, version
+    def __init__(self, source_id: str = "primary", version: str = "1.0.0", quality: str | None = None) -> None:
+        self.source_id, self.version, self.quality = source_id, version, quality
         self.queries: list[str] = []
         self.downloaded: list[str] = []
 
@@ -54,7 +54,8 @@ class Source:
             return None
 
         return DownloadMetadata(chunks=chunks(), extension="mp3", media_type="audio/mpeg",
-                                declared_size=len(AUDIO), _close_once=_CloseOnce(close))
+                                declared_size=len(AUDIO), quality=self.quality,
+                                _close_once=_CloseOnce(close))
 
 
 class Runtime:
@@ -66,8 +67,8 @@ class Runtime:
             self.language_advisor = language_advisor
 
 
-def build(tmp_path, *, wired: bool = True, language_advisor=None):
-    source = Source()
+def build(tmp_path, *, wired: bool = True, language_advisor=None, quality=None):
+    source = Source(quality=quality)
     auth, events = AdminAuth(), EventLogStore()
     auth.change_credentials("admin", "operator", "new-password")
     app = FastAPI()
@@ -173,6 +174,37 @@ def test_download_writes_the_artifact_below_the_media_root_and_serves_it_back(tm
     assert source.downloaded == ["1"]
     assert blocked.status_code == 403
     assert events.page()["items"][0]["source_id"] == "primary"
+
+
+def test_download_report_separates_the_tier_asked_for_from_the_tier_delivered(tmp_path):
+    """The panel report says which tier was requested and which one arrived."""
+    async def scenario():
+        app, source, _ = build(tmp_path, quality="320k")
+        async with client_for(app) as client:
+            token = await signed_in(client)
+            candidate = await first_candidate(client)
+            return await client.post("/admin/download", json={"candidate": candidate},
+                                     headers={"x-csrf-token": token})
+
+    payload = run(scenario()).json()
+    # The panel asks for whatever the channel itself prefers, so the request
+    # is empty; the answer is the tier the bytes really are, never an echo.
+    assert payload["requested_quality"] is None
+    assert payload["actual_quality"] == "320k"
+
+
+def test_download_report_names_the_container_when_no_tier_is_stated(tmp_path):
+    """A source that names no tier still produces a report as full as the file."""
+    async def scenario():
+        app, source, _ = build(tmp_path)
+        async with client_for(app) as client:
+            token = await signed_in(client)
+            candidate = await first_candidate(client)
+            return await client.post("/admin/download", json={"candidate": candidate},
+                                     headers={"x-csrf-token": token})
+
+    payload = run(scenario()).json()
+    assert payload["requested_quality"] is None and payload["actual_quality"] == "mp3"
 
 
 def test_download_uses_the_runtime_advisor_for_the_directory_and_response(tmp_path):

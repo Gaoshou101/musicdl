@@ -524,7 +524,8 @@ class SecureMediaTransport:
             reported_size = content_length if advisory_size is not None else exact_size
             return DownloadMetadata(chunks=chunks(), extension=extension,
                                     media_type=media_type, declared_size=reported_size,
-                                    _close_once=close_once)
+                                    _close_once=close_once, quality=media.quality,
+                                    expires_at=media.expires_at)
         except asyncio.CancelledError:
             if close_once is not None:
                 try:

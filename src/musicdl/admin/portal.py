@@ -697,7 +697,9 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                     "relative_path": str(result.relative_path).replace(os.sep, "/"),
                     "sha256": result.sha256, "size_bytes": result.size_bytes,
                     "media_type": result.media_type, "extension": result.extension,
-                    "language": getattr(result.language, "value", result.language)}
+                    "language": getattr(result.language, "value", result.language),
+                    "requested_quality": getattr(result, "requested_quality", None),
+                    "actual_quality": getattr(result, "actual_quality", None)}
 
         def failed(code: str) -> HTTPException:
             """The refusal to return, and one line for the service-log window.

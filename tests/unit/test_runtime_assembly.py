@@ -22,7 +22,7 @@ def _settings():
                               api_base="http://proxy.example:9080", selection_ttl=321),
         plugin=SimpleNamespace(service_url="http://plugin:8080", app_data_root="/data/app"),
         ai=SimpleNamespace(enabled=True, api_key=_Secret("ai-key"), model="test-model", timeout=3.0, max_candidates=10),
-        worker=SimpleNamespace(search_timeout=8.0, resolve_stream_timeout=15.0, health_timeout=5.0,
+        worker=SimpleNamespace(quality_policy="lossless_first", quality_preference=None, search_timeout=8.0, resolve_stream_timeout=15.0, health_timeout=5.0,
                                job_timeout=30.0, budget_slack_seconds=2.0, pending_idle_ms=32000,
                                job_ttl=172800, retry_window_seconds=86400, max_attempts=3),
     )
@@ -259,7 +259,7 @@ def test_build_runtime_shares_one_transport_and_client_across_every_source(runti
 
 def test_build_runtime_forwards_the_configured_worker_budgets(runtime_fakes):
     settings = _settings()
-    settings.worker = SimpleNamespace(search_timeout=6.5, resolve_stream_timeout=12.0, health_timeout=4.0,
+    settings.worker = SimpleNamespace(quality_policy="best_available", quality_preference="320k", search_timeout=6.5, resolve_stream_timeout=12.0, health_timeout=4.0,
                                       job_timeout=26.0, budget_slack_seconds=2.0, pending_idle_ms=28000,
                                       job_ttl=100000, retry_window_seconds=50000, max_attempts=2)
     _Store.plugins = (_Plugin("resolver", operations=("search", "resolve")),)
@@ -277,6 +277,9 @@ def test_build_runtime_forwards_the_configured_worker_budgets(runtime_fakes):
     assert runtime.job_worker.kwargs["job_ttl"] == 100000
     assert runtime.job_worker.kwargs["retry_window_seconds"] == 50000
     assert runtime.job_worker.kwargs["max_attempts"] == 2
+    assert runtime.job_worker.kwargs["quality_policy"] == "best_available"
+    assert runtime.job_worker.kwargs["quality_preference"] == "320k"
+    assert runtime.message_worker.kwargs["quality_policy"] == "best_available"
     assert runtime.job_worker.kwargs["selection_ttl"] == 321
     assert runtime.job_worker.kwargs["refresh"] is not None
     assert runtime.job_worker.kwargs["state"] is runtime.state
@@ -514,7 +517,8 @@ def test_build_runtime_publishes_the_refresh_and_preference_the_panel_downloads_
     assert runtime.preference is preference
     assert runtime.refresh is runtime.job_worker.kwargs["refresh"]
     asyncio.run(runtime.refresh("needle", frozenset()))
-    assert calls == [("needle", {"timeout": 8.0, "preference": preference})]
+    assert calls == [("needle", {"timeout": 8.0, "preference": preference,
+                                  "quality_policy": "lossless_first", "quality_preference": None})]
 
     default = runtime_fakes._build_runtime(_settings())
     assert default.preference is None and default.refresh is not None

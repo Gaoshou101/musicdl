@@ -280,10 +280,14 @@ The administration panel is the preferred place to manage runtime settings. Envi
 | `MUSICDL_ADMIN__COOKIE_SECURE` | Whether administrator cookies require HTTPS; defaults to `true`, set `false` only for trusted host-local HTTP access via loopback |
 | `MUSICDL_IMAGE_TAG` | Docker image version used by `compose.quick.yaml` and `compose.prod.yaml`; lite builds both images from source |
 | `MUSICDL_DEPLOYMENT_MODE` | `lite` is set by `compose.lite.yaml`; other manifests use the default `full` mode |
+| `MUSICDL_WORKER__QUALITY_POLICY` | Default `lossless_first`: prefer declared lossless tiers; lossless files can be much larger. `best_available` restores v1.0.4 selection behavior. |
+| `MUSICDL_WORKER__QUALITY_PREFERENCE` | Optional declared tier such as `flac` or `320k`; a supporting channel is preferred. Unsupported preferences fall back to lossless-first selection without an error. |
 | `MUSICDL_AI__ENABLED` | Enable optional OpenAI-compatible advisory features |
 | `MUSICDL_AI__BASE_URL` | OpenAI-compatible API endpoint |
 | `MUSICDL_AI__API_KEY` | API credential; keep it outside source control |
 | `MUSICDL_AI__MODEL` | Model identifier supplied to the compatible endpoint |
+
+Pass these worker variables into the application container's `environment`; a Compose `.env` entry alone is not automatically forwarded. A proven lossy response to a lossless request permits at most one alternate source attempt within the job budget. If lossless remains unavailable, the obtainable file is kept and its actual quality and size are shown; a proven downgrade is marked in the success notice.
 
 Most changes made in the panel rebuild the active runtime without restarting the container. Settings that affect startup boundaries may still require a restart.
 

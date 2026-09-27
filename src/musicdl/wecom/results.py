@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 
 from musicdl.media.models import DownloadResult
-from musicdl.sources.quality import format_bytes
+from musicdl.sources.quality import format_bytes, bitrate_kbps
 from musicdl.sources.models import Candidate, normalize_text
 
 
@@ -58,7 +58,11 @@ def _size(candidate: Candidate) -> str:
 def success_message(result: DownloadResult) -> str:
     """Describe the bytes actually downloaded, using their final container."""
     label = result.extension.lstrip(".").upper() or result.media_type
-    details = " · ".join(part for part in (label, format_bytes(result.size_bytes)) if part)
+    bitrate = bitrate_kbps(getattr(result, "quality", None))
+    if bitrate is not None:
+        label += f" {bitrate}kbps"
+    downgrade = "未取到无损" if getattr(result, "quality_downgraded", False) else ""
+    details = " · ".join(part for part in (label, format_bytes(result.size_bytes), downgrade) if part)
     return f"下载成功：{result.relative_path}（{details}）"
 
 

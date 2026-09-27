@@ -169,11 +169,8 @@ def test_search_extracts_only_ranked_quality_keys_and_truthful_size_format_value
 
 
 @requires_deno
-@pytest.mark.parametrize(("requested", "used", "size"), [
-    ("320k", "320k", 1_572_864),
-    ("unavailable", "flac24bit", 25_690_112),
-])
-def test_resolve_uses_only_candidate_supported_quality_and_its_own_declared_size(requested, used, size):
+@pytest.mark.parametrize("requested", ["320k", "unavailable"])
+def test_resolve_uses_only_candidate_supported_quality_and_its_own_declared_size(requested):
     candidate = {
         "source_id": "qsvip", "source_version": "1", "item_id": "lx:qsvip:42",
         "title": "晴天", "artist": "周杰伦", "qualities": ["320k", "flac24bit"],
@@ -183,9 +180,12 @@ def test_resolve_uses_only_candidate_supported_quality_and_its_own_declared_size
                             payload={"candidate": candidate, "quality": requested}))
 
     assert step.response.ok, step.response.error
-    assert step.response.result["quality"] == used
-    assert step.response.result["declared_size"] == size
-    assert step.response.result["size_is_advisory"] is True
+    # This source always answers a .flac URL; the request cannot prove bitrate,
+    # so the tier the source was asked for is not the tier it served and the
+    # `_types` number for that tier is not a reference for these bytes.
+    assert step.response.result["quality"] == "flac"
+    assert step.response.result["declared_size"] is None
+    assert step.response.result["size_is_advisory"] is False
 
 
 @requires_deno
@@ -195,7 +195,7 @@ def test_resolve_maps_a_candidate_back_into_the_sources_own_id():
     assert step.response.result == {"candidate_id": "lx:qsvip:42",
                                     "url": "https://cdn.zhihu.example/42/song.mp3",
                                     "extension": "mp3", "media_type": "audio/mpeg", "declared_size": None,
-                                    "size_is_advisory": False, "quality": "320k"}
+                                    "size_is_advisory": False, "quality": "mp3", "expires_at": None}
 
 
 DIRECT_LINK_SOURCE = """
@@ -210,17 +210,19 @@ def test_a_direct_link_without_a_suffix_falls_back_to_the_requested_quality():
     # The endpoints these sources fall back to answer with a script path that
     # carries no audio suffix, so the requested quality is the only container
     # the source states.
-    candidate = dict(CANDIDATE, item_id="lx:wy:186016", source_id="wy")
+    candidate = dict(CANDIDATE, item_id="lx:wy:186016", source_id="wy", qualities=["flac", "320k"])
     lossy = _run(_invocation(DIRECT_LINK_SOURCE, operation="resolve",
                              payload={"candidate": candidate, "quality": "320k"}))
     assert lossy.response.ok
     assert lossy.response.result["extension"] == "mp3"
     assert lossy.response.result["media_type"] == "audio/mpeg"
+    assert lossy.response.result["quality"] is None
     lossless = _run(_invocation(DIRECT_LINK_SOURCE, operation="resolve",
                                 payload={"candidate": candidate, "quality": "flac"}))
     assert lossless.response.ok
     assert lossless.response.result["extension"] == "flac"
     assert lossless.response.result["media_type"] == "audio/flac"
+    assert lossless.response.result["quality"] is None
 
 
 AAC_LINK_SOURCE = """
@@ -364,7 +366,7 @@ def test_a_source_with_the_shape_of_a_shipped_one_clears_every_hazard_at_once():
     # Each of these three broke a real source on the first live run, and each is
     # fixed in a different file.  Holding them in one source means a regression
     # in any of them fails here instead of only showing up against an upstream.
-    candidate = dict(CANDIDATE, item_id="lx:wy:186016", source_id="wy")
+    candidate = dict(CANDIDATE, item_id="lx:wy:186016", source_id="wy", qualities=["flac", "320k"])
     payload = build_host_command(_invocation(SHIPPED_SHAPE_SOURCE)).stdin_payload.decode()
     # The host's own parameter is not named `request`, so a source may destructure
     # one out of `globalThis.lx`; and the console sink is installed before the
@@ -744,3 +746,14 @@ def test_a_request_made_while_the_source_loads_is_the_very_first_action():
                               observations=[_observation(json.dumps({"token": "abc"}))]))
     assert second.response.ok, second.response.error
     assert second.response.result["url"] == "https://cdn.zhihu.example/abc/song.mp3"
+
+
+@requires_deno
+def test_requested_lossless_does_not_become_actual_bitrate_on_mp3_url():
+    candidate = dict(CANDIDATE, qualities=["flac", "320k"])
+    step = _run(_invocation(HANDLER_SOURCE, operation="resolve",
+                            payload={"candidate": candidate, "quality": "flac"}))
+    assert step.response.ok
+    assert step.response.result["quality"] == "mp3"
+    assert step.response.result["extension"] == "mp3"
+    assert step.response.result["declared_size"] is None

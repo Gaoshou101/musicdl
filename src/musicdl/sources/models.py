@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from musicdl.contracts.plugin import format_instant, parse_instant
+
 from .quality import QUALITY_RANKS, parse_size
 
 
@@ -111,6 +113,20 @@ class Candidate(BaseModel):
     # not say which one it came from is a row nothing can tell apart from the
     # same song on another one.  ``None`` when the channel produced it itself.
     platform: str | None = Field(default=None, max_length=16)
+    # The instant the URL this row was last resolved to stops being usable,
+    # when the source stated one.  It rides along with the row so freezing a
+    # selection context keeps it, and a download that starts after it resolves
+    # again instead of reusing a URL the source has already retired.
+    expires_at: str | None = Field(default=None, max_length=32)
+
+    @field_validator("expires_at", mode="before")
+    @classmethod
+    def clean_expiry(cls, value: Any) -> Any:
+        """Keep only an absolute instant; whatever is not one is simply absent."""
+        if value is None or value == "":
+            return None
+        parsed = parse_instant(value)
+        return format_instant(parsed) if parsed is not None else None
 
     @field_validator("source_id", "source_version", "item_id", "format", mode="before")
     @classmethod

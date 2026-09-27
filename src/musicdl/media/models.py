@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal, Protocol, get_args
 
 from musicdl.sources.models import Candidate
+from musicdl.sources.quality import QUALITY_REVISION
 from musicdl.sources.search import SearchResult
 
 MAX_MEDIA_BYTES = 500 * 1024 * 1024
@@ -15,7 +16,7 @@ _DOWNLOAD_CODES = frozenset({
     "size_mismatch", "unsupported_extension", "signature_mismatch", "extension_mismatch",
     "mime_mismatch", "path_escape", "path_too_long", "artifact_uncertain", "media_url_denied", "media_host_denied",
     "media_dns_failed", "media_address_denied", "media_connect_failed", "media_tls_failed",
-    "media_timeout", "media_redirect_denied", "media_response_invalid",
+    "media_timeout", "media_redirect_denied", "media_response_invalid", "media_url_expired",
 })
 Language = Literal["华语", "欧美", "日韩", "未知"]
 LANGUAGES: frozenset[str] = frozenset(get_args(Language))
@@ -57,6 +58,12 @@ class DownloadMetadata:
     media_type: str | None = None
     declared_size: int | None = None
     _close_once: _CloseOnce | None = field(default=None, repr=False, compare=False)
+
+    quality: str | None = None
+    # The instant this stream's URL stops being usable, copied from the
+    # descriptor the source answered with.  A descriptor already past it is
+    # refused rather than streamed, so a caller re-resolves instead.
+    expires_at: str | None = None
 
     async def aclose(self) -> None:
         if self._close_once is not None:
@@ -154,7 +161,7 @@ class ArtifactStore(Protocol):
 
 
 class DownloadSource(Protocol):
-    async def download(self, candidate: Candidate) -> DownloadMetadata: ...
+    async def download(self, candidate: Candidate, *, quality: str | None = None) -> DownloadMetadata: ...
     async def health(self) -> bool: ...
 
 
@@ -166,6 +173,20 @@ class DownloadResult:
     media_type: str
     extension: str
     language: Language
+    quality: str | None = None
+    quality_downgraded: bool = False
+    # Which revision of the actual-quality verification produced `quality`.
+    # Persisted with the download record so a later, stricter verifier can spot
+    # a verdict it no longer stands behind and re-check it.
+    quality_revision: int = QUALITY_REVISION
+    # The tier the caller asked for and the tier the bytes turned out to be.
+    # ``actual_quality`` repeats the source's own label while the verified
+    # container can carry it and names that container otherwise, so a label the
+    # bytes contradict never reaches the report; it is never read back out of
+    # the request, so a source that quietly answers a lossless request with a
+    # lossy stream is reported as the downgrade it is.
+    requested_quality: str | None = None
+    actual_quality: str | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +202,11 @@ class DownloadEvent:
     sha256: str | None = None
     relative_path: str | None = None
     healthy: bool | None = None
+    # The tier the download asked for and the tier the bytes turned out to be,
+    # reported side by side: a source that quietly serves a lossy stream for a
+    # lossless request is a fact about the answer, not a guess about the request.
+    requested_quality: str | None = None
+    actual_quality: str | None = None
 
 
 @dataclass(frozen=True)

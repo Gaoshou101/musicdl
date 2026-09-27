@@ -24,6 +24,7 @@ from musicdl.media.transport import SecureMediaTransport
 from musicdl.plugins.client import PluginClient
 from musicdl.plugins.source import PluginSource
 from musicdl.plugins.store import StoredPlugin
+from musicdl.sources.quality import QUALITY_REVISION
 from musicdl.sources.registry import SourceEntry, SourceRegistry
 from musicdl.sources.search import search_sources
 from musicdl.wecom.state import (ARTIFACT_TRANSITION_SCRIPT, CLAIM_ARTIFACT_SCRIPT, CONSUME_SCRIPT,
@@ -564,7 +565,9 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
     assert (artifact.size_bytes, artifact.target_relative_path) == (
         DECLARED_SIZE, EXPECTED_RELATIVE.as_posix())
     assert artifact.sha256 == hashlib.sha256(MEDIA_BYTES).hexdigest()
-    assert effect.status == "done" and effect.result == {"ok": True}
+    assert effect.status == "done" and effect.result == {
+        "ok": True, "requested_quality": None, "actual_quality": "mp3",
+        "quality_revision": QUALITY_REVISION, "quality_downgraded": False}
     assert not list(slice_.media_root.rglob("*.part"))
 
     # WeCom saw the selection prompt and then the recorded success notice.

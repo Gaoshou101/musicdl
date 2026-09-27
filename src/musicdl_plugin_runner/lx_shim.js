@@ -523,6 +523,7 @@ async function lxResolve(payload) {
     ? candidate.qualities.map(lxQualityName).filter(Boolean) : [];
   const requested = typeof payload.quality === "string" ? lxQualityName(payload.quality) : "";
   const quality = requested && supported.includes(requested) ? requested
+    : typeof payload.quality !== "string" && supported.includes(LX_DEFAULT_QUALITY) ? LX_DEFAULT_QUALITY
     : supported.slice().sort((left, right) => lxQualityRank(right) - lxQualityRank(left)
       || left.localeCompare(right))[0] || LX_DEFAULT_QUALITY;
   const answer = await lxHandler({
@@ -533,7 +534,27 @@ async function lxResolve(payload) {
   const url = lxAnswerUrl(answer);
   if (!url) throw new Error("lx source returned no media URL");
   const extension = lxExtension(url, quality);
-  const declaredSize = candidate.quality_sizes && typeof candidate.quality_sizes === "object"
+  // How long this URL stays usable, when the source states it.  A source that
+  // states nothing leaves it null: inventing a lifetime would either discard a
+  // live URL or bless a dead one, and neither is this shim's call to make.
+  const expiresAt = answer && typeof answer === "object" && typeof answer.expires_at === "string"
+    ? answer.expires_at.trim() : "";
+  // A requested tier is intent, not evidence of the codec or bitrate served.
+  const answerQuality = answer && typeof answer === "object" ? lxQualityName(answer.quality) : "";
+  const suffix = new URL(url).pathname.split(".").pop().toLowerCase();
+  // A codec-bearing suffix contradicts an incompatible answer label. Keep
+  // bitrate/bit-depth only when the explicit answer agrees with that container.
+  const actual = suffix === "flac" ? (["flac", "flac24bit"].includes(answerQuality) ? answerQuality : "flac")
+    : suffix === "mp3" ? (["128k", "192k", "320k"].includes(answerQuality) ? answerQuality : "mp3")
+    : ["aac", "ogg"].includes(suffix) ? suffix
+    : suffix === "m4a" ? (answerQuality === "alac" ? "alac" : null)
+    : answerQuality || null;
+  // `_types[quality].size` belongs to the tier this resolve asked for, so it is
+  // only a reference for the bytes when the answer agrees that this tier is
+  // what came back.  A `.flac` URL answered under a `320k` label is a different
+  // rendering, and the `320k` number says nothing about it.
+  const declaredSize = actual === quality && candidate.quality_sizes
+    && typeof candidate.quality_sizes === "object"
     ? lxParseSize(candidate.quality_sizes[quality]) : null;
   return {
     candidate_id: String(candidate.item_id),
@@ -547,7 +568,8 @@ async function lxResolve(payload) {
     // transport refuse a body shorter than the reference while accepting a
     // longer one and reporting the length the server really sent.
     size_is_advisory: declaredSize !== null,
-    quality,
+    quality: actual,
+    expires_at: expiresAt || null,
   };
 }
 

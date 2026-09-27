@@ -130,3 +130,59 @@ def format_bytes(value: Any) -> str:
         index += 1
     precision = 1 if scaled >= 10 else 2
     return f"{scaled:.{precision}f} {units[index]}"
+
+
+def requested_quality(candidate: Any, *, policy: str = "lossless_first",
+                      preference: str | None = None) -> str | None:
+    """Choose only from declared tiers; an unsupported preference is advisory."""
+    declared = tuple(candidate.qualities)
+    preferred = _token(preference)
+    if preferred in declared:
+        return preferred
+    if policy == "best_available" and preferred is None:
+        return None
+    lossless = [value for value in declared if is_lossless(value)]
+    if lossless:
+        return max(lossless, key=quality_rank)
+    if declared:
+        return max(declared, key=quality_rank)
+    return candidate.format if is_lossless(candidate.format) else None
+
+
+def proven_lossy(value: Any) -> bool:
+    """Unknown and ambiguous codec labels never prove a downgrade."""
+    return _token(value) in {"128k", "192k", "320k", "mp3", "aac", "ogg", "opus"}
+
+
+def served_quality(stated: Any, container: Any) -> str | None:
+    """Reconcile the tier a source stated with the container the bytes prove.
+
+    The file on disk is the only evidence of what was served.  A label that
+    names a container those bytes contradict is dropped in favour of the
+    container -- measured 2026-09-28, a link whose path ended in ``.flac``
+    answered MP3 frames, and reporting the path would have contradicted both the
+    extension and the file -- while a label the container can carry keeps its
+    detail (``320k``, ``flac24bit``), which is what the success message and the
+    admin report print.  A label naming no container (``master``, ``atmos_plus``)
+    claims no codec, so nothing contradicts it and it stands.
+    """
+    label = _token(stated)
+    verified = _token(container)
+    if verified is not None:
+        verified = verified.lstrip(".") or None
+    if label is None:
+        return verified
+    named = _CONTAINERS.get(label)
+    if named is not None and verified is not None and named != verified:
+        return verified
+    return label
+
+
+# The revision of the actual-quality verification this product stands behind:
+# ``proven_lossy`` above, the answer reconciliation in ``lx_shim.js``, and the
+# downmix verdict a download record stores.  A record keeps the revision that
+# judged it, so a later, stricter verifier can recognise the old record and
+# re-check it instead of trusting a verdict it no longer stands behind.
+# MusicBot-Go calls the same pair ``QualityVerified``/``QualityRevision``; bump
+# this whenever the rules above change meaning.
+QUALITY_REVISION = 1
