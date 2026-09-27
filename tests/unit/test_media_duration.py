@@ -4,9 +4,11 @@ Every sample here is built by hand in a few kilobytes, so the suite stays
 honest about what it measures and needs no encoder, no ffmpeg and no fixture
 binary in the repository.
 
-One limit is worth stating plainly rather than hiding: FLAC and MP4 describe
-their own length in a header, so a file whose header survived and whose audio
-was cut afterwards still reports the length it claims.  What this module
+One limit is worth stating plainly rather than hiding: FLAC states its length
+in a header, so a FLAC file whose header survived and whose audio was cut
+afterwards still reports the length it claims.  MP4 is caught when its box
+chain reaches past the end of the file, which is what a cut behind the header
+leaves behind.  What this module
 catches is the file that *is* short -- the 30-second preview a platform serves
 in place of the song, or a stream that stopped early in a container that
 counts what it really holds (MP3 without a ``Xing`` tag) -- and it answers
@@ -21,6 +23,7 @@ import pytest
 from musicdl.media import DownloadMetadata, MediaError, download_candidate
 from musicdl.media.duration import (
     RESYNC_SCAN_BYTES,
+    SCAN_CHUNK_BYTES,
     bitrate_kbps,
     container_duration,
     duration_matches,
@@ -239,6 +242,14 @@ def test_an_mp4_cut_behind_its_header_is_not_measured():
     assert container_duration(whole[:-40]) is None
 
 
+def test_an_mp4_cut_inside_its_last_box_header_is_not_measured():
+    # A cut can land inside a box header, leaving a box that never got to
+    # state its own size.  Bytes too few to be a box are a chain that stopped
+    # rather than a measurement, so the length is unknown instead of the
+    # header's claim.
+    assert container_duration(mp4_bytes(210.0) + (42).to_bytes(4, "big")) is None
+
+
 def test_an_mp4_cut_behind_its_header_is_refused_by_strict(tmp_path):
     events = []
     with pytest.raises(MediaError, match="incomplete_audio"):
@@ -439,10 +450,16 @@ def test_a_replay_measures_the_file_and_says_what_it_could_not_compare(tmp_path)
         ("duration", "unverified")]
 
 
-def test_a_replay_strict_cannot_verify_is_refused(tmp_path):
+def test_a_replay_of_a_published_artifact_is_not_refused_even_under_strict(tmp_path):
+    # ``strict`` refuses what it cannot measure, but that refusal is a gate on
+    # publication as well: these bytes are already library content, so the
+    # policy measures and reports them rather than refusing them.
     reservation = _published(tmp_path, mp3_bytes(100))
-    with pytest.raises(MediaError, match="incomplete_audio"):
-        _replay(tmp_path, reservation, verify_duration="strict")
+    events = []
+    result = _replay(tmp_path, reservation, verify_duration="strict", events=events)
+    assert (tmp_path / "Song.mp3").exists()
+    assert result.duration_seconds == pytest.approx(mp3_duration(100))
+    assert [event.error_code for event in events if event.error_code] == ["duration_unverified"]
 
 
 def _staged(tmp_path, data: bytes) -> ArtifactRecord:
@@ -572,6 +589,30 @@ def test_a_tag_longer_than_the_resync_window_is_not_a_short_recording():
     assert mp3_duration(8039) == pytest.approx(209.998, abs=0.001)
 
 
+def test_a_tag_that_runs_to_the_end_is_a_tag_even_past_the_read_chunk():
+    # The same 600 kB tag, but nothing follows it, and the first read chunk
+    # ends inside it.  The tag's own length runs to the end of the file, so
+    # every frame before it is the recording: measuring the stop from the
+    # buffer's end instead of the stop's real position left 238 bytes to
+    # compare against a 600 kB tag, and answered "unknown" for a song whose
+    # frames had all been counted.
+    frames = 2514
+    data = mp3_bytes(frames) + id3v2_tag(600_000)
+    assert len(data) > SCAN_CHUNK_BYTES
+    assert container_duration(data) == pytest.approx(mp3_duration(frames))
+
+
+def test_a_midstream_tag_is_not_read_as_the_end_of_the_recording():
+    # The shape an independent review measured on 2026-09-28: the mid-stream
+    # tag is longer than the resync window, the first read chunk ends inside
+    # it, and the file ends with a small tag of its own.  Reading the stop as
+    # the end of the audio would measure the 65 s before the tag and refuse a
+    # 210 s recording.
+    data = mp3_segmented(2514, 5525, tag_bytes=600_000) + id3v2_tag(238)
+    assert container_duration(data) is None
+    assert mp3_duration(2514 + 5525) == pytest.approx(209.998, abs=0.001)
+
+
 def test_a_tag_that_really_ends_the_file_still_lets_the_audio_be_counted():
     # A tag written after the audio is not audio, so a walk that stopped at one
     # has counted the whole recording -- and it is only trusted when the tag
@@ -622,3 +663,26 @@ def test_a_refused_replay_of_a_linked_artifact_leaves_nothing_servable(tmp_path)
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
     with pytest.raises(HTTPException):
         _media_target(tmp_path, "Song.mp3")
+
+def test_a_refusal_that_cannot_remove_the_bytes_reports_the_failed_cleanup(tmp_path, monkeypatch):
+    # A refusal only leaves nothing behind when the filesystem lets the bytes go.
+    # When it does not, the record has to say so rather than report a clean
+    # refusal that the library contradicts.
+    from dataclasses import replace
+    from pathlib import Path as RealPath
+
+    real_unlink = RealPath.unlink
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "Song.mp3":
+            raise OSError("locked")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(RealPath, "unlink", refuse)
+    reservation = replace(_published(tmp_path, mp3_bytes(mp3_frames_for(210))), state="publishing")
+    events = []
+    with pytest.raises(MediaError, match="incomplete_audio"):
+        _replay(tmp_path, reservation, verify_duration="strict", events=events)
+    assert (tmp_path / "Song.mp3").exists()
+    assert [event.error_code for event in events if event.error_code] == [
+        "duration_unverified", "cleanup_failed", "incomplete_audio"]

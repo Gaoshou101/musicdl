@@ -209,14 +209,18 @@ def _walk_mp3_frames(handle, start: int) -> tuple[int, float, bool]:
     standing for the whole recording.
     """
     handle.seek(start)
-    buffer, offset, frames, elapsed = b"", 0, 0, 0.0
+    # ``base`` is where ``buffer[0]`` really sits in the file.  Looking for
+    # frames reads ahead of the buffer, so the buffer's end is not the file's
+    # end: the stop's real position is carried along rather than read back out
+    # of whichever buffer happens to be in hand.
+    buffer, offset, base, frames, elapsed = b"", 0, start, 0, 0.0
     resyncs = 0
     while frames < MAX_MP3_FRAMES:
         if offset + 4 > len(buffer):
             chunk = handle.read(SCAN_CHUNK_BYTES)
             if not chunk:
                 return frames, elapsed, True, False
-            buffer, offset = buffer[offset:] + chunk, 0
+            base, buffer, offset = base + offset, buffer[offset:] + chunk, 0
             continue
         frame = _mpeg_frame(buffer, offset)
         if frame is None:
@@ -226,8 +230,8 @@ def _walk_mp3_frames(handle, start: int) -> tuple[int, float, bool]:
             # the next frame and measures the audio it really holds.
             ahead = _resynchronize(handle, buffer, offset) if resyncs < MAX_MP3_RESYNCS else None
             if ahead is None:
-                return frames, elapsed, False, _trailing_tag(handle, buffer, offset)
-            buffer, offset = ahead
+                return frames, elapsed, False, _trailing_tag(handle, buffer, offset, base + offset)
+            base, buffer, offset = base + offset, ahead[0], ahead[1]
             resyncs += 1
             continue
         samples, rate, length, _ = frame
@@ -235,7 +239,7 @@ def _walk_mp3_frames(handle, start: int) -> tuple[int, float, bool]:
             chunk = handle.read(SCAN_CHUNK_BYTES)
             if not chunk:
                 return frames, elapsed, True, False
-            buffer, offset = buffer[offset:] + chunk, 0
+            base, buffer, offset = base + offset, buffer[offset:] + chunk, 0
             continue
         offset += length
         frames += 1
@@ -243,8 +247,8 @@ def _walk_mp3_frames(handle, start: int) -> tuple[int, float, bool]:
     return frames, elapsed, False, False
 
 
-def _trailing_tag(handle, buffer: bytes, offset: int) -> bool:
-    """Whether everything from ``offset`` to the end of the file is a tag.
+def _trailing_tag(handle, buffer: bytes, offset: int, position: int) -> bool:
+    """Whether everything from ``position`` to the end of the file is a tag.
 
     A tag written after the audio is not audio, so a walk that stopped at one
     has still counted the whole recording.  Only the shapes that really end a
@@ -254,16 +258,21 @@ def _trailing_tag(handle, buffer: bytes, offset: int) -> bool:
     resynchronisation window; its header sits where the walk stopped, it does
     not reach the end of the file, and the frames behind it must not be read as
     a shorter song.
+
+    ``position`` is where ``buffer[offset]`` really sits.  Looking for frames
+    reads ahead of the buffer, so ``len(buffer) - offset`` is the distance to the
+    buffer's end and not to the file's: measuring from there read a 600 kB
+    trailing tag as the 238 bytes that happened to be left in the buffer, and
+    answered "unknown" for a recording whose every frame had been counted.
     """
     handle.seek(0, os.SEEK_END)
     end = handle.tell()
-    at = end - (len(buffer) - offset)
-    remaining = end - at
+    remaining = end - position
     if remaining <= 0:
         return True
     head = buffer[offset:offset + 10]
     if len(head) < 10:
-        handle.seek(at)
+        handle.seek(position)
         head = handle.read(10)
     if len(head) < 3:
         return False
@@ -391,6 +400,11 @@ def _mp4_file_duration(handle, size: int) -> float | None:
             if duration is None:
                 return None
         offset += box_size
+    # Bytes too few to be a box are a chain that stopped, not a measurement: a
+    # cut can land inside the header of the box that never got to state its size,
+    # and the length a surviving header claims is not the length the file holds.
+    if offset != size:
+        return None
     return duration
 
 
@@ -420,6 +434,8 @@ def _mp4_duration(data: bytes) -> float | None:
             if duration is None:
                 return None
         offset += box_size
+    if offset != len(data):
+        return None
     return duration
 
 

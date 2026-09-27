@@ -147,7 +147,9 @@ def _verified_duration(candidate: Candidate, path: Path, verify_duration: str, r
     keeping the bytes would be a refusal that changed nothing, and deleting
     them would take away a file the library may already be serving -- so the
     only way a refusal can leave nothing behind is for it to happen before the
-    artifact is published.
+    artifact is published.  ``strict`` answers to the same rule: it refuses
+    what it cannot measure, and that refusal is a publication gate as well,
+    so it does not fire where ``enforce`` is false.
     """
     measured = duration_seconds(path)
     # A catalogue that states ``0`` has stated nothing: Telegram reports an
@@ -161,7 +163,7 @@ def _verified_duration(candidate: Candidate, path: Path, verify_duration: str, r
     emit_event(record, DownloadEvent(
         request_id, candidate.item_id, candidate.source_id, candidate.source_version,
         "duration", "unverified", error_code="duration_unverified"))
-    if verify_duration == "strict":
+    if verify_duration == "strict" and enforce:
         raise MediaError("incomplete_audio")
     return measured
 
@@ -199,12 +201,27 @@ def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation
                           bitrate_kbps=None if measured is None else bitrate_kbps(size, measured))
 
 
-def _discard(path: Path) -> None:
-    """Remove one path this job owns, ignoring a filesystem that says no."""
+def _discard(path: Path) -> bool:
+    """Remove one path this job owns, and say whether it is really gone.
+
+    A filesystem that refuses the unlink -- a handle still open, a read-only
+    mount -- leaves the bytes exactly where they were, so a caller that promised
+    a refusal left nothing behind has to look rather than assume: the answer is
+    the check, not the attempt.
+    """
     try:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+    return not (path.exists() or path.is_symlink())
+
+
+def _report_cleanup_failure(record: Callable[[DownloadEvent], None] | None, candidate: Candidate,
+                            request_id: str, size: int | None) -> None:
+    """Say out loud that bytes this job tried to remove are still on disk."""
+    emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id,
+                                     candidate.source_version, "cleanup", "failed",
+                                     error_code="cleanup_failed", size_bytes=size or None))
 
 
 def _fsync_path(path: Path) -> None:
@@ -304,8 +321,11 @@ async def _resume_reservation(
                 # Refused before it was published, so the staged bytes are
                 # scratch that failed its own policy rather than library
                 # content: they go the way a fresh attempt's scratch goes, and
-                # a refusal never leaves a file behind.
-                _discard(temporary)
+                # a refusal never leaves a file behind.  A removal the
+                # filesystem refused is reported rather than passed off as a
+                # refusal that cleaned up after itself.
+                if not _discard(temporary):
+                    _report_cleanup_failure(record, candidate, request_id, reservation.size_bytes)
                 raise
             await _publish_reserved(temporary, target, reservation, artifact_store,
                                     owner=owner, fence=fence, ttl=ttl)
@@ -324,8 +344,13 @@ async def _resume_reservation(
                 # This artifact never reached ``published``, so nothing refers
                 # to it and the library must not go on serving what was just
                 # refused: the bytes go the way a fresh attempt's scratch goes.
-                _discard(temporary)
-                _discard(target)
+                # A removal the filesystem refused is reported rather than
+                # passed off as a refusal that cleaned up after itself.
+                gone = _discard(temporary)
+                if not _discard(target):
+                    gone = False
+                if not gone:
+                    _report_cleanup_failure(record, candidate, request_id, reservation.size_bytes)
             raise
     raise MediaError("artifact_uncertain")
 
@@ -488,8 +513,7 @@ async def download_candidate(
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 cleanup_event_emitted = True
-                emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
-                                     "cleanup", "failed", error_code="cleanup_failed", size_bytes=size or None))
+                _report_cleanup_failure(record, candidate, request_id, size)
                 try:
                     temp_path.unlink(missing_ok=True)
                 except OSError:
@@ -535,5 +559,4 @@ async def download_candidate(
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 if not cleanup_event_emitted:
-                    emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
-                                         "cleanup", "failed", error_code="cleanup_failed", size_bytes=size or None))
+                    _report_cleanup_failure(record, candidate, request_id, size)
