@@ -456,6 +456,57 @@ def test_transport_still_streams_a_descriptor_whose_lifetime_is_ahead():
     asyncio.run(metadata.aclose())
 
 
+def test_transport_refuses_a_url_that_dies_before_its_body_is_read(monkeypatch):
+    """The instant is checked again after the head, not only at the door.
+
+    A URL can be live when ``open`` is called and retired by the time the CDN
+    answers, because DNS and the TCP handshake happen after the door check.  No
+    body byte is read for it, and the caller sees the same ``media_url_expired``
+    a fresh resolve would have produced.
+    """
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    # Live at the door, dead once the request is on the wire.
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: bool(sock.sent))
+    error_code(instance.open(live, policy=("xn--tst-qla.example",)), "media_url_expired")
+
+
+def test_transport_stops_a_body_whose_url_dies_mid_stream(monkeypatch):
+    """The read that would extend the transfer asks again and refuses.
+
+    A body can outlast the instant its source named, so the bytes that already
+    arrived stay delivered while the download stops at the next read instead of
+    finishing on a link the source has withdrawn.
+    """
+    body = ID3_BODY + b"\x00" * 4000
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: "
+           + str(len(body)).encode() + b"\r\n\r\n" + body)
+    instance, _sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    state = {"streamed": False}
+
+    def expired(expires_at, now=None):
+        return state["streamed"]
+
+    monkeypatch.setattr("musicdl.media.transport.has_expired", expired)
+    metadata = asyncio.run(instance.open(live, policy=("xn--tst-qla.example",)))
+
+    async def read():
+        seen = 0
+        with pytest.raises(MediaError, match="media_url_expired"):
+            async for chunk in metadata.chunks:
+                seen += len(chunk)
+                # The source's instant passes while the body is arriving.
+                state["streamed"] = True
+        return seen
+
+    assert 0 < asyncio.run(read()) < len(body)
+
+
 def test_transport_refuses_an_authoritative_size_the_server_exceeded():
     raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 25\r\n\r\n" + ID3_BODY + b"x" * 15
     instance, *_ = transport(raw)

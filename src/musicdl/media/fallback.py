@@ -140,7 +140,13 @@ async def download_with_fallback(
                         except (TimeoutError, RuntimeError, ValueError):
                             pass
                     downloaded = await stream(source, candidate, quality, metadata)
-                    return replace(downloaded, quality_downgraded=downgraded)
+                    # The verdict belongs to the bytes that arrive, not to the
+                    # descriptor that prompted the download.  ``stream`` may
+                    # have re-resolved an answer whose URL had died, and the
+                    # file that comes back then is the fresh one: a source that
+                    # answered 320k, retired that URL, and answered FLAC on the
+                    # second resolve has downgraded nothing.
+                    return replace(downloaded, quality_downgraded=proven_lossy(downloaded.quality))
                 finally:
                     await _close_metadata(metadata)
 

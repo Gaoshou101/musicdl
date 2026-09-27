@@ -402,8 +402,20 @@ class SecureMediaTransport:
         # refuses it instead of opening a link the source has withdrawn.  The
         # caller that held the answer re-resolves on this code; a caller that
         # ignored the instant until now gets the same honest refusal.
-        if has_expired(media.expires_at):
-            raise MediaTransportError("media_url_expired")
+        def refuse_expired() -> None:
+            """Refuse wherever the transfer could still act on the URL.
+
+            The door is not the only place the instant matters: DNS and the TCP
+            handshake happen after it, a CDN answers a hop later still, and a
+            body can outlast the deadline by minutes.  Every step that can still
+            start or extend a transfer asks again, so a URL that dies in flight
+            stops being streamed and the caller re-resolves it rather than this
+            process finishing work on a link the source has withdrawn.
+            """
+            if has_expired(media.expires_at):
+                raise MediaTransportError("media_url_expired")
+
+        refuse_expired()
         deadline = self.clock() + timeout_ms / 1000
         egress = coerce_egress_policy(policy)
 
@@ -418,6 +430,7 @@ class SecureMediaTransport:
             # ``media_redirect_denied`` refusal.
             url = media.url
             for redirects in range(self.max_redirects + 1):
+                refuse_expired()
                 hop = await self._fetch_hop(url, egress, deadline)
                 response, wrapped, raw = hop.response, hop.wrapped, hop.raw
                 if not 300 <= hop.status < 400:
@@ -430,6 +443,10 @@ class SecureMediaTransport:
                 raw = wrapped = response = None
             if not 200 <= hop.status < 300:
                 raise MediaTransportError("media_response_invalid")
+            # The head can arrive after the instant the source named, exactly as
+            # DNS and the handshake can outlast it, so no body byte is read
+            # until the URL is still live.
+            refuse_expired()
             # Neither the answer's extension nor its Content-Type label is the
             # verdict; both are written by whichever CDN answered, and the same
             # link shape has been measured carrying two different containers
@@ -485,8 +502,14 @@ class SecureMediaTransport:
                             raise MediaError("file_too_large")
                         if exact_size is not None and observed > exact_size:
                             raise MediaError("size_mismatch")
+                        refuse_expired()
                         yield prefix
                     while True:
+                        # A body can outlast the URL's stated lifetime by
+                        # minutes, so the read that would extend the transfer
+                        # asks again before it does.
+                        refuse_expired()
+
                         def read_chunk() -> bytes:
                             remaining = _remaining(self.clock, deadline)
                             setter = getattr(wrapped, "settimeout", None)
