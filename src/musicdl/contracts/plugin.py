@@ -158,6 +158,7 @@ class ResolvedMedia(BaseModel):
     extension: ResolvedExtension
     media_type: StrictStr
     declared_size: StrictInt | None = Field(default=None, ge=0, le=RESOLVED_MEDIA_MAX_BYTES)
+    quality: StrictStr | None = Field(default=None, max_length=16, pattern=r"^[A-Za-z0-9_+-]{1,16}$")
 
     @field_validator("url", mode="before")
     @classmethod

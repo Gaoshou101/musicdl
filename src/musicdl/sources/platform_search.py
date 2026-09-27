@@ -474,9 +474,8 @@ class LxSearchAdapter:
                 candidates.append(Candidate(
                     source_id=self.source_id, source_version=self.source_version, item_id=hit.item_id,
                     title=hit.title, artist=hit.artist, album=hit.album, duration=hit.duration,
-                    platform=hit.platform,
-                    # Quality is what the resolve step negotiates, not what a
-                    # search listing advertises, so nothing here claims a
-                    # container the download has not been asked for yet.
-                    bitrate=None, format=None, size=None))
+                    # These catalogue search envelopes do not declare an
+                    # encoding or byte size. Keep those fields unknown until a
+                    # source actually reports them.
+                    platform=hit.platform))
         return tuple(candidates)

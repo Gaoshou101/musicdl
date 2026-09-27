@@ -355,6 +355,69 @@ def test_transport_rejects_a_size_mismatch():
     error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
 
 
+def test_transport_uses_content_length_as_declared_size_when_media_size_is_unknown():
+    instance, *_ = transport()
+
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert metadata.declared_size == len(ID3_BODY)
+    assert asyncio.run(read()) == ID3_BODY
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_keeps_declared_size_unknown_without_content_length():
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    assert metadata.declared_size is None
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ID3_BODY
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_rejects_body_overrun_against_content_length_without_media_size():
+    class OverreadingResponse:
+        status = 200
+
+        def __init__(self):
+            self.body = ID3_BODY + b"x"
+
+        def begin(self):
+            pass
+
+        def getheaders(self):
+            return [("Content-Type", "audio/mpeg"), ("Content-Length", str(len(ID3_BODY)))]
+
+        def read(self, size=-1):
+            count = len(self.body) if size < 0 else size
+            value, self.body = self.body[:count], self.body[count:]
+            return value
+
+        def close(self):
+            pass
+
+    instance, *_ = transport()
+    instance.response_factory = lambda _sock: OverreadingResponse()
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        chunks = []
+        with pytest.raises(MediaError, match="size_mismatch"):
+            async for chunk in metadata.chunks:
+                chunks.append(chunk)
+        assert chunks == []
+
+    asyncio.run(read())
+
+
 def test_transport_publishes_the_container_the_bytes_name_over_a_disagreeing_label():
     # Measured 2026-09-17 on iot202.music.126.net: a real FLAC stream -- `fLaC`
     # magic, a `.flac` path -- arrived as `Content-Type: audio/mpeg`.  The label

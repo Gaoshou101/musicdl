@@ -82,9 +82,10 @@ validation path.
 For a confirmed candidate the main service calls the typed `PluginClient.resolve()`
 operation, which returns one `ResolvedMedia` descriptor: the selected
 `candidate_id`, an implicit-port `https` `url`, an `extension`, a `media_type`,
-and an optional `declared_size`. The descriptor is rejected unless it is bound to
-the confirmed candidate's `item_id`, free of URL credentials, ports, and
-fragments, and consistent with the media type implied by its extension. The main
+an optional `declared_size`, and an optional short `quality` label. Older
+descriptors without `quality` remain valid. The descriptor is rejected unless
+it is bound to the confirmed candidate's `item_id`, free of URL credentials,
+ports, and fragments, and consistent with the media type implied by its extension. The main
 process then streams the body itself through `SecureMediaTransport`, which
 normalizes the host through IDNA, matches it exactly against `allowed_hosts`,
 resolves all A/AAAA answers, rejects non-global addresses, connects to the pinned

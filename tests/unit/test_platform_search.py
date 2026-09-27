@@ -381,6 +381,8 @@ def test_the_adapter_names_the_source_that_will_resolve_each_hit():
     # Nothing here claims a container the download has not been asked for yet.
     assert {candidate.format for candidate in candidates} == {None}
     assert {candidate.bitrate for candidate in candidates} == {None}
+    assert {candidate.qualities for candidate in candidates} == {()}
+    assert all(candidate.quality_sizes == {} for candidate in candidates)
 
 
 def test_one_silent_platform_still_returns_what_the_others_answered():

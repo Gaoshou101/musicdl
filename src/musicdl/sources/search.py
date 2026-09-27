@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import Candidate, normalize_text
+from .quality import is_lossless, quality_rank
 from .registry import SourceEntry, SourceRegistry
 
 
@@ -146,7 +147,7 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     def ordering(row):
         relevance, c, entry = row
         quality = quality_key(c, entry.priority)
-        return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], entry.priority,
+        return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], -quality[4], -quality[5],
                 c.title.casefold(), c.artist.casefold(), c.source_id.casefold(), c.item_id.casefold())
     ranked = ((relevance_of(c), c, entry) for c, entry in retained)
     ordered = tuple(c for _, c, _ in sorted(ranked, key=ordering))
@@ -155,11 +156,15 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     return SearchResult(ordered, tuple(s for s, _ in outcomes), search_result_version(ordered), offers)
 
 
-def quality_key(candidate: Candidate, priority: int) -> tuple:
+def quality_key(candidate: Candidate, priority: int) -> tuple[int, int, int, int, int, int]:
     """Higher values are better; unknown quality fields rank lowest."""
-    lossless = (candidate.format or "").casefold() in {"flac", "alac", "ape", "wav", "aiff"}
+    # Lossless-first already defined the historical order. Named quality rank
+    # now distinguishes formats within that tier without changing legacy rows.
+    lossless = is_lossless(candidate.format)
     completeness = sum(value is not None for value in (candidate.album, candidate.duration, candidate.bitrate, candidate.format, candidate.size))
-    return (int(lossless), candidate.bitrate if candidate.bitrate is not None else -1, completeness, candidate.size if candidate.size is not None else -1, -priority)
+    return (int(lossless), quality_rank(candidate.format),
+            candidate.bitrate if candidate.bitrate is not None else -1,
+            completeness, candidate.size if candidate.size is not None else -1, -priority)
 
 
 def _offers_of(group: Sequence[tuple[Candidate, SourceEntry]],
@@ -174,8 +179,8 @@ def _offers_of(group: Sequence[tuple[Candidate, SourceEntry]],
     """
     def order(pair: tuple[Candidate, SourceEntry]) -> tuple:
         candidate, entry = pair
-        lossless, bitrate, completeness, size, priority = quality_key(candidate, entry.priority)
-        return (-lossless, -bitrate, -completeness, -size, -priority,
+        quality = quality_key(candidate, entry.priority)
+        return (*(-value for value in quality),
                 -_preference_weight(preference, candidate.source_id),
                 candidate.source_id.casefold(), candidate.item_id.casefold())
     names: list[str] = []

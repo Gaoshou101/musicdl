@@ -433,9 +433,10 @@ class SecureMediaTransport:
                 raise MediaTransportError("media_response_invalid")
             extension, media_type = detected[0].lstrip("."), detected[1]
             content_length = hop.content_length
+            expected_size = media.declared_size if media.declared_size is not None else content_length
             if content_length is not None and content_length > self.max_bytes:
                 raise MediaError("file_too_large")
-            if media.declared_size is not None and content_length is not None and content_length != media.declared_size:
+            if media.declared_size is not None and content_length is not None and content_length != expected_size:
                 raise MediaError("size_mismatch")
 
             async def close_response() -> None:
@@ -455,7 +456,7 @@ class SecureMediaTransport:
                         observed += len(prefix)
                         if observed > self.max_bytes:
                             raise MediaError("file_too_large")
-                        if media.declared_size is not None and observed > media.declared_size:
+                        if expected_size is not None and observed > expected_size:
                             raise MediaError("size_mismatch")
                         yield prefix
                     while True:
@@ -480,12 +481,10 @@ class SecureMediaTransport:
                         observed += len(chunk)
                         if observed > self.max_bytes:
                             raise MediaError("file_too_large")
-                        if media.declared_size is not None and observed > media.declared_size:
+                        if expected_size is not None and observed > expected_size:
                             raise MediaError("size_mismatch")
                         yield chunk
-                    if content_length is not None and observed != content_length:
-                        raise MediaError("size_mismatch")
-                    if media.declared_size is not None and observed != media.declared_size:
+                    if expected_size is not None and observed != expected_size:
                         raise MediaError("size_mismatch")
                 except BaseException as exc:
                     primary = exc
@@ -498,7 +497,7 @@ class SecureMediaTransport:
                             raise
 
             return DownloadMetadata(chunks=chunks(), extension=extension,
-                                    media_type=media_type, declared_size=media.declared_size,
+                                    media_type=media_type, declared_size=expected_size,
                                     _close_once=close_once)
         except asyncio.CancelledError:
             if close_once is not None:

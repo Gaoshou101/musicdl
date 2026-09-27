@@ -10,7 +10,50 @@ def test_candidate_normalizes_public_text_and_identity():
     assert c.artist == "B"
     assert c.canonical_version_key[0:2] == ("a song", "b")
     assert c.public_representation["source_id"] == "qq"
+    assert c.public_representation["qualities"] == []
+    assert c.public_representation["quality_sizes"] == {}
     assert normalize_text("Ａ\u3000 B") == "A B"
+
+
+def test_candidate_accepts_the_old_1004_snapshot_without_quality_fields():
+    snapshot = {"source_id": "qq", "source_version": "1.0.4", "item_id": "42",
+                "title": "A song", "artist": "B"}
+    candidate = Candidate.model_validate(snapshot)
+
+    assert candidate.qualities == ()
+    assert candidate.quality_sizes == {}
+    assert candidate.public_representation["qualities"] == []
+    assert candidate.public_representation["quality_sizes"] == {}
+
+
+def test_qualities_are_normalized_deduplicated_bounded_and_public_but_not_identity():
+    base = dict(source_id="a", source_version="1", item_id="1", title="Song", artist="Artist")
+    candidate = Candidate(**base, qualities=(" FLAC ", "320k", "flac", "master", "unknown", "x" * 17, ""),
+                          quality_sizes={" flac ": "1.5 MB", "320k": 1234,
+                                         "unknown": 20, "192k": -1})
+    same_identity = Candidate(**base, qualities=("128k",), quality_sizes={"128k": 99})
+
+    assert candidate.qualities == ("flac", "320k", "master")
+    assert candidate.quality_sizes == {"flac": 1_572_864, "320k": 1234}
+    assert candidate.public_representation["qualities"] == ["flac", "320k", "master"]
+    assert candidate.public_representation["quality_sizes"] == {"flac": 1_572_864, "320k": 1234}
+    assert candidate.canonical_version_key == same_identity.canonical_version_key
+
+
+def test_candidate_drops_unknown_quality_names_and_caps_deduped_values():
+    qualities = ("unknown", "x" * 17, "", "128k", "192k", "320k", "flac", "flac24bit",
+                 "alac", "ape", "wav", "aiff", "master", "atmos_plus", "128k", "192k")
+    candidate = Candidate(source_id="a", source_version="1", item_id="1", title="x", artist="y",
+                          qualities=qualities)
+
+    assert candidate.qualities == ("128k", "192k", "320k", "flac", "flac24bit", "alac",
+                                   "ape", "wav", "aiff", "master", "atmos_plus")
+
+
+def test_candidate_rejects_a_non_sequence_quality_field():
+    with pytest.raises(ValidationError):
+        Candidate(source_id="a", source_version="1", item_id="1", title="x", artist="y",
+                  qualities="flac")
 
 
 def test_candidate_bounds_and_required_fields():
