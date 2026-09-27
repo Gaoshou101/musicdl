@@ -571,8 +571,12 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
     assert slice_.wecom.sent[0][0] == FROM_USER
     assert "1. Song — Artist" in slice_.wecom.sent[0][1] and "回复序号下载。" in slice_.wecom.sent[0][1]
     assert slice_.wecom.sent[1][0] == FROM_USER
-    assert slice_.wecom.sent[1][1].startswith("下载成功：")
-    assert Path(slice_.wecom.sent[1][1].removeprefix("下载成功：")) == EXPECTED_RELATIVE
+    notice = slice_.wecom.sent[1][1]
+    assert notice.startswith("下载成功：")
+    relative_path, separator, metadata = notice.removeprefix("下载成功：").rpartition("（")
+    assert separator == "（"
+    assert Path(relative_path) == EXPECTED_RELATIVE
+    assert metadata == "MP3 · 13 B）"
 
     # Both stream messages were acknowledged only after their effects were recorded.
     assert slice_.redis.acks == [(slice_.state.message_stream, slice_.message_worker.group, "1-0"),
