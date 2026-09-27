@@ -146,8 +146,9 @@ class PluginResponse(BaseModel):
         return self
 
 
-# The fraction a source writes, down to the last digit it wrote: an ISO instant
-# may state more precision than a datetime can hold.
+# Every fraction a source writes, down to the last digit it wrote: an ISO
+# instant may state more precision than a datetime can hold, and the offset
+# can carry a fraction of its own.
 _INSTANT_FRACTION = re.compile(r"[.,](\d+)")
 
 
@@ -173,12 +174,20 @@ def parse_instant(value: Any) -> datetime | None:
     # digits of a finer fraction reads the instant as *earlier* than the source
     # wrote it: a URL whose source said it dies at ``12:00:00.0000001Z`` would
     # be refused from ``12:00:00`` on, losing its last 100 ns of life.  The
-    # stated instant is a lower bound on the lifetime, so an unrepresentable
-    # tail rounds up: the instant is never read as earlier than it was written,
-    # and never as more than a microsecond later than it was.
-    fraction = _INSTANT_FRACTION.search(text)
-    if fraction is not None and fraction.group(1)[6:].strip("0"):
-        parsed += timedelta(microseconds=1)
+    # stated instant is a lower bound on the lifetime, so every unrepresentable
+    # tail rounds up by the microsecond that covers it.  An ISO instant carries
+    # at most two fractions -- the seconds field and the offset -- so the
+    # instant is never read as earlier than it was written and never as more
+    # than two microseconds later than it was.  At the representable ceiling
+    # the truncated value stands: no later instant can be named, and the
+    # refusal it could cause is confined to the last microsecond of year 9999.
+    tails = sum(1 for fraction in _INSTANT_FRACTION.finditer(text)
+                if fraction.group(1)[6:].strip("0"))
+    if tails:
+        try:
+            parsed += timedelta(microseconds=tails)
+        except OverflowError:
+            pass
     return parsed.astimezone(timezone.utc)
 
 

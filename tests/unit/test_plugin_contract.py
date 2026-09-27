@@ -434,6 +434,17 @@ def test_a_stated_instant_is_never_read_as_earlier_than_it_was_written():
     assert parse_instant("2026-09-28T12:00:00.1234560Z") == exact
     assert _resolved_media(expires_at="2026-09-28T12:00:00.1234560Z").expires_at == (
         "2026-09-28T12:00:00.123456Z")
+    # The offset can carry a fraction of its own, and Python truncates that one
+    # too: the source's instant is 100 ns later than the second it reads as.
+    stated = datetime(2026, 9, 28, 12, 0, 0, 100000, tzinfo=timezone.utc)
+    offset = _resolved_media(expires_at="2026-09-28T12:00.1-00:00.0000001").expires_at
+    parsed_offset = parse_instant(offset)
+    assert parsed_offset is not None and parsed_offset > stated
+    assert parsed_offset - stated <= timedelta(microseconds=2)
+    # The latest instant a datetime can name has no later one to round up to,
+    # and rounding into it must not raise out of a contract validator.
+    assert parse_instant("9999-12-31T23:59:59.9999991Z") == datetime.max.replace(
+        tzinfo=timezone.utc)
 
 
 @pytest.mark.parametrize("quality", ["", "bad value", "quality!", "q" * 17])

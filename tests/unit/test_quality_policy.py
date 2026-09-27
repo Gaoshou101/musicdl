@@ -34,6 +34,9 @@ from musicdl.sources.registry import SourceRegistry, SourceEntry
 from musicdl.wecom.results import success_message
 
 ID3 = b'ID3\x04\x00\x00\x00\x00\x00\x00xyz'
+# The shortest header the transport classifies as an ISO base media file.
+M4A = b'\x00\x00\x00\x14ftypM4A \x00\x00\x00\x00M4A '
+BODIES = {'flac': b'fLaCdata', 'm4a': M4A}
 
 
 class AudioSource:
@@ -50,10 +53,10 @@ class AudioSource:
         async def chunks():
             if self.body_fail:
                 raise MediaError('download_failed')
-            yield b'fLaCdata' if self.actual == 'flac' else ID3
+            yield BODIES.get(self.actual, ID3)
         async def close():
             self.closed += 1
-        return DownloadMetadata(chunks(), extension='flac' if self.actual == 'flac' else 'mp3',
+        return DownloadMetadata(chunks(), extension=self.actual if self.actual in BODIES else 'mp3',
                                 quality=self.stated, _close_once=_CloseOnce(close))
 
     async def health(self):
@@ -230,16 +233,30 @@ def test_a_replay_agrees_with_a_download_that_switched_to_a_lossy_ask(tmp_path):
     assert replayed.download.quality_downgraded
 
 
-@pytest.mark.parametrize('on_disk,stored,expected', [
+# A record this revision or a later one wrote keeps its label; a record that
+# predates this verifier is re-judged off the bytes.  The later-revision side
+# is pinned by ``test_replay_repeats_the_quality_verdict_the_record_holds``.
+@pytest.mark.parametrize('on_disk,stored,expected,expected_quality,extension', [
     # Genuine FLAC a source labelled ``320k``: an earlier revision read the
     # lossy label as a downgrade, and the file the bytes prove is not one.
-    ('flac', {'actual_quality': '320k', 'quality_downgraded': True}, False),
+    ('flac', {'actual_quality': '320k', 'quality_downgraded': True}, False, 'flac', '.flac'),
     # Lossy bytes beside the alternate's ``320k`` ask: the record does not carry
     # the tier the job asked for, so a verdict read off the recorded ask cleared
     # a downgrade the bytes prove.
-    ('320k', {'requested_quality': '320k', 'actual_quality': '320k', 'quality_downgraded': False}, True),
+    ('320k', {'requested_quality': '320k', 'actual_quality': '320k', 'quality_downgraded': False}, True,
+     '320k', '.mp3'),
+    # A record an earlier revision wrote: its ``320k`` label is not reconciled
+    # against an m4a artifact, because this revision does not stand behind the
+    # rules that put the label there, and m4a proves nothing about the codec.
+    ('m4a', {'quality_revision': 0, 'actual_quality': '320k', 'quality_downgraded': True}, False, 'm4a',
+     '.m4a'),
+    # A record this revision wrote keeps the label it reconciled, so a source
+    # that declared 320k and sent m4a is still the downgrade it declared.
+    ('m4a', {'quality_revision': 1, 'actual_quality': '320k', 'quality_downgraded': False}, True, '320k',
+     '.m4a'),
 ])
-def test_a_replay_reads_the_downgrade_verdict_off_the_bytes_on_disk(tmp_path, on_disk, stored, expected):
+def test_a_replay_reads_the_downgrade_verdict_off_the_bytes_on_disk(tmp_path, on_disk, stored, expected,
+                                                                  expected_quality, extension):
     """A stale verdict is re-checked in both directions, never repeated.
 
     The artifact's own container is the only evidence a replay has, and it is
@@ -268,11 +285,13 @@ def test_a_replay_reads_the_downgrade_verdict_off_the_bytes_on_disk(tmp_path, on
         return replayed, record.result
 
     replayed, recorded = asyncio.run(scenario())
-    assert replayed.download.extension == ('.flac' if on_disk == 'flac' else '.mp3')
-    assert replayed.download.actual_quality == ('flac' if on_disk == 'flac' else '320k')
+    # The container the source writes is the label when it names one, and mp3
+    # otherwise -- the ``320k`` row serves an mp3, not a file called ``.320k``.
+    assert replayed.download.extension == extension
+    assert replayed.download.actual_quality == expected_quality
     assert replayed.download.quality_downgraded is expected
     assert len(source.calls) == 1
-    assert recorded['actual_quality'] == ('flac' if on_disk == 'flac' else '320k')
+    assert recorded['actual_quality'] == on_disk
 
 
 def test_a_switched_source_records_the_tier_it_was_actually_asked_for(tmp_path):

@@ -651,7 +651,20 @@ class JobWorker(_StreamWorker):
         # request under ``lossless_first`` that came back with bytes proving
         # lossy, and nothing else -- a job that asked for a lossy tier, or that
         # asked under ``best_available``, downgraded nothing by being answered.
-        actual_quality = served_quality(outcome.get("actual_quality") or result.download.actual_quality,
+        #
+        # A stored label is re-read unless the record predates this verifier.  A
+        # label an earlier revision stored was judged by rules this revision no
+        # longer stands behind, so the artifact's own container is the evidence
+        # that is left: the label is dropped rather than reconciled against bytes
+        # it may describe under rules that have since changed.  Measured shape: a
+        # stale ``320k`` beside an m4a artifact kept a lossy tier the file never
+        # proves, and a stale ``320k`` beside genuine FLAC would have done the
+        # same.  A record written at this revision or a later one was judged by
+        # rules at least as strict as these, so its label stands: dropping it
+        # would discard a verdict a stricter verifier read off the same bytes.
+        revision = int(outcome.get("quality_revision") or 0)
+        recorded = outcome.get("actual_quality") if revision >= QUALITY_REVISION else None
+        actual_quality = served_quality(recorded or result.download.actual_quality,
                                         result.download.extension)
         job_ask = requested_quality(candidate, policy=self.quality_policy,
                                     preference=self.quality_preference)
@@ -663,7 +676,7 @@ class JobWorker(_StreamWorker):
                        requested_quality=(outcome.get("requested_quality")
                                           or result.download.requested_quality),
                        quality_downgraded=downgraded,
-                       quality_revision=int(outcome.get("quality_revision") or 0)))
+                       quality_revision=revision))
 
     def _guarded_sources(self, job_id: str, owner: str, deadline: float) -> dict:
         """Wrap every source so the shared health call is a separate fenced effect."""
