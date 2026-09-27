@@ -638,31 +638,31 @@ class JobWorker(_StreamWorker):
         # that verified it: a record written before this revision existed must not
         # look like one this revision stands behind, so a missing revision is
         # replayed as 0 instead of as the current number.
-        # The bytes on disk are the evidence a replay stands on, so a stored
-        # label the artifact's own container contradicts is reconciled exactly
-        # the way a fresh download reconciles it: a record written by an earlier
-        # revision cannot make a replay claim a codec the file is not.
+        # The bytes on disk are the evidence a replay stands on, so the verdict is
+        # recomputed the way a fresh download computes it rather than repeated
+        # from the record.  Both directions of a stale verdict are reachable: a
+        # record written by an earlier revision could call genuine FLAC a
+        # downgrade because the source labelled the answer ``320k``, and one
+        # could clear a downgrade because the tier recorded beside an answer is
+        # the tier the alternate was asked for -- the tier the job itself asked
+        # for is nowhere in the record.  So the job's own ask is recomputed from
+        # the candidate and the answer is read off the container the artifact
+        # proves, which is exactly the pair the live run judged: a lossless
+        # request under ``lossless_first`` that came back with bytes proving
+        # lossy, and nothing else -- a job that asked for a lossy tier, or that
+        # asked under ``best_available``, downgraded nothing by being answered.
         actual_quality = served_quality(outcome.get("actual_quality") or result.download.actual_quality,
                                         result.download.extension)
-        # The verdict the live run reached stands, and the artifact can only add
-        # to it.  The tier recorded beside an answer is the tier the source that
-        # answered was asked for -- a downgrade switch asks an alternate for the
-        # tier *it* declares -- so a replay that read the verdict off that tier
-        # alone cleared a downgrade the live run had proved with the job's own
-        # ask in hand.  The bytes are still the evidence they always were: a
-        # request the record names as lossless that came back with lossy bytes
-        # is a downgrade whether or not the record said so, which is how a
-        # record from an earlier revision is re-checked instead of repeated.
-        contradicted = (is_lossless(outcome.get("requested_quality")
-                                    or result.download.requested_quality)
-                        and proven_lossy(actual_quality))
+        job_ask = requested_quality(candidate, policy=self.quality_policy,
+                                    preference=self.quality_preference)
+        downgraded = (self.quality_policy == "lossless_first" and is_lossless(job_ask)
+                      and proven_lossy(actual_quality))
         return replace(result, download=replace(result.download,
                        quality=actual_quality or result.download.quality,
                        actual_quality=actual_quality,
                        requested_quality=(outcome.get("requested_quality")
                                           or result.download.requested_quality),
-                       quality_downgraded=(bool(outcome.get("quality_downgraded"))
-                                           or contradicted),
+                       quality_downgraded=downgraded,
                        quality_revision=int(outcome.get("quality_revision") or 0)))
 
     def _guarded_sources(self, job_id: str, owner: str, deadline: float) -> dict:

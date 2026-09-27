@@ -6,7 +6,7 @@ import hashlib
 import ipaddress
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 from typing import Any, Literal
 from uuid import UUID
@@ -146,6 +146,11 @@ class PluginResponse(BaseModel):
         return self
 
 
+# The fraction a source writes, down to the last digit it wrote: an ISO instant
+# may state more precision than a datetime can hold.
+_INSTANT_FRACTION = re.compile(r"[.,](\d+)")
+
+
 def parse_instant(value: Any) -> datetime | None:
     """The absolute instant a timestamp names, or ``None`` when none is stated.
 
@@ -164,6 +169,16 @@ def parse_instant(value: Any) -> datetime | None:
         return None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
+    # A datetime holds microseconds and nothing finer, and dropping the extra
+    # digits of a finer fraction reads the instant as *earlier* than the source
+    # wrote it: a URL whose source said it dies at ``12:00:00.0000001Z`` would
+    # be refused from ``12:00:00`` on, losing its last 100 ns of life.  The
+    # stated instant is a lower bound on the lifetime, so an unrepresentable
+    # tail rounds up: the instant is never read as earlier than it was written,
+    # and never as more than a microsecond later than it was.
+    fraction = _INSTANT_FRACTION.search(text)
+    if fraction is not None and fraction.group(1)[6:].strip("0"):
+        parsed += timedelta(microseconds=1)
     return parsed.astimezone(timezone.utc)
 
 

@@ -412,6 +412,30 @@ def test_resolved_media_keeps_a_sub_second_expiry_instant():
     assert has_expired(stamped, now=moment)
 
 
+def test_a_stated_instant_is_never_read_as_earlier_than_it_was_written():
+    # A datetime holds microseconds and nothing finer, so the unrepresentable
+    # tail of a stated expiry has to round up: ``12:00:00.0000001`` is still in
+    # the future at ``12:00:00``, and reading it as that whole second refused a
+    # live URL for the last 100 ns of its life.
+    from datetime import datetime, timedelta, timezone
+
+    from musicdl.contracts.plugin import has_expired, parse_instant
+
+    second = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    stamped = _resolved_media(expires_at="2026-09-28T12:00:00.0000001Z").expires_at
+    parsed = parse_instant(stamped)
+    assert parsed is not None and parsed > second
+    assert not has_expired(stamped, now=second)
+    assert not has_expired(stamped, now=parsed - timedelta(microseconds=1))
+    assert has_expired(stamped, now=parsed)
+    # A fraction a datetime can hold keeps the value the source wrote, and a
+    # trailing zero is not precision.
+    exact = datetime(2026, 9, 28, 12, 0, 0, 123456, tzinfo=timezone.utc)
+    assert parse_instant("2026-09-28T12:00:00.1234560Z") == exact
+    assert _resolved_media(expires_at="2026-09-28T12:00:00.1234560Z").expires_at == (
+        "2026-09-28T12:00:00.123456Z")
+
+
 @pytest.mark.parametrize("quality", ["", "bad value", "quality!", "q" * 17])
 def test_resolved_media_rejects_invalid_quality_values(quality):
     with pytest.raises(ValidationError):

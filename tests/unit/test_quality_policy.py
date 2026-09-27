@@ -230,6 +230,51 @@ def test_a_replay_agrees_with_a_download_that_switched_to_a_lossy_ask(tmp_path):
     assert replayed.download.quality_downgraded
 
 
+@pytest.mark.parametrize('on_disk,stored,expected', [
+    # Genuine FLAC a source labelled ``320k``: an earlier revision read the
+    # lossy label as a downgrade, and the file the bytes prove is not one.
+    ('flac', {'actual_quality': '320k', 'quality_downgraded': True}, False),
+    # Lossy bytes beside the alternate's ``320k`` ask: the record does not carry
+    # the tier the job asked for, so a verdict read off the recorded ask cleared
+    # a downgrade the bytes prove.
+    ('320k', {'requested_quality': '320k', 'actual_quality': '320k', 'quality_downgraded': False}, True),
+])
+def test_a_replay_reads_the_downgrade_verdict_off_the_bytes_on_disk(tmp_path, on_disk, stored, expected):
+    """A stale verdict is re-checked in both directions, never repeated.
+
+    The artifact's own container is the only evidence a replay has, and it is
+    the evidence a fresh download uses too, so the two paths agree on the same
+    bytes whatever an older record claimed about them.
+    """
+    from test_worker_job import Redis, State, WeCom
+    from musicdl.worker.workers import JobWorker
+
+    state, wecom = State(), WeCom()
+    source = AudioSource(on_disk)
+
+    async def refresh(query, excluded):
+        return SearchResult((), (), 'v')
+
+    worker = JobWorker(Redis(), wecom, {'source': source}, str(tmp_path),
+                       state=state, refresh=refresh)
+    job = {'request_id': 'r', 'from_user': 'u', 'candidate': lossless_candidate().model_dump(mode='json')}
+
+    async def scenario():
+        await worker.handle_job(job, job_id='quality-replay-bytes')
+        record = await state.get_job_effect('quality-replay-bytes', 'download')
+        replayed = await worker._replay_download('quality-replay-bytes', job, lossless_candidate(), 'u',
+                                                 asyncio.get_running_loop().time() + 5,
+                                                 outcome=dict(record.result, **stored))
+        return replayed, record.result
+
+    replayed, recorded = asyncio.run(scenario())
+    assert replayed.download.extension == ('.flac' if on_disk == 'flac' else '.mp3')
+    assert replayed.download.actual_quality == ('flac' if on_disk == 'flac' else '320k')
+    assert replayed.download.quality_downgraded is expected
+    assert len(source.calls) == 1
+    assert recorded['actual_quality'] == ('flac' if on_disk == 'flac' else '320k')
+
+
 def test_a_switched_source_records_the_tier_it_was_actually_asked_for(tmp_path):
     """The record keeps the tier the alternate was asked for, not the opening request.
 
