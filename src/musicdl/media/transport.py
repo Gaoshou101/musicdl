@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
-from musicdl.contracts.plugin import ResolvedMedia
+from musicdl.contracts.plugin import ResolvedMedia, has_expired
 from musicdl.plugins.broker import (
     ActionDenied, EgressPolicy, EgressTarget, PluginManifest, _parse_action_url,
     _resolve_global_addresses, coerce_egress_policy,
@@ -397,6 +397,13 @@ class SecureMediaTransport:
             timeout_ms = self.default_timeout_ms
         if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
             raise MediaTransportError("media_timeout")
+        # A descriptor's stated lifetime is part of the descriptor: the URL is
+        # retired the moment it passes, so the last step before the socket
+        # refuses it instead of opening a link the source has withdrawn.  The
+        # caller that held the answer re-resolves on this code; a caller that
+        # ignored the instant until now gets the same honest refusal.
+        if has_expired(media.expires_at):
+            raise MediaTransportError("media_url_expired")
         deadline = self.clock() + timeout_ms / 1000
         egress = coerce_egress_policy(policy)
 

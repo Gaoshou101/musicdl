@@ -227,6 +227,37 @@ def test_worker_replay_keeps_actual_quality_and_path_without_switching_again(tmp
     assert record.target_relative_path.endswith('.mp3')
 
 
+def test_a_replay_reconciles_a_stored_label_with_the_bytes_on_disk(tmp_path):
+    """A record written by an earlier revision cannot make a replay lie.
+
+    The artifact's own container is the evidence a replay stands on, so a stored
+    ``actual_quality`` the file contradicts is dropped exactly the way a fresh
+    download drops it.
+    """
+    from test_worker_job import Redis, State, WeCom
+    from musicdl.worker.workers import JobWorker
+    state, wecom = State(), WeCom()
+    original, alternate = AudioSource(), AudioSource()
+
+    async def refresh(query, excluded):
+        return SearchResult((lossless_candidate('alternate'),), (), 'v', (('alternate',),))
+
+    worker = JobWorker(Redis(), wecom, {'source': original, 'alternate': alternate}, str(tmp_path),
+                       state=state, refresh=refresh)
+    job = {'request_id': 'r', 'from_user': 'u', 'candidate': lossless_candidate().model_dump(mode='json')}
+
+    async def scenario():
+        await worker.handle_job(job, job_id='quality-1')
+        return await worker._replay_download('quality-1', job, lossless_candidate(), 'u',
+                                             asyncio.get_running_loop().time() + 5,
+                                             outcome={'requested_quality': 'flac', 'actual_quality': 'flac'})
+
+    replayed = asyncio.run(scenario())
+    assert replayed.download.relative_path.suffix == '.mp3'
+    assert replayed.download.actual_quality == 'mp3'
+    assert replayed.download.quality == 'mp3'
+
+
 @pytest.mark.parametrize('policy,preference,expected', [
     ('lossless_first', None, 'lossless'),
     ('lossless_first', '320k', 'lossy'),

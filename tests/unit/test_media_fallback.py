@@ -368,3 +368,43 @@ def test_reservation_owner_and_fence_are_forwarded_to_download(tmp_path, monkeyp
     assert outcome.download == "downloaded"
     assert captured["reservation"] is reservation
     assert (captured["artifact_store"], captured["owner"], captured["fence"]) == ("store", "owner", 7)
+
+
+def test_fallback_reresolves_a_descriptor_the_transport_retired(tmp_path):
+    """A descriptor that dies between resolve and stream is resolved again.
+
+    The transport refuses a URL the source has already retired, so the frozen
+    answer can never be streamed blind; the fallback asks the source for a live
+    one and keeps the download instead of reporting a failure.
+    """
+    retired, alive = "2000-01-01T00:00:00Z", "2999-01-01T00:00:00Z"
+
+    class Retiring(Source):
+        def __init__(self):
+            super().__init__()
+            self.resolved = 0
+
+        async def download(self, item, quality=None):
+            self.resolved += 1
+            return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg",
+                                    quality="flac",
+                                    expires_at=retired if self.resolved == 1 else alive)
+
+    source = Retiring()
+    events = []
+
+    async def refresh(query, excluded):
+        return result()
+
+    outcome = asyncio.run(download_with_fallback(
+        candidate(), {"a": source}, tmp_path, request_id="r", query="Song",
+        quality="flac", quality_policy="lossless_first", refresh=refresh, record=events.append))
+
+    assert outcome.download is not None
+    assert source.resolved == 2
+    # The retired answer is reported honestly rather than hidden, and the
+    # download only counts once the live descriptor has produced the bytes.
+    assert [(e.stage, e.status, e.error_code) for e in events] == [
+        ("download", "failed", "media_url_expired"),
+        ("download", "success", None),
+    ]

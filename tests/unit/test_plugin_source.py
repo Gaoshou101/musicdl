@@ -211,6 +211,52 @@ def test_download_never_opens_a_descriptor_the_source_already_retired(tmp_path):
     assert 0 < client.resolve_timeouts[1] <= client.resolve_timeouts[0] <= 15000
 
 
+def test_a_second_resolve_that_fails_reports_the_retired_url(tmp_path):
+    """The URL that prompted the second resolve is dead however that resolve ends."""
+    class Exploding(ResolveClient):
+        calls = 0
+
+        async def resolve(self, stored, candidate, *, timeout_ms=None, quality=None):
+            self.qualities.append(quality)
+            self.resolve_timeouts.append(timeout_ms)
+            Exploding.calls += 1
+            if Exploding.calls == 1:
+                return descriptor(expires_at=RETIRED)
+            raise RuntimeError("resolver went away")
+
+    p = plugin(tmp_path, hosts=("cdn.example",))
+    transport = FakeTransport(metadata=DownloadMetadata(chunks=()))
+    source = PluginSource(p, Exploding(), transport, resolve_stream_timeout_ms=15000)
+
+    with pytest.raises(MediaError) as caught:
+        asyncio.run(source.download(selected()))
+    assert caught.value.code == "media_url_expired"
+    assert transport.calls == []
+
+
+def test_a_second_resolve_that_fails_with_a_media_code_keeps_that_code(tmp_path):
+    """A stated reason for the failure is never replaced by a generic one."""
+    class Refusing(ResolveClient):
+        calls = 0
+
+        async def resolve(self, stored, candidate, *, timeout_ms=None, quality=None):
+            self.qualities.append(quality)
+            self.resolve_timeouts.append(timeout_ms)
+            Refusing.calls += 1
+            if Refusing.calls == 1:
+                return descriptor(expires_at=RETIRED)
+            raise MediaError("media_timeout")
+
+    p = plugin(tmp_path, hosts=("cdn.example",))
+    transport = FakeTransport(metadata=DownloadMetadata(chunks=()))
+    source = PluginSource(p, Refusing(), transport, resolve_stream_timeout_ms=15000)
+
+    with pytest.raises(MediaError) as caught:
+        asyncio.run(source.download(selected()))
+    assert caught.value.code == "media_timeout"
+    assert transport.calls == []
+
+
 def test_download_streams_the_fresh_answer_after_the_first_one_expired(tmp_path):
     """The live second answer is what reaches the transport, under one shrinking budget."""
     p = plugin(tmp_path, hosts=("cdn.example",))

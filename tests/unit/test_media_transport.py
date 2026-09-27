@@ -430,6 +430,32 @@ def test_transport_refuses_a_short_advisory_body_that_has_no_content_length():
     asyncio.run(read())
 
 
+def test_transport_refuses_a_descriptor_the_source_has_already_retired():
+    """The instant is part of the descriptor, so the socket is never opened.
+
+    A caller that held an answer across its deadline reaches the same refusal a
+    fresh resolve would have produced, and the fallback path re-resolves on it
+    instead of streaming a link the source has withdrawn.
+    """
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, *_ = transport(raw)
+    retired = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                            media_type="audio/mpeg", expires_at="2000-01-01T00:00:00Z")
+    error_code(instance.open(retired, policy=("xn--tst-qla.example",)), "media_url_expired")
+    assert sock.sent == b"" and not sock.closed
+
+
+def test_transport_still_streams_a_descriptor_whose_lifetime_is_ahead():
+    """A stated lifetime in the future is not a refusal, and an absent one never is."""
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    metadata = asyncio.run(instance.open(live, policy=("xn--tst-qla.example",)))
+    assert sock.sent.startswith(b"GET /song.mp3")
+    asyncio.run(metadata.aclose())
+
+
 def test_transport_refuses_an_authoritative_size_the_server_exceeded():
     raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 25\r\n\r\n" + ID3_BODY + b"x" * 15
     instance, *_ = transport(raw)

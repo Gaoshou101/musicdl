@@ -14,7 +14,7 @@ from musicdl.ai.models import AIRankResult
 from musicdl.config import REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS
 from musicdl.media.fallback import download_with_fallback
 from musicdl.media.download import source_download
-from musicdl.sources.quality import QUALITY_REVISION, requested_quality
+from musicdl.sources.quality import QUALITY_REVISION, requested_quality, served_quality
 from musicdl.media.language import resolve_language
 from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, MediaError
 from musicdl.sources.models import Candidate
@@ -637,7 +637,12 @@ class JobWorker(_StreamWorker):
         # that verified it: a record written before this revision existed must not
         # look like one this revision stands behind, so a missing revision is
         # replayed as 0 instead of as the current number.
-        actual_quality = outcome.get("actual_quality") or result.download.actual_quality
+        # The bytes on disk are the evidence a replay stands on, so a stored
+        # label the artifact's own container contradicts is reconciled exactly
+        # the way a fresh download reconciles it: a record written by an earlier
+        # revision cannot make a replay claim a codec the file is not.
+        actual_quality = served_quality(outcome.get("actual_quality") or result.download.actual_quality,
+                                        result.download.extension)
         return replace(result, download=replace(result.download,
                        quality=actual_quality or result.download.quality,
                        actual_quality=actual_quality,

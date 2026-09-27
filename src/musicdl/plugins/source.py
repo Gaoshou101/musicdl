@@ -92,7 +92,16 @@ class PluginSource:
             # answer is resolved once more so a live URL is streamed, and only a
             # second retired answer ends the attempt with the stable code the
             # fallback path already knows how to re-resolve on.
-            media = await resolve()
+            try:
+                media = await resolve()
+            except MediaError:
+                raise
+            except Exception as exc:
+                # The URL that prompted the second resolve is dead either way, so
+                # a resolve that fails outright keeps the stable code the
+                # fallback path already re-resolves on rather than collapsing
+                # into the opaque ``download_failed`` an unexpected error leaves.
+                raise MediaError("media_url_expired") from exc
             if not usable(media):
                 raise MediaError("media_url_expired")
         return await self.transport.open(media, policy=self.stored.manifest.egress,

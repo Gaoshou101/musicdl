@@ -385,6 +385,14 @@ function lxParseSize(value) {
   return Number.isSafeInteger(size) && size >= 0 ? size : null;
 }
 
+// How long a URL stays usable, when the source states it.  A source that
+// states nothing leaves it null: inventing a lifetime would either discard a
+// live URL or bless a dead one, and neither is this shim's call to make.
+function lxExpiry(value) {
+  if (!value || typeof value !== "object") return "";
+  return typeof value.expires_at === "string" ? value.expires_at.trim() : "";
+}
+
 function lxQualityInfo(item) {
   const types = item && item._types && typeof item._types === "object" && !Array.isArray(item._types)
     ? item._types : {};
@@ -404,7 +412,9 @@ function lxQualityInfo(item) {
   const bitrate = current === "128k" || current === "192k" || current === "320k" ? Number.parseInt(current, 10) : null;
   const format = current === "flac" || current === "flac24bit" ? "flac"
     : ["alac", "ape", "wav", "aiff"].includes(current) ? current : null;
-  return { qualities, sizes, bitrate, format, size: currentSize };
+  // The lifetime the row itself states rides along with it, so freezing a
+  // selection context keeps the instant the URL it was resolved to expires.
+  return { qualities, sizes, bitrate, format, size: currentSize, expiry: lxExpiry(item) };
 }
 
 function lxCandidate(source, item) {
@@ -429,6 +439,7 @@ function lxCandidate(source, item) {
     size: quality.size,
     qualities: quality.qualities,
     quality_sizes: quality.sizes,
+    expires_at: quality.expiry || null,
   };
 }
 
@@ -534,11 +545,7 @@ async function lxResolve(payload) {
   const url = lxAnswerUrl(answer);
   if (!url) throw new Error("lx source returned no media URL");
   const extension = lxExtension(url, quality);
-  // How long this URL stays usable, when the source states it.  A source that
-  // states nothing leaves it null: inventing a lifetime would either discard a
-  // live URL or bless a dead one, and neither is this shim's call to make.
-  const expiresAt = answer && typeof answer === "object" && typeof answer.expires_at === "string"
-    ? answer.expires_at.trim() : "";
+  const expiresAt = lxExpiry(answer);
   // A requested tier is intent, not evidence of the codec or bitrate served.
   const answerQuality = answer && typeof answer === "object" ? lxQualityName(answer.quality) : "";
   const suffix = new URL(url).pathname.split(".").pop().toLowerCase();
