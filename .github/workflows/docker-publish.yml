@@ -4,11 +4,6 @@ on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Image tag to publish
-        required: true
-        default: latest
 
 permissions:
   contents: read
@@ -21,6 +16,10 @@ jobs:
   publish:
     name: Build and publish images
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.value }}
+      main: ${{ steps.main.outputs.digest }}
+      runner: ${{ steps.runner.outputs.digest }}
     steps:
       - name: Check out release source
         uses: actions/checkout@v7
@@ -32,7 +31,9 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           else
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            # Manual dispatch may refresh latest, but may not rewrite a
+            # numbered image without also updating its GitHub Release.
+            echo "value=latest" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Set up Buildx
@@ -46,6 +47,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push main image
+        id: main
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -59,6 +61,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=musicdl-main
 
       - name: Build and push plugin runner image
+        id: runner
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -70,3 +73,67 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/musicdl-plugin-runner:latest
           cache-from: type=gha,scope=musicdl-plugin-runner
           cache-to: type=gha,mode=max,scope=musicdl-plugin-runner
+
+  # A tag is only half of a release: the GitHub Release is the other half and
+  # it has to carry the same source commit and the image digests this run just
+  # published. Doing it here -- rather than in a separate workflow -- is what
+  # makes the two impossible to drift apart. Re-running the workflow for a tag
+  # updates the existing release instead of failing, which is how a release
+  # that was created before its images finished gets its digests filled in.
+  release:
+    name: Publish GitHub release
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Create or update the release for this tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          tag="${{ github.ref_name }}"
+          version="${{ needs.publish.outputs.version }}"
+          main_digest="${{ needs.publish.outputs.main }}"
+          runner_digest="${{ needs.publish.outputs.runner }}"
+          namespace="${{ env.NAMESPACE }}"
+          notes="docs/release-notes/${tag}.md"
+
+          if [[ -z "${version}" || -z "${main_digest}" || -z "${runner_digest}" ]]; then
+            echo "::error::the publish job did not report a version and both image digests"
+            exit 1
+          fi
+
+          if [[ ! -f "${notes}" ]]; then
+            echo "::error::required release notes ${notes} are missing"
+            exit 1
+          fi
+          body="$(mktemp)"
+          cat "${notes}" > "${body}"
+          source_commit="$(git rev-parse HEAD)"
+
+          {
+            printf '\n## Source / 源码\n\n'
+            printf 'Source commit: `%s`\n' "${source_commit}"
+            printf '\n## Docker images / Docker 镜像\n\n'
+            printf -- '- `%s/musicdl:%s` — `%s`\n' "${namespace}" "${version}" "${main_digest}"
+            printf -- '- `%s/musicdl-plugin-runner:%s` — `%s`\n' "${namespace}" "${version}" "${runner_digest}"
+          printf '\nBoth OCI image indexes were built for `linux/amd64` and `linux/arm64` by this workflow. / 此工作流为 `linux/amd64` 和 `linux/arm64` 构建了两个 OCI 镜像索引。\n'
+          } >> "${body}"
+
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              --title "musicdl ${version}" --notes-file "${body}"
+          else
+            gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              --title "musicdl ${version}" --notes-file "${body}" --verify-tag
+          fi
+          echo "published GitHub release ${tag}"
