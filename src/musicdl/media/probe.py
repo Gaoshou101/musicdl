@@ -1,4 +1,10 @@
-"""Bounded, optional metadata probes using the download transport's egress policy."""
+"""Bounded, optional metadata probes using the download transport's egress policy.
+
+Every value this module returns is for display only.  A probe never writes a
+size back into a `ResolvedMedia`, so it cannot become the size contract the
+download transport enforces; that check keeps reading the resolve answer and the
+response headers.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -89,11 +95,22 @@ class ProbeCache:
                     media = await source.client.resolve(source.stored, candidate, timeout_ms=remaining_ms)
                     if media.candidate_id != candidate.item_id:
                         return dict(UNKNOWN)
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        return dict(UNKNOWN)
-                    result = await probe_media(source.transport, media, policy=manifest.egress,
-                                               timeout=remaining)
+                    if media.declared_size is not None:
+                        # Resolve already carried the source's own size, so the
+                        # CDN is not touched at all: probing is the fallback for
+                        # answers that state no size, never the default path.
+                        # This number is a display value like every other probe
+                        # result -- it is not written back into a descriptor and
+                        # the download transport still judges the stream against
+                        # its own headers.
+                        result = {"size": media.declared_size, "extension": media.extension,
+                                  "media_type": media.media_type, "quality": media.quality}
+                    else:
+                        remaining = deadline - loop.time()
+                        if remaining <= 0:
+                            return dict(UNKNOWN)
+                        result = await probe_media(source.transport, media, policy=manifest.egress,
+                                                   timeout=remaining)
         except Exception:
             return dict(UNKNOWN)
         self.cache[key] = (self.clock() + self.ttl, dict(result))

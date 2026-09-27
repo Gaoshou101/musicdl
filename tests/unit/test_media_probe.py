@@ -276,3 +276,42 @@ def test_queued_item_expires_without_starting_resolve(tmp_path, monkeypatch):
         assert cache.slots._value == 4
 
     asyncio.run(scenario())
+
+
+def test_resolve_size_skips_the_cdn_probe(tmp_path):
+    """Resolve is the primary path: a size it already carried never hits the CDN."""
+    from test_plugin_source import ResolveClient
+
+    async def scenario():
+        source, candidate = make_source(tmp_path)
+        source.client = ResolveClient(descriptor=media(size=4096))
+        source.transport, sockets, connects, *_ = redirect_transport([])
+        result = await probe.probe_candidates([candidate], {"demo": source})
+        assert result["demo"]["1"] == {**probe.UNKNOWN, "size": 4096,
+                                       "extension": "mp3", "media_type": "audio/mpeg"}
+        assert connects == [] and sockets == []
+
+    asyncio.run(scenario())
+
+
+def test_probe_size_is_display_only_and_never_a_declared_size(tmp_path):
+    async def scenario():
+        source, candidate = make_source(tmp_path)
+        result = await probe.probe_candidates([candidate], {"demo": source})
+        assert result["demo"]["1"]["size"] == 22
+        # The probed number lives only in the probe answer.  The descriptor the
+        # download path resolves still declares no size, so the transport keeps
+        # judging the stream against the response headers it reads itself.
+        assert source.client.descriptor.declared_size is None
+
+    asyncio.run(scenario())
+
+
+def test_probe_fallback_get_always_carries_a_range_header(tmp_path):
+    transport, sockets, *_ = redirect_transport([
+        b"HTTP/1.1 200 OK\r\n\r\n",
+        b"HTTP/1.1 206 Partial\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/4242\r\n\r\n"])
+    assert asyncio.run(probe.probe_media(transport, media(), policy=("xn--tst-qla.example",)))["size"] == 4242
+    assert sockets[0].sent.startswith(b"HEAD ")
+    assert sockets[1].sent.startswith(b"GET ")
+    assert b"Range: bytes=0-0\r\n" in sockets[1].sent
