@@ -533,13 +533,20 @@ async function lxResolve(payload) {
   const url = lxAnswerUrl(answer);
   if (!url) throw new Error("lx source returned no media URL");
   const extension = lxExtension(url, quality);
+  const declaredSize = candidate.quality_sizes && typeof candidate.quality_sizes === "object"
+    ? lxParseSize(candidate.quality_sizes[quality]) : null;
   return {
     candidate_id: String(candidate.item_id),
     url,
     extension,
     media_type: LX_MEDIA_TYPES[extension],
-    declared_size: candidate.quality_sizes && typeof candidate.quality_sizes === "object"
-      ? lxParseSize(candidate.quality_sizes[quality]) : null,
+    declared_size: declaredSize,
+    // `_types[quality].size` is the source's own reference value, not a
+    // contract: measured 2026-09-27, one QQ 音乐 FLAC answer carried 15 bytes
+    // more than the entry its source repeats.  Marking it advisory lets the
+    // transport refuse a body shorter than the reference while accepting a
+    // longer one and reporting the length the server really sent.
+    size_is_advisory: declaredSize !== null,
     quality,
   };
 }

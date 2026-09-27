@@ -440,10 +440,23 @@ class SecureMediaTransport:
                 raise MediaTransportError("media_response_invalid")
             extension, media_type = detected[0].lstrip("."), detected[1]
             content_length = hop.content_length
-            expected_size = media.declared_size if media.declared_size is not None else content_length
+            # Two kinds of expected size reach this point.  A value the main
+            # process observed itself (``Content-Length``, or a size the source
+            # stands behind) is authoritative: the transfer has to match it
+            # exactly, which is the 1.0.4 behaviour, and one byte more is a
+            # refusal.  A source's own reference size is advisory -- measured
+            # 2026-09-27, a QQ 音乐 FLAC answer carried 15 bytes more than the
+            # ``_types`` entry the source repeats -- so only a body shorter than
+            # the reference is refused, and the length the server actually sent
+            # is what this product reports and records.
+            declared = media.declared_size
+            advisory_size = declared if media.size_is_advisory else None
+            exact_size = content_length if media.size_is_advisory or declared is None else declared
             if content_length is not None and content_length > self.max_bytes:
                 raise MediaError("file_too_large")
-            if media.declared_size is not None and content_length is not None and content_length != expected_size:
+            if exact_size is not None and content_length is not None and content_length != exact_size:
+                raise MediaError("size_mismatch")
+            if advisory_size is not None and content_length is not None and content_length < advisory_size:
                 raise MediaError("size_mismatch")
 
             async def close_response() -> None:
@@ -463,7 +476,7 @@ class SecureMediaTransport:
                         observed += len(prefix)
                         if observed > self.max_bytes:
                             raise MediaError("file_too_large")
-                        if expected_size is not None and observed > expected_size:
+                        if exact_size is not None and observed > exact_size:
                             raise MediaError("size_mismatch")
                         yield prefix
                     while True:
@@ -488,10 +501,12 @@ class SecureMediaTransport:
                         observed += len(chunk)
                         if observed > self.max_bytes:
                             raise MediaError("file_too_large")
-                        if expected_size is not None and observed > expected_size:
+                        if exact_size is not None and observed > exact_size:
                             raise MediaError("size_mismatch")
                         yield chunk
-                    if expected_size is not None and observed != expected_size:
+                    if exact_size is not None and observed != exact_size:
+                        raise MediaError("size_mismatch")
+                    if advisory_size is not None and observed < advisory_size:
                         raise MediaError("size_mismatch")
                 except BaseException as exc:
                     primary = exc
@@ -503,8 +518,12 @@ class SecureMediaTransport:
                         if primary is None:
                             raise
 
+            # An accepted advisory size must never be echoed back: the panel,
+            # the download record and the success message all read this value,
+            # and they have to agree with the bytes on disk.
+            reported_size = content_length if advisory_size is not None else exact_size
             return DownloadMetadata(chunks=chunks(), extension=extension,
-                                    media_type=media_type, declared_size=expected_size,
+                                    media_type=media_type, declared_size=reported_size,
                                     _close_once=close_once)
         except asyncio.CancelledError:
             if close_once is not None:

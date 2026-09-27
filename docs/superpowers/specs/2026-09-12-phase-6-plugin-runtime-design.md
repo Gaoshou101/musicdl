@@ -82,8 +82,14 @@ validation path.
 For a confirmed candidate the main service calls the typed `PluginClient.resolve()`
 operation, which returns one `ResolvedMedia` descriptor: the selected
 `candidate_id`, an implicit-port `https` `url`, an `extension`, a `media_type`,
-an optional `declared_size`, and an optional short `quality` label. Older
-descriptors without `quality` remain valid. The descriptor is rejected unless
+an optional `declared_size`, an optional short `quality` label, and a
+`size_is_advisory` flag that defaults to `false`. Older descriptors without
+either new field remain valid. A size the main process observed itself, or a
+size the source stands behind, is authoritative and the stream has to match it
+exactly. A source that only repeats its own reference size (洛雪's
+`_types[quality].size`) sets `size_is_advisory` so the transport refuses a
+shorter body, accepts a longer one, and records the length the server really
+sent instead of the reference. The descriptor is rejected unless
 it is bound to the confirmed candidate's `item_id`, free of URL credentials,
 ports, and fragments, and consistent with the media type implied by its extension. The main
 process then streams the body itself through `SecureMediaTransport`, which
