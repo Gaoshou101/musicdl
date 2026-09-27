@@ -168,8 +168,17 @@ def parse_instant(value: Any) -> datetime | None:
 
 
 def format_instant(value: datetime) -> str:
-    """One canonical spelling, so two equal instants compare as equal text."""
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """One canonical spelling, so two equal instants compare as equal text.
+
+    Sub-second precision is kept.  An expiry the source stated as
+    ``12:00:00.900Z`` is a real lifetime, and stamping it as ``12:00:00Z``
+    refuses a link that is live for another 900 ms.  A whole second keeps the
+    shorter spelling, so the common case reads the way it always has.
+    """
+    moment = value.astimezone(timezone.utc)
+    if moment.microsecond == 0:
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def has_expired(expires_at: str | None, now: datetime | None = None) -> bool:

@@ -134,6 +134,8 @@ def test_success_event_names_the_tier_asked_for_and_the_tier_that_arrived(tmp_pa
     ('flac', 'flac', 'flac'),
     ('flac24bit', '.flac', 'flac24bit'),
     ('320k', 'mp3', '320k'),
+    ('320k', 'flac', 'flac'),
+    ('mp3', 'flac', 'flac'),
     ('alac', 'm4a', 'm4a'),
     ('master', 'mp3', 'master'),
     (None, '.flac', 'flac'),
@@ -166,6 +168,66 @@ def test_a_label_the_verified_container_contradicts_never_reaches_the_report(tmp
     # ``quality`` keeps the tier the source claimed; only the reconciliation
     # onto the verified container is new.
     assert result.download.quality == 'flac'
+
+
+def test_a_lossy_label_the_verified_flac_container_contradicts_is_not_a_downgrade(tmp_path):
+    """A source that says ``320k`` and hands over verified FLAC downgraded nothing.
+
+    A bitrate tier names a lossy codec as surely as a container name does, so
+    the file the bytes proved outranks it: the report names ``flac`` and the
+    lossless request counts as answered.
+    """
+    events = []
+    source = AudioSource('flac', stated='320k')
+
+    async def refresh(*args):
+        return SearchResult((), (), 'v')
+
+    result = asyncio.run(download_with_fallback(lossless_candidate(), {'source': source}, tmp_path,
+        request_id='r', query='Song', refresh=refresh, quality='flac', record=events.append))
+    delivered = [event for event in events if event.stage == 'download' and event.status == 'success']
+    assert len(delivered) == 1
+    assert delivered[0].actual_quality == 'flac'
+    assert result.download.actual_quality == 'flac'
+    assert result.download.extension == '.flac'
+    assert not result.download.quality_downgraded
+    assert '未取到无损' not in success_message(result.download)
+
+
+def test_a_replay_agrees_with_a_download_that_switched_to_a_lossy_ask(tmp_path):
+    """A downgrade the live run proved is not cleared by the replay.
+
+    The switch asked the alternate for the tier *it* declares -- 320k -- so the
+    record carries the lossy tier that source was asked for rather than the tier
+    the job wanted.  A replay that read the verdict off that tier alone reported
+    an answer no lossless job got as one it did get, so the stored verdict and
+    the artifact together decide, and both paths agree.
+    """
+    from test_worker_job import Redis, State, WeCom
+    from musicdl.worker.workers import JobWorker
+    state, wecom = State(), WeCom()
+    original, alternate = AudioSource(), AudioSource()
+    alternate_row = lossless_candidate('alternate').model_copy(update={'qualities': ('320k',)})
+
+    async def refresh(query, excluded):
+        return SearchResult((alternate_row,), (), 'v', (('alternate',),))
+
+    worker = JobWorker(Redis(), wecom, {'source': original, 'alternate': alternate}, str(tmp_path),
+                       state=state, refresh=refresh)
+    job = {'request_id': 'r', 'from_user': 'u', 'candidate': lossless_candidate().model_dump(mode='json')}
+
+    async def scenario():
+        first = await worker.handle_job(job, job_id='quality-lossy-ask')
+        record = await state.get_job_effect('quality-lossy-ask', 'download')
+        replayed = await worker._replay_download('quality-lossy-ask', job, lossless_candidate(), 'u',
+                                                 asyncio.get_running_loop().time() + 5,
+                                                 outcome=record.result)
+        return first, replayed
+
+    first, replayed = asyncio.run(scenario())
+    assert first.download.quality_downgraded
+    assert replayed.download.requested_quality == '320k'
+    assert replayed.download.quality_downgraded
 
 
 def test_a_switched_source_records_the_tier_it_was_actually_asked_for(tmp_path):

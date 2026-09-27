@@ -396,6 +396,22 @@ def test_resolved_media_keeps_only_an_absolute_expiry_instant():
             _resolved_media(expires_at=value)
 
 
+def test_resolved_media_keeps_a_sub_second_expiry_instant():
+    # An instant is not rounded down into the second it falls in: a URL whose
+    # source said it dies at 12:00:00.900 is live until then, and stamping it as
+    # 12:00:00 refuses it for its last 900 ms -- a live link this process would
+    # not use.  The fraction is part of the lifetime the source stated.
+    from datetime import datetime, timedelta, timezone
+
+    from musicdl.contracts.plugin import has_expired, parse_instant
+
+    moment = datetime(2026, 9, 28, 12, 0, 0, 900000, tzinfo=timezone.utc)
+    stamped = _resolved_media(expires_at="2026-09-28T12:00:00.900Z").expires_at
+    assert parse_instant(stamped) == moment
+    assert not has_expired(stamped, now=moment - timedelta(milliseconds=500))
+    assert has_expired(stamped, now=moment)
+
+
 @pytest.mark.parametrize("quality", ["", "bad value", "quality!", "q" * 17])
 def test_resolved_media_rejects_invalid_quality_values(quality):
     with pytest.raises(ValidationError):

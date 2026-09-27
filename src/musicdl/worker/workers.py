@@ -644,14 +644,25 @@ class JobWorker(_StreamWorker):
         # revision cannot make a replay claim a codec the file is not.
         actual_quality = served_quality(outcome.get("actual_quality") or result.download.actual_quality,
                                         result.download.extension)
+        # The verdict the live run reached stands, and the artifact can only add
+        # to it.  The tier recorded beside an answer is the tier the source that
+        # answered was asked for -- a downgrade switch asks an alternate for the
+        # tier *it* declares -- so a replay that read the verdict off that tier
+        # alone cleared a downgrade the live run had proved with the job's own
+        # ask in hand.  The bytes are still the evidence they always were: a
+        # request the record names as lossless that came back with lossy bytes
+        # is a downgrade whether or not the record said so, which is how a
+        # record from an earlier revision is re-checked instead of repeated.
+        contradicted = (is_lossless(outcome.get("requested_quality")
+                                    or result.download.requested_quality)
+                        and proven_lossy(actual_quality))
         return replace(result, download=replace(result.download,
                        quality=actual_quality or result.download.quality,
                        actual_quality=actual_quality,
                        requested_quality=(outcome.get("requested_quality")
                                           or result.download.requested_quality),
-                       quality_downgraded=(is_lossless(outcome.get("requested_quality")
-                                                       or result.download.requested_quality)
-                                           and proven_lossy(actual_quality)),
+                       quality_downgraded=(bool(outcome.get("quality_downgraded"))
+                                           or contradicted),
                        quality_revision=int(outcome.get("quality_revision") or 0)))
 
     def _guarded_sources(self, job_id: str, owner: str, deadline: float) -> dict:

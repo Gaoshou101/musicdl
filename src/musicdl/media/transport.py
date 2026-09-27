@@ -358,15 +358,18 @@ class SecureMediaTransport:
                            "Accept-Encoding: identity\r\n"
                            + ("Range: bytes=0-0\r\n" if range_probe else "")
                            + "Connection: close\r\n\r\n").encode("ascii")
+                if guard is not None:
+                    # The descriptor's stated instant is asked inside the
+                    # function that writes, as the last step before the wire:
+                    # DNS and the handshake can outlast the door check, and
+                    # this work is handed to a worker thread, so a check made
+                    # on the event loop before the hand-off can pass while the
+                    # URL is retired before that thread runs.  Only a check on
+                    # the same side of that queue as the write is the last word
+                    # on whether a withdrawn link reaches the socket.
+                    guard()
                 wrapped.sendall(request)
 
-            if guard is not None:
-                # The descriptor's stated instant is asked again here, with
-                # DNS done and the socket ready to write: the address lookup
-                # and the handshake are the two steps that can outlast the
-                # door check and still put a request on the wire for a link
-                # the source has withdrawn.
-                guard()
             await run(send_request, deadline)
             try:
                 response = await self._run_acquire(lambda: self.response_factory(wrapped), deadline)

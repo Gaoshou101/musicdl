@@ -492,6 +492,27 @@ def test_transport_asks_again_after_dns_before_the_request_is_written(monkeypatc
     assert sock.sent == b""
 
 
+def test_transport_asks_again_inside_the_thread_that_writes_the_request(monkeypatch):
+    """The instant is asked where the write happens, not only where it is queued.
+
+    The request is handed to a worker thread, so a check made on the event loop
+    before the hand-off can pass while the URL is retired before that thread
+    runs.  The socket is left untouched in that case, which is what the caller
+    needs to tell a withdrawn link from a served one.
+    """
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    # Live while the event loop holds the descriptor, dead by the time the write
+    # reaches the thread that performs it.
+    loop_thread = threading.get_ident()
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: threading.get_ident() != loop_thread)
+    error_code(instance.open(live, policy=("xn--tst-qla.example",)), "media_url_expired")
+    assert sock.sent == b""
+
+
 def test_transport_stops_a_body_read_that_only_finishes_after_the_expiry(monkeypatch):
     """A blocking read is asked about after it returns, not only before it starts.
 

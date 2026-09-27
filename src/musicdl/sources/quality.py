@@ -157,14 +157,19 @@ def proven_lossy(value: Any) -> bool:
 def served_quality(stated: Any, container: Any) -> str | None:
     """Reconcile the tier a source stated with the container the bytes prove.
 
-    The file on disk is the only evidence of what was served.  A label that
-    names a container those bytes contradict is dropped in favour of the
-    container -- measured 2026-09-28, a link whose path ended in ``.flac``
-    answered MP3 frames, and reporting the path would have contradicted both the
-    extension and the file -- while a label the container can carry keeps its
-    detail (``320k``, ``flac24bit``), which is what the success message and the
-    admin report print.  A label naming no container (``master``, ``atmos_plus``)
-    claims no codec, so nothing contradicts it and it stands.
+    The file on disk is the only evidence of what was served, so a label the
+    bytes contradict is dropped in favour of the container.  That covers both
+    shapes a contradiction comes in.  A label that names a container the bytes
+    are not -- measured 2026-09-28, a link whose path ended in ``.flac``
+    answered MP3 frames, and repeating the path would have named a file that is
+    not on disk.  And a bitrate tier, which names a codec without naming a
+    container -- measured the same day, a source that answered ``320k`` handed
+    over real FLAC, so keeping the tier would name a codec the file is not and
+    mark a lossless answer as the downgrade it never was.  A label the container
+    can carry keeps its detail (``flac24bit`` on ``flac``, ``320k`` on ``mp3``),
+    which is what the success message and the admin report print, and a label
+    naming neither (``master``, ``atmos_plus``) claims no codec at all, so
+    nothing contradicts it and it stands.
     """
     label = _token(stated)
     verified = _token(container)
@@ -174,6 +179,10 @@ def served_quality(stated: Any, container: Any) -> str | None:
         return verified
     named = _CONTAINERS.get(label)
     if named is not None and verified is not None and named != verified:
+        return verified
+    if named is None and verified is not None and is_lossless(verified) and proven_lossy(label):
+        # Naming the tier here would name a codec the file is not, and would
+        # mark a lossless answer as the downgrade it never was.
         return verified
     return label
 
