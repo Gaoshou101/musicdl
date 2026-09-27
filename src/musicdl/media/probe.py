@@ -49,12 +49,17 @@ async def probe_media(transport, media, *, policy, timeout=5.0):
     hop = await headers("HEAD")
     if hop.status in {403, 405, 501} or (200 <= hop.status < 300 and hop.content_length is None):
         hop = await headers("GET")
-        if not 200 <= hop.status < 300:
+        # Only a 206 names a total.  A server that answers the range request
+        # with 200 has ignored the range and begun the whole body, which is
+        # exactly the range-less GET this probe refuses to fall back to: its
+        # ``Content-Length`` measures that whole answer rather than the bytes a
+        # download is judged against, so reporting it would be the guess this
+        # module exists to avoid.  A server that states no total leaves the
+        # size empty, and the download path reads the real headers itself.
+        if hop.status != 206:
             return dict(UNKNOWN)
         match = re.fullmatch(r"bytes 0-0/([1-9][0-9]*)", hop.headers.get("content-range", ""))
         size = int(match[1]) if match and len(match[1]) <= 15 else None
-        if hop.status == 200:
-            size = hop.content_length
     elif 200 <= hop.status < 300:
         size = hop.content_length
     else:
