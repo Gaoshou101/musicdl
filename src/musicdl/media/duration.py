@@ -74,11 +74,7 @@ def container_duration(data: bytes) -> float | None:
         if data.startswith(b"fLaC"):
             return _flac_duration(data)
         if _is_mp4(data):
-            moov = _find_box(data, 0, len(data), b"moov", limit=MAX_MOOV_BYTES)
-            if moov is None:
-                return None
-            mvhd = _find_box(data, moov[0], moov[1], b"mvhd")
-            return None if mvhd is None else _read_mvhd(data[mvhd[0]:mvhd[1]])
+            return _mp4_duration(data)
         if _is_mp3(data):
             start = _id3_size(data)
             return None if start is None else _mp3_stream_duration(data, start)
@@ -161,7 +157,10 @@ def _mp3_duration(handle, start: int) -> float | None:
     turns "short" into "unknown" when the bytes stopped before the count it
     claims, because a header this parser cannot follow is not evidence of a
     truncated recording, and reading it as one would refuse a file that is
-    merely hard to read.
+    merely hard to read.  A walk that stops at bytes this parser cannot read
+    and finds no tag behind them answers "unknown" rather than the count so
+    far: the audio may continue past that stretch, and a lower bound reported
+    as a length refuses a recording that is merely hard to read.
     """
     handle.seek(start)
     first = handle.read(MAX_MP3_HEAD_BYTES)
@@ -169,10 +168,24 @@ def _mp3_duration(handle, start: int) -> float | None:
     if frame is None:
         return None
     tagged = _xing_frame_count(first, 4 + frame[3])
-    frames, elapsed, ran_out = _walk_mp3_frames(handle, start)
+    frames, elapsed, ran_out, trailer = _walk_mp3_frames(handle, start)
     if frames == 0:
         return None
-    if tagged is not None and frames < tagged and not ran_out:
+    if ran_out:
+        # The bytes ended, so the frames that arrived are the recording; a
+        # ``Xing`` count larger than them is the encoder's stale or truncated
+        # claim rather than a longer song.
+        return elapsed
+    if not trailer:
+        # The walk stopped at bytes that are not a tag, so the stream may hold
+        # more audio past them and the count so far is a lower bound.  A lower
+        # bound reported as a length refuses a recording that is merely hard to
+        # read, so the answer is "unknown" instead.
+        return None
+    if tagged is not None and frames < tagged:
+        # The tail is a tag, so the audio really did end there, but the
+        # encoder's own count says more frames were written than arrived.  The
+        # two witnesses disagree, so neither of them is a measurement.
         return None
     return elapsed
 
@@ -183,14 +196,17 @@ def _mp3_stream_duration(data: bytes, start: int) -> float | None:
 
 
 def _walk_mp3_frames(handle, start: int) -> tuple[int, float, bool]:
-    """Every whole frame from ``start``, as ``(frames, seconds, ran_out)``.
+    """Every whole frame from ``start``, as ``(frames, seconds, ran_out, trailer)``.
 
     A frame counts only when all of it is present, so a stream cut mid-frame
     reports only the frames a listener would really hear, and ``ran_out``
     tells a stream whose bytes simply ended apart from one holding a header
-    this parser cannot read.  The stream is read in chunks and each frame's own
-    rate is added as it goes, so the answer depends neither on the file fitting
-    in memory nor on one frame's rate standing for the whole recording.
+    this parser cannot read.  ``trailer`` says whether the bytes that stopped
+    the walk are a tag running to the end of the file, which is the one way a
+    stop this parser caused still leaves the count complete.  The stream is
+    read in chunks and each frame's own rate is added as it goes, so the answer
+    depends neither on the file fitting in memory nor on one frame's rate
+    standing for the whole recording.
     """
     handle.seek(start)
     buffer, offset, frames, elapsed = b"", 0, 0, 0.0
@@ -199,7 +215,7 @@ def _walk_mp3_frames(handle, start: int) -> tuple[int, float, bool]:
         if offset + 4 > len(buffer):
             chunk = handle.read(SCAN_CHUNK_BYTES)
             if not chunk:
-                return frames, elapsed, True
+                return frames, elapsed, True, False
             buffer, offset = buffer[offset:] + chunk, 0
             continue
         frame = _mpeg_frame(buffer, offset)
@@ -210,7 +226,7 @@ def _walk_mp3_frames(handle, start: int) -> tuple[int, float, bool]:
             # the next frame and measures the audio it really holds.
             ahead = _resynchronize(handle, buffer, offset) if resyncs < MAX_MP3_RESYNCS else None
             if ahead is None:
-                return frames, elapsed, False
+                return frames, elapsed, False, _trailing_tag(handle, buffer, offset)
             buffer, offset = ahead
             resyncs += 1
             continue
@@ -218,13 +234,42 @@ def _walk_mp3_frames(handle, start: int) -> tuple[int, float, bool]:
         if offset + length > len(buffer):
             chunk = handle.read(SCAN_CHUNK_BYTES)
             if not chunk:
-                return frames, elapsed, True
+                return frames, elapsed, True, False
             buffer, offset = buffer[offset:] + chunk, 0
             continue
         offset += length
         frames += 1
         elapsed += samples / rate
-    return frames, elapsed, False
+    return frames, elapsed, False, False
+
+
+def _trailing_tag(handle, buffer: bytes, offset: int) -> bool:
+    """Whether everything from ``offset`` to the end of the file is a tag.
+
+    A tag written after the audio is not audio, so a walk that stopped at one
+    has still counted the whole recording.  Only the shapes that really end a
+    file count: an ``ID3v1`` block, and an ``ID3v2`` tag whose own length runs
+    exactly to the end.  Measured 2026-09-28 by independent review, a 600 kB
+    ``ID3v2`` block written between two stretches of audio is longer than the
+    resynchronisation window; its header sits where the walk stopped, it does
+    not reach the end of the file, and the frames behind it must not be read as
+    a shorter song.
+    """
+    handle.seek(0, os.SEEK_END)
+    end = handle.tell()
+    at = end - (len(buffer) - offset)
+    remaining = end - at
+    if remaining <= 0:
+        return True
+    head = buffer[offset:offset + 10]
+    if len(head) < 10:
+        handle.seek(at)
+        head = handle.read(10)
+    if len(head) < 3:
+        return False
+    if remaining == 128 and head[:3] == b"TAG":
+        return True
+    return len(head) == 10 and head[:3] == b"ID3" and _id3_size(head) == remaining
 
 
 def _resynchronize(handle, buffer: bytes, offset: int) -> tuple[bytes, int] | None:
@@ -306,7 +351,16 @@ def _id3_size(data: bytes) -> int | None:
 
 
 def _mp4_file_duration(handle, size: int) -> float | None:
-    offset = 0
+    """``mvhd`` for a file whose whole box chain fits inside the bytes it has.
+
+    Every box is walked rather than stopping at ``moov``: a faststart file
+    leads with ``moov`` and keeps its audio in the ``mdat`` behind it, so a
+    recording cut in the middle keeps a header that states its whole length
+    while the bytes it states are no longer there.  A box reaching past the
+    end of the file is that cut, and the length the header claims is not the
+    length the file plays.
+    """
+    offset, duration = 0, None
     while offset + 8 <= size:
         handle.seek(offset)
         header = handle.read(8)
@@ -325,15 +379,48 @@ def _mp4_file_duration(handle, size: int) -> float | None:
             box_size = size - offset
         if box_size < body - offset or offset + box_size > size:
             return None
-        if kind == b"moov":
+        if kind == b"moov" and duration is None:
             if box_size > MAX_MOOV_BYTES:
                 return None
             handle.seek(body)
             payload = handle.read(box_size - (body - offset))
             mvhd = _find_box(payload, 0, len(payload), b"mvhd")
-            return None if mvhd is None else _read_mvhd(payload[mvhd[0]:mvhd[1]])
+            if mvhd is None:
+                return None
+            duration = _read_mvhd(payload[mvhd[0]:mvhd[1]])
+            if duration is None:
+                return None
         offset += box_size
-    return None
+    return duration
+
+
+def _mp4_duration(data: bytes) -> float | None:
+    """The same rule for bytes already in hand, and the shape the tests use."""
+    offset, duration = 0, None
+    while offset + 8 <= len(data):
+        box_size = int.from_bytes(data[offset:offset + 4], "big")
+        kind = data[offset + 4:offset + 8]
+        body = offset + 8
+        if box_size == 1:
+            if body + 8 > len(data):
+                return None
+            box_size = int.from_bytes(data[body:body + 8], "big")
+            body += 8
+        elif box_size == 0:
+            box_size = len(data) - offset
+        if box_size < body - offset or offset + box_size > len(data):
+            return None
+        if kind == b"moov" and duration is None:
+            if box_size > MAX_MOOV_BYTES:
+                return None
+            mvhd = _find_box(data, body, offset + box_size, b"mvhd")
+            if mvhd is None:
+                return None
+            duration = _read_mvhd(data[mvhd[0]:mvhd[1]])
+            if duration is None:
+                return None
+        offset += box_size
+    return duration
 
 
 def _find_box(data: bytes, start: int, end: int, kind: bytes, *, limit: int | None = None):

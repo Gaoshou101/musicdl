@@ -20,6 +20,7 @@ import pytest
 
 from musicdl.media import DownloadMetadata, MediaError, download_candidate
 from musicdl.media.duration import (
+    RESYNC_SCAN_BYTES,
     bitrate_kbps,
     container_duration,
     duration_matches,
@@ -228,6 +229,36 @@ def test_an_mp4_that_never_states_its_length_is_not_a_long_one():
     assert container_duration(ftyp + moov) is None
 
 
+def test_an_mp4_cut_behind_its_header_is_not_measured():
+    # ``mvhd`` states the whole recording and survives a cut, so the header
+    # alone reports 210 s for a file that no longer holds 210 s of audio.  A
+    # box reaching past the end of the file is that cut, and the honest answer
+    # is that the length is unknown rather than the header's claim.
+    whole = mp4_bytes(210.0)
+    assert container_duration(whole) == pytest.approx(210.0)
+    assert container_duration(whole[:-40]) is None
+
+
+def test_an_mp4_cut_behind_its_header_is_refused_by_strict(tmp_path):
+    events = []
+    with pytest.raises(MediaError, match="incomplete_audio"):
+        download(mp4_bytes(210.0)[:-40], extension="m4a", media_type="audio/mp4", duration=210,
+                 verify_duration="strict", tmp_path=tmp_path, events=events)
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
+
+
+def test_an_mp4_cut_behind_its_header_is_accepted_by_lenient_and_recorded(tmp_path):
+    # Lenient fails open on a length it cannot read, which is what keeps the
+    # sources that never state one working; the record says so.
+    events = []
+    result = download(mp4_bytes(210.0)[:-40], extension="m4a", media_type="audio/mp4", duration=210,
+                      tmp_path=tmp_path, events=events)
+    assert result.duration_seconds is None and result.bitrate_kbps is None
+    assert [(event.stage, event.status, event.error_code)
+            for event in events if event.stage == "duration"] == [
+        ("duration", "unverified", "duration_unverified")]
+
+
 @pytest.mark.parametrize("data", [b"", b"nope", b"\x00" * 64, b"fLaC", b"fLaC\x00\x00\x00\x02\x00\x00"])
 def test_anything_this_module_cannot_read_answers_none(data):
     assert container_duration(data) is None
@@ -382,17 +413,20 @@ def _replay(tmp_path, reservation, *, duration: int | None = None, verify_durati
         record=(events if events is not None else []).append))
 
 
-def test_a_replayed_artifact_answers_to_the_same_policy(tmp_path):
-    # The delivery path is the same one, so an artifact written before this
-    # policy existed is judged by it too -- and refusing never deletes a file
-    # that is already library content.
+def test_a_published_artifact_is_measured_but_not_refused(tmp_path):
+    # The gate belongs to publication.  An artifact already marked ``published``
+    # may already be served and referred to, so a replay of it reports what the
+    # bytes really measure rather than refusing them: a refusal here would leave
+    # behind the very bytes it refused, which is the one outcome this feature
+    # must never produce.  What the policy governs is what gets published.
     data = mp3_bytes(20)
     reservation = _published(tmp_path, data)
     events = []
-    with pytest.raises(MediaError, match="incomplete_audio"):
-        _replay(tmp_path, reservation, duration=210, events=events)
-    assert [event.error_code for event in events if event.error_code] == ["incomplete_audio"]
+    result = _replay(tmp_path, reservation, duration=210, events=events)
     assert (tmp_path / "Song.mp3").read_bytes() == data
+    assert result.duration_seconds == pytest.approx(mp3_duration(20))
+    assert [event.error_code for event in events if event.error_code] == []
+    assert [path for path in tmp_path.rglob("*.part")] == []
 
 
 def test_a_replay_measures_the_file_and_says_what_it_could_not_compare(tmp_path):
@@ -503,9 +537,19 @@ def test_an_unknown_policy_is_refused(tmp_path):
 
 # --- a tag between the frames, and the lengths nobody really stated ----------
 
-def mp3_segmented(first: int, second: int) -> bytes:
+def id3v2_tag(total: int) -> bytes:
+    """An ``ID3v2`` header plus the padding a tag of this total size carries."""
+    body = total - 10
+    head = bytearray(b"ID3\x04\x00\x00")
+    for shift in (21, 14, 7, 0):
+        head.append((body >> shift) & 0x7F)
+    assert len(head) == 10
+    return bytes(head) + b"\x00" * body
+
+
+def mp3_segmented(first: int, second: int, *, tag_bytes: int = 10) -> bytes:
     """Frames with an ``ID3v2`` tag written between two segments of audio."""
-    return mp3_bytes(first) + b"ID3\x04\x00\x00\x00\x00\x00\x00" + mp3_bytes(second)
+    return mp3_bytes(first) + id3v2_tag(tag_bytes) + mp3_bytes(second)
 
 
 def test_a_tag_between_two_segments_of_audio_is_not_a_short_recording():
@@ -513,6 +557,26 @@ def test_a_tag_between_two_segments_of_audio_is_not_a_short_recording():
     # whole.  Reading the walk as ending at the tag would measure a full song as
     # the piece before it and refuse it, so the walk resumes at the next frame.
     assert container_duration(mp3_segmented(20, 8019)) == pytest.approx(mp3_duration(8039))
+
+
+def test_a_tag_longer_than_the_resync_window_is_not_a_short_recording():
+    # The tag is real and every frame on both sides of it is whole, but it is
+    # longer than the window this parser will scan past, so the walk stops on
+    # bytes it cannot read and cannot see whether audio continues behind them.
+    # Reporting the 0.5 s walked before the tag measured 209.998 seconds of
+    # framed audio as a 0.5 s recording and refused it; unknown is the honest
+    # answer, and unknown is what ``lenient`` accepts.
+    data = mp3_segmented(20, 8019, tag_bytes=600_000)
+    assert len(data) > RESYNC_SCAN_BYTES
+    assert container_duration(data) is None
+    assert mp3_duration(8039) == pytest.approx(209.998, abs=0.001)
+
+
+def test_a_tag_that_really_ends_the_file_still_lets_the_audio_be_counted():
+    # A tag written after the audio is not audio, so a walk that stopped at one
+    # has counted the whole recording -- and it is only trusted when the tag
+    # really runs to the end of the file.
+    assert container_duration(mp3_bytes(50) + id3v2_tag(4096)) == pytest.approx(mp3_duration(50))
 
 
 def test_a_tag_between_the_frames_of_a_recording_is_still_delivered(tmp_path):

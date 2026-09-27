@@ -130,7 +130,7 @@ def _verify_artifact(path: Path, reservation: ArtifactRecord) -> tuple[int, str]
 
 
 def _verified_duration(candidate: Candidate, path: Path, verify_duration: str, request_id: str,
-                       record: Callable[[DownloadEvent], None] | None) -> float | None:
+                       record: Callable[[DownloadEvent], None] | None, *, enforce: bool = True) -> float | None:
     """The real playing time of a finished file, or a refusal to deliver it.
 
     ``None`` means the container could not be read.  The event says so, and
@@ -140,6 +140,14 @@ def _verified_duration(candidate: Candidate, path: Path, verify_duration: str, r
     those sources wholesale.  A file that does measure, and measures outside the
     catalogue's own length, is refused under either policy -- that is the whole
     point of asking.
+
+    ``enforce=False`` is for bytes that are already published library content:
+    the gate belongs to publication, so the measurement is still taken and
+    still reported, but it is not turned into a refusal.  Refusing there while
+    keeping the bytes would be a refusal that changed nothing, and deleting
+    them would take away a file the library may already be serving -- so the
+    only way a refusal can leave nothing behind is for it to happen before the
+    artifact is published.
     """
     measured = duration_seconds(path)
     # A catalogue that states ``0`` has stated nothing: Telegram reports an
@@ -147,7 +155,7 @@ def _verified_duration(candidate: Candidate, path: Path, verify_duration: str, r
     # refuse a complete recording for a number the channel never claimed.
     expected = float(candidate.duration) if candidate.duration and candidate.duration > 0 else None
     if expected is not None and measured is not None:
-        if not duration_matches(expected, measured):
+        if enforce and not duration_matches(expected, measured):
             raise MediaError("incomplete_audio")
         return measured
     emit_event(record, DownloadEvent(
@@ -178,12 +186,14 @@ def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation
                      language: str | None, *, verify_duration: str, request_id: str,
                      record: Callable[[DownloadEvent], None] | None,
                      measured: float | None | object = _UNSET,
-                     checked: tuple[int, str, str] | None = None) -> DownloadResult:
+                     checked: tuple[int, str, str] | None = None,
+                     enforce_duration: bool = True) -> DownloadResult:
     size, digest, extension = _replay_checks(candidate, reservation, target) if checked is None else checked
     # A replay hands over an artifact this job already wrote, so it answers to
     # the same policy as a fresh download.
     if measured is _UNSET:
-        measured = _verified_duration(candidate, target, verify_duration, request_id, record)
+        measured = _verified_duration(candidate, target, verify_duration, request_id, record,
+                                      enforce=enforce_duration)
     return DownloadResult(target.relative_to(root), digest, size, reservation.media_type, extension,
                           normalize_language(language), duration_seconds=measured,
                           bitrate_kbps=None if measured is None else bitrate_kbps(size, measured))
@@ -269,9 +279,13 @@ async def _resume_reservation(
     if reservation.state == "published":
         # Already delivered, so the bytes stay where a person may already have
         # found them: only a refusal reached before publication can take a file
-        # away, because only then does nothing yet refer to it.
+        # away, because only then does nothing yet refer to it.  This artifact
+        # is therefore measured and reported rather than judged again -- a
+        # refusal here would either leave the very bytes it refused or delete
+        # library content the delivery may already refer to.
         return _replayed_result(root, target, candidate, reservation, language,
-                                verify_duration=verify_duration, request_id=request_id, record=record)
+                                verify_duration=verify_duration, request_id=request_id, record=record,
+                                enforce_duration=False)
     if reservation.state == "prepared":
         if temporary.exists() or temporary.is_symlink() or target.exists() or target.is_symlink():
             raise MediaError("artifact_uncertain")
