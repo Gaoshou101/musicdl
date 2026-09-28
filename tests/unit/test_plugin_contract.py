@@ -443,6 +443,9 @@ def test_a_stated_instant_is_never_read_as_earlier_than_it_was_written():
     # expiry it cannot read at all is refused outright rather than dropped.
     assert parse_instant("2026-09-28T12:00.1-00:00.0000001") is None
     assert parse_instant("2026-09-28T12:00:00-00:00:00.9") is None
+    # A fraction of zeros on the offset is refused the same way: the shape is
+    # refused, not the value, so an offset is read only without one.
+    assert parse_instant("2026-09-28T12:00:00+00:00:00.0") is None
     assert not has_expired("2026-09-28T12:00:00-00:00:00.9",
                            now=datetime(2030, 1, 1, tzinfo=timezone.utc))
     with pytest.raises(ValidationError):
@@ -456,6 +459,32 @@ def test_a_stated_instant_is_never_read_as_earlier_than_it_was_written():
     assert parse_instant("9999-12-31T23:59:59.999999-01:00") is None
     assert not has_expired("9999-12-31T23:59:59.999999-01:00",
                            now=datetime(9999, 1, 1, tzinfo=timezone.utc))
+
+
+def test_a_stated_fraction_is_read_on_the_field_it_sits_on():
+    # ISO 8601 puts a decimal fraction on the lowest field the text states.
+    # Python's reader puts it on the seconds field whatever field the text used:
+    # measured, ``12:00.5`` -- half a minute past twelve -- came back as
+    # ``12:00:00.5``, 29.5 s early, and the URL was refused for its last half
+    # minute.  The instant is read from a spelling this process writes itself,
+    # so a fraction is read only where the text put it.
+    from datetime import datetime, timezone
+
+    from musicdl.contracts.plugin import parse_instant
+
+    assert parse_instant("2026-09-28T12:00.5+00:00") is None
+    assert parse_instant("2026-09-28T12.5+00:00") is None
+    assert parse_instant("20260928T1200.5+00:00") is None
+    # ``+`` is the offset's own sign, so a text where it also stands in for the
+    # date/time separator states no instant this process reads.
+    assert parse_instant("2026-09-28+12:00:00.1234567+00:00") is None
+    # A fraction on the seconds field is still read, exactly, in every spelling
+    # that puts it there.
+    half = datetime(2026, 9, 28, 12, 0, 0, 500000, tzinfo=timezone.utc)
+    assert parse_instant("2026-09-28T12:00:00.5Z") == half
+    assert parse_instant("20260928T120000.5Z") == half
+    assert parse_instant("2026-09-28 12:00:00.5Z") == half
+    assert parse_instant("2026-09-28T12:00:00,5Z") == half
 
 
 @pytest.mark.parametrize("quality", ["", "bad value", "quality!", "q" * 17])

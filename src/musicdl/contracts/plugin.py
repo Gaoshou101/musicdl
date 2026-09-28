@@ -146,11 +146,24 @@ class PluginResponse(BaseModel):
         return self
 
 
-# The seconds field's fraction, down to the last digit a source wrote: an ISO
-# instant may state more precision than a datetime can hold.  An offset's own
-# fraction is refused before this is consulted, so what is left in the text is
-# the seconds field.
-_INSTANT_FRACTION = re.compile(r"[.,](\d+)")
+# Annex B of ISO 8601 puts a decimal fraction on the lowest field the text
+# states, and a fraction is read here only where the text put it: on the seconds
+# field.  Python's own reader puts a fraction on the seconds field whatever
+# field the text used -- measured, it reads ``12:00.5``, half a minute past
+# twelve, as ``12:00:00.5``, 29.5 s early, and a URL would be refused for its
+# last half minute -- and it reads an offset's own fraction differently for
+# ``+`` and ``-``: ``12:00:00-00:00:00.9`` comes back as a zero offset, 0.9 s
+# early, while ``+00:00:00.9`` comes back 0.9 s late.  So the spelling is fixed
+# here, and every shape outside it reads as no instant at all: a stated expiry
+# this process cannot read is refused outright by the contract rather than
+# dropped or guessed at, and a lifetime that is not stated refuses nothing.
+_INSTANT = re.compile(
+    r"(?P<date>\d{4}-?\d{2}-?\d{2})"
+    r"[Tt ](?P<hour>\d{2})"
+    r"(?::?(?P<minute>\d{2})"
+    r"(?::?(?P<second>\d{2})(?P<fraction>[.,]\d+)?)?)?"
+    r"(?P<offset>Z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)?"
+)
 
 
 def parse_instant(value: Any) -> datetime | None:
@@ -165,20 +178,23 @@ def parse_instant(value: Any) -> datetime | None:
     text = value.strip()
     if not text or len(text) > 32:
         return None
-    # A fraction in the UTC offset is precision this process cannot read.
-    # Python reads an offset's fraction faithfully for some shapes and not
-    # others, and the direction of the error depends on the offset's sign --
-    # measured, it reads ``12:00:00-00:00:00.9`` as a zero offset, naming an
-    # instant a whole 0.9 s earlier than the source wrote.  An instant stated
-    # that way is not read at all: ``None`` is the reading that refuses
-    # nothing, so no URL is refused on a reading this process cannot stand
-    # behind.  The offset starts at the first sign after the date; the date's
-    # own dashes sit before it.
-    signs = [at for at in (text.find("+", 10), text.find("-", 10)) if at != -1]
-    if signs and ("." in text[min(signs):] or "," in text[min(signs):]):
+    stated = _INSTANT.fullmatch(text)
+    if stated is None:
         return None
+    # The instant is read back from a spelling this process writes itself, so
+    # the reading no longer depends on how much of a shape Python's own reader
+    # happens to accept.
+    date = stated.group("date").replace("-", "")
+    hour = stated.group("hour")
+    minute = stated.group("minute") or "00"
+    second = stated.group("second") or "00"
+    fraction = stated.group("fraction") or ""
+    offset = stated.group("offset") or ""
+    if offset == "Z":
+        offset = "+00:00"
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(
+            f"{date[:4]}-{date[4:6]}-{date[6:8]}T{hour}:{minute}:{second}{fraction}{offset}")
     except ValueError:
         return None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -198,17 +214,16 @@ def parse_instant(value: Any) -> datetime | None:
     # wrote it: a URL whose source said it dies at ``12:00:00.0000001Z`` would
     # be refused from ``12:00:00`` on, losing its last 100 ns of life.  The
     # stated instant is a lower bound on the lifetime, so a nonzero tail rounds
-    # up by the smallest step a datetime has: with the offset's own fraction
-    # refused above, at most one fraction reaches here, so the instant is never
-    # read as earlier than it was written and never as more than a microsecond
-    # later than it was.  A fraction of zeros is not precision and does not
-    # round.  At the representable ceiling there is no later instant to name, so
-    # the truncated value stands and the refusal it could cause is confined to
-    # the last microsecond of year 9999 in UTC.
-    tails = sum(1 for fraction in _INSTANT_FRACTION.finditer(text)
-                if fraction.group(1)[6:].strip("0"))
+    # up by the smallest step a datetime has: at most one fraction reaches here
+    # and it sits on the seconds field, so the instant is never read as earlier
+    # than it was written and never as more than a microsecond later than it
+    # was.  A fraction of zeros is not precision and does not round.  At the
+    # representable ceiling there is no later instant to name, so the truncated
+    # value stands and the refusal it could cause is confined to the last
+    # microsecond of year 9999 in UTC.
+    tail = fraction[1:]
     try:
-        return parsed + timedelta(microseconds=tails)
+        return parsed + timedelta(microseconds=1 if tail[6:].strip("0") else 0)
     except OverflowError:
         return parsed
 
