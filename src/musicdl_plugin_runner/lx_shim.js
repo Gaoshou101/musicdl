@@ -533,18 +533,35 @@ async function lxResolve(payload) {
   const supported = Array.isArray(candidate.qualities)
     ? candidate.qualities.map(lxQualityName).filter(Boolean) : [];
   const requested = typeof payload.quality === "string" ? lxQualityName(payload.quality) : "";
-  const quality = requested && supported.includes(requested) ? requested
-    : typeof payload.quality !== "string" && supported.includes(LX_DEFAULT_QUALITY) ? LX_DEFAULT_QUALITY
-    : supported.slice().sort((left, right) => lxQualityRank(right) - lxQualityRank(left)
-      || left.localeCompare(right))[0] || LX_DEFAULT_QUALITY;
-  const answer = await lxHandler({
+  const quality = requested || (supported.includes(LX_DEFAULT_QUALITY) ? LX_DEFAULT_QUALITY : supported.slice().sort((left, right) => lxQualityRank(right) - lxQualityRank(left) || left.localeCompare(right))[0] || LX_DEFAULT_QUALITY);
+  // A tier the source never declared is still a request: a source may answer a
+  // tier it did not advertise, so it is asked for as given.  What the source
+  // cannot do is leave that request unanswered, so a tier absent from
+  // `supported` gets exactly one graceful retry at the best tier the source
+  // itself declared -- and the tier that really answered is the one reported.
+  const fallback = requested && !supported.includes(requested)
+    ? supported.slice().sort((left, right) => lxQualityRank(right) - lxQualityRank(left)
+      || left.localeCompare(right))[0] || LX_DEFAULT_QUALITY
+    : "";
+  const askForTier = (tier) => lxHandler({
     source: decoded.source,
     action: "musicUrl",
-    info: { type: quality, musicInfo: lxMusicInfo(decoded.songId, candidate) },
+    info: { type: tier, musicInfo: lxMusicInfo(decoded.songId, candidate) },
   });
+  let tier = quality;
+  let answer = null;
+  try {
+    answer = await askForTier(tier);
+  } catch (error) {
+    if (!fallback) throw error;
+  }
+  if (fallback && !lxAnswerUrl(answer)) {
+    tier = fallback;
+    answer = await askForTier(tier);
+  }
   const url = lxAnswerUrl(answer);
   if (!url) throw new Error("lx source returned no media URL");
-  const extension = lxExtension(url, quality);
+  const extension = lxExtension(url, tier);
   const expiresAt = lxExpiry(answer);
   // A requested tier is intent, not evidence of the codec or bitrate served.
   const answerQuality = answer && typeof answer === "object" ? lxQualityName(answer.quality) : "";
@@ -560,9 +577,9 @@ async function lxResolve(payload) {
   // only a reference for the bytes when the answer agrees that this tier is
   // what came back.  A `.flac` URL answered under a `320k` label is a different
   // rendering, and the `320k` number says nothing about it.
-  const declaredSize = actual === quality && candidate.quality_sizes
+  const declaredSize = actual === tier && candidate.quality_sizes
     && typeof candidate.quality_sizes === "object"
-    ? lxParseSize(candidate.quality_sizes[quality]) : null;
+    ? lxParseSize(candidate.quality_sizes[tier]) : null;
   return {
     candidate_id: String(candidate.item_id),
     url,

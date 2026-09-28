@@ -15,11 +15,14 @@ import {
   CheckCircle,
   WarningCircle,
   Power,
+  WaveformIcon,
 } from '@phosphor-icons/react'
 import {
+  LosslessStatus,
   SourceHealthRow,
   SourceHealthVerdict,
   analyzeSource,
+  checkSourceLossless,
   fetchSource,
   deleteSource,
   errorMessage,
@@ -135,6 +138,52 @@ function ChannelBadge({ row }: { row: SourceHealthRow | undefined }) {
       title={`最近 ${row.attempts} 次结果的成功率 ${rate}`}
     >
       渠道 {VERDICT_TEXT[row.status]}
+    </span>
+  )
+}
+
+/** How one channel's measured lossless verdict reads on its row. */
+const LOSSLESS_TEXT: Record<LosslessStatus, string> = {
+  lossless: '无损可用',
+  lossy: '不可用',
+  unknown: '未检测',
+}
+
+const LOSSLESS_CLASS: Record<LosslessStatus, string> = {
+  lossless: 'bg-success/15 text-success',
+  lossy: 'bg-warning/15 text-warning',
+  unknown: 'bg-neutral-800 text-neutral-500',
+}
+
+const LOSSLESS_TITLE: Record<LosslessStatus, string> = {
+  lossless: '实测该渠道可以提供无损音质',
+  lossy: '实测该渠道只提供有损音质',
+  unknown: '还没有实测过该渠道，点右侧按钮检查一次',
+}
+
+/**
+ * What the last capability check measured about one channel.
+ *
+ * The verdict belongs to the probe, not to this page: a channel nobody has
+ * probed reads as 未检测 rather than as one that cannot serve lossless, and an
+ * answer that has aged keeps its label with the age written into the tooltip.
+ */
+function LosslessBadge({ row }: { row: SourceHealthRow | undefined }) {
+  if (!row) return null
+  const status = row.lossless_status
+  // Never probed is stale by construction, and 未检测 already says that; the
+  // marker is only for a verdict that was measured and has since aged out.
+  const aged = row.lossless_stale && status !== 'unknown'
+  const measured = row.lossless_checked_at === null
+    ? '尚未实测'
+    : `实测于 ${new Date(row.lossless_checked_at * 1000).toLocaleString('zh-CN')}`
+  return (
+    <span
+      className={`text-xs px-2 py-1 rounded-md ${aged ? 'bg-neutral-800 text-neutral-400' : LOSSLESS_CLASS[status]}`}
+      title={`${LOSSLESS_TITLE[status]} · ${measured}${aged ? '，结论已过期' : ''}`}
+    >
+      {LOSSLESS_TEXT[status]}
+      {aged ? '（已过期）' : ''}
     </span>
   )
 }
@@ -693,27 +742,32 @@ export default function SourcesPage() {
   const [notice, setNotice] = useState<Notice>(null)
   const [showImport, setShowImport] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
+  const [checking, setChecking] = useState<Record<string, boolean>>({})
   const [form, setForm] = useState({ name: '', priority: '0', timeout: '10' })
+
+  // The verdict is an addition to this page, not a precondition for it: a
+  // deployment that cannot answer the roll-up still gets its source list.
+  const refreshHealth = useCallback(async () => {
+    try {
+      const health = await listSourceHealth()
+      setChannels(Object.fromEntries(health.sources.map((row) => [row.id, row])))
+    } catch {
+      setChannels({})
+    }
+  }, [])
 
   const load = useCallback(async () => {
     try {
       const report = await listSources()
       setSources(report.items)
       setNotice(null)
-      // The verdict is an addition to this page, not a precondition for it: a
-      // deployment that cannot answer the roll-up still gets its source list.
-      try {
-        const health = await listSourceHealth()
-        setChannels(Object.fromEntries(health.sources.map((row) => [row.id, row])))
-      } catch {
-        setChannels({})
-      }
+      await refreshHealth()
     } catch (err) {
       setNotice({ tone: 'error', text: errorMessage(err) })
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [refreshHealth])
 
   useEffect(() => {
     void load()
@@ -721,6 +775,24 @@ export default function SourcesPage() {
 
   const replace = (item: SourceItem) =>
     setSources((current) => current.map((entry) => (entry.id === item.id ? item : entry)))
+
+  const checkLossless = async (source: SourceItem) => {
+    setChecking((current) => ({ ...current, [source.id]: true }))
+    try {
+      const verdict = await checkSourceLossless(source.id)
+      // The row shows the roll-up, not the reply, so re-reading it keeps this
+      // channel's badge and the rest of its history in agreement.
+      await refreshHealth()
+      setNotice({
+        tone: 'ok',
+        text: `${source.name || source.id} 的无损检查完成：${LOSSLESS_TEXT[verdict.status]}`,
+      })
+    } catch (err) {
+      setNotice({ tone: 'error', text: errorMessage(err) })
+    } finally {
+      setChecking((current) => ({ ...current, [source.id]: false }))
+    }
+  }
 
   const toggleEnabled = async (source: SourceItem) => {
     try {
@@ -898,6 +970,7 @@ export default function SourcesPage() {
                       {channels[source.id] && (
                         <ChannelBadge row={channels[source.id]} />
                       )}
+                      <LosslessBadge row={channels[source.id]} />
                       {!source.plugin && (
                         <span className="text-xs px-2 py-1 rounded-md bg-warning/15 text-warning">
                           脚本未安装
@@ -927,6 +1000,18 @@ export default function SourcesPage() {
                     }`}
                   >
                     <Power size={20} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void checkLossless(source)}
+                    disabled={checking[source.id]}
+                    title="实测该渠道能否提供无损音质"
+                    aria-label="实测该渠道的无损能力"
+                    className="p-2 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-neutral-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {checking[source.id]
+                      ? <SpinnerGap size={20} className="animate-spin" />
+                      : <WaveformIcon size={20} />}
                   </button>
                   <button
                     type="button"

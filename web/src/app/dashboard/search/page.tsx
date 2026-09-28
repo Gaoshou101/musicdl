@@ -25,6 +25,34 @@ type RowState = { status: 'idle' | 'busy' | 'done' | 'error'; report?: DownloadR
 
 const rowKey = (candidate: Candidate) => JSON.stringify([candidate.source_id, candidate.item_id])
 
+// The tiers that name a lossless container, and the ones an answer uses for
+// lossy audio.  They mirror the backend's two sets so the panel and the report
+// agree on what a downgrade is.
+const LOSSLESS_TIERS = new Set(['flac', 'flac24bit', 'alac', 'ape', 'wav', 'aiff'])
+const LOSSY_TIERS = new Set(['128k', '192k', '320k', 'mp3', 'aac', 'ogg', 'opus'])
+
+const tierName = (value?: string | null) => (value ?? '').trim().toLowerCase()
+
+/**
+ * The downgrade the panel says out loud when a lossless ask is not what came back.
+ *
+ * Only a lossless request answered with something else is a downgrade: a lossy
+ * ask, a matching answer, and an answer that names no tier all say nothing.
+ * The line names the tier that was asked for and the tier the bytes turned out
+ * to be, so the panel never shows a lossless claim the answer contradicts.
+ */
+function DowngradeNote({ report }: { report: DownloadReport }) {
+  const asked = tierName(report.requested_quality)
+  const served = tierName(report.actual_quality)
+  if (!LOSSLESS_TIERS.has(asked) || !served || served === asked) return null
+  return (
+    <p className="text-warning">
+      请求 {report.requested_quality?.trim()}，实际 {report.actual_quality?.trim()}
+      {LOSSY_TIERS.has(served) ? '（有损）' : ''}
+    </p>
+  )
+}
+
 export default function SearchPage() {
   const [query, setQuery] = useState('')
   const [limit, setLimit] = useState(20)
@@ -344,6 +372,7 @@ export default function SearchPage() {
                       下载成功：{formatBytes(state.report.size_bytes)} · {state.report.media_type} ·
                       语言 {state.report.language} · 请求 {shortHash(state.report.request_id, 12)}
                     </p>
+                    <DowngradeNote report={state.report} />
                     {state.report.fallback_from && (
                       <p className="text-warning">
                         原音源 {state.report.fallback_from} 未能取到音频，已改用 {state.report.source_id} 下载

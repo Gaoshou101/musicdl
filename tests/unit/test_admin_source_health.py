@@ -9,6 +9,7 @@ pipeline, so both are what the roll-up is built from.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -383,3 +384,120 @@ def test_the_preference_stays_bounded_and_never_raises():
     score = store.preference("primary")
     assert -20 <= score <= 20
     assert store.preference(None) == 0 and store.preference("") == 0
+# -- the lossless capability cache ----------------------------------------
+#
+# A probe measures whether a channel can serve lossless.  The answer feeds a
+# search tie-break, so it is bounded, it expires, and it is keyed to the script
+# version that was measured: an old answer, or one about a different script,
+# reads as no answer at all rather than as a standing claim, and a probe that
+# timed out is ``unknown`` rather than ``incapable``.
+
+
+def test_a_measured_capability_is_reported_while_it_is_fresh():
+    store = SourceHealthStore()
+    store.observe_lossless("primary", capable=True, evidence={"extension": "flac"},
+                           source_version="1.0.0", checked_at=1000.0)
+
+    status = store.lossless_status("primary", now=1000.0)
+    assert status["status"] == "lossless" and status["stale"] is False
+    assert status["checked_at"] == 1000.0 and status["evidence"] == {"extension": "flac"}
+    assert store.lossless_capability("primary", source_version="1.0.0", now=1000.0) is True
+
+
+def test_a_capability_answer_expires_and_reads_as_unknown():
+    store = SourceHealthStore(lossless_ttl=100.0)
+    store.observe_lossless("primary", capable=True, source_version="1", checked_at=1000.0)
+
+    assert store.lossless_capability("primary", source_version="1", now=1100.0) is True
+    stale = store.lossless_status("primary", now=1101.0)
+    assert stale["stale"] is True and stale["status"] == "lossless"
+    assert store.lossless_capability("primary", source_version="1", now=1101.0) is None
+
+
+def test_a_capability_answer_is_rejected_when_the_script_version_changed():
+    store = SourceHealthStore()
+    store.observe_lossless("primary", capable=True, source_version="1.0.0", checked_at=1000.0)
+
+    assert store.lossless_capability("primary", source_version="2.0.0", now=1000.0) is None
+    assert store.lossless_capability("primary", source_version="1.0.0", now=1000.0) is True
+
+
+def test_a_versionless_answer_matches_only_a_versionless_channel():
+    store = SourceHealthStore()
+    store.observe_lossless("primary", capable=True, checked_at=1000.0)
+
+    assert store.lossless_capability("primary", now=1000.0) is True
+    assert store.lossless_capability("primary", source_version="1.0.0", now=1000.0) is None
+
+
+def test_an_unknown_probe_answer_is_never_read_as_incapable():
+    store = SourceHealthStore()
+    store.observe_lossless("primary", capable=None, evidence={"error": "timeout"},
+                           source_version="1", checked_at=1000.0)
+
+    assert store.lossless_status("primary", now=1000.0)["status"] == "unknown"
+    assert store.lossless_capability("primary", source_version="1", now=1000.0) is None
+
+
+def test_a_channel_that_was_never_probed_has_no_capability():
+    store = SourceHealthStore()
+
+    assert store.lossless_capability("primary", now=1000.0) is None
+    status = store.lossless_status("primary", now=1000.0)
+    assert status["status"] == "unknown" and status["checked_at"] is None and status["stale"] is True
+
+
+def test_the_number_of_cached_capability_records_is_capped():
+    store = SourceHealthStore(lossless_limit=2)
+    for name in ("a", "b", "c"):
+        store.observe_lossless(name, capable=True, checked_at=1000.0)
+
+    assert store.lossless_capability("a", now=1000.0) is None
+    assert store.lossless_capability("b", now=1000.0) is True
+    assert store.lossless_capability("c", now=1000.0) is True
+
+
+def test_a_re_probe_replaces_the_record_in_place():
+    store = SourceHealthStore(lossless_limit=1)
+    store.observe_lossless("primary", capable=True, source_version="1", checked_at=1000.0)
+    store.observe_lossless("primary", capable=False, source_version="1", checked_at=2000.0)
+
+    assert store.lossless_capability("primary", source_version="1", now=2000.0) is False
+    assert store.lossless_capability("other", now=2000.0) is None
+
+
+def test_an_unusable_capability_answer_is_ignored():
+    store = SourceHealthStore()
+    store.observe_lossless("", capable=True, checked_at=1000.0)
+    store.observe_lossless("primary", capable="yes", checked_at=1000.0)
+    store.observe_lossless("primary", capable=True, checked_at="soon")
+
+    assert store.lossless_capability("primary", now=2000.0) is None
+
+
+def test_the_capability_is_exposed_on_the_panel_row():
+    store = SourceHealthStore()
+    # The panel reads the live clock, so a record that must look fresh is stamped now.
+    checked_at = time.time()
+    store.observe_lossless("primary", capable=True, source_version="1", checked_at=checked_at)
+
+    primary = row(store.snapshot([{"id": "primary", "enabled": True, "priority": 1}]), "primary")
+
+    assert primary["lossless"] is True
+    assert primary["lossless_status"] == "lossless" and primary["lossless_stale"] is False
+    assert primary["lossless_checked_at"] == checked_at and primary["lossless_evidence"] == {}
+
+
+def test_a_bad_lossless_ttl_or_limit_is_refused():
+    for kwargs in ({"lossless_ttl": 0}, {"lossless_ttl": "soon"}, {"lossless_limit": 0},
+                   {"lossless_limit": True}):
+        with pytest.raises(ValueError):
+            SourceHealthStore(**kwargs)
+
+
+def test_the_ttl_is_a_module_level_constant():
+    from musicdl.admin import health
+
+    assert health.LOSSLESS_TTL > 0
+    assert SourceHealthStore.LOSSLESS_TTL == health.LOSSLESS_TTL
+

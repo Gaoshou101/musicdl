@@ -47,6 +47,31 @@ console.log(JSON.stringify({selected, candidates}));
 '''
 
 
+RETRY_HARNESS = r'''
+import { readFileSync } from 'node:fs';
+const input = JSON.parse(readFileSync(0, 'utf8'));
+globalThis.invocation = { manifest: { plugin_id: 'fixture', version: '1' }, actions: [], observations: [] };
+const source = readFileSync(process.argv[1], 'utf8');
+await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const asked = [];
+globalThis.lx.on(globalThis.lx.EVENT_NAMES.request, async ({info}) => {
+  asked.push(info.type);
+  const answer = input.answers[asked.length - 1];
+  if (answer === undefined) return {};
+  if (answer && answer.__throw) throw new Error(answer.__throw);
+  return answer;
+});
+let resolved = null;
+let error = null;
+try {
+  resolved = await globalThis.handle({operation: 'resolve', payload: input.payload});
+} catch (caught) {
+  error = String(caught && caught.message || caught);
+}
+console.log(JSON.stringify({asked, resolved, error}));
+'''
+
+
 def search(*, item, sources=None, query='Song'):
     if NODE is None:
         pytest.skip('Node executable unavailable; Deno coverage is separate')
@@ -77,13 +102,37 @@ def resolve(*, tiers=('flac', '320k'), requested=None, answer='https://cdn.examp
     return json.loads(process.stdout)
 
 
+def resolve_trace(*, tiers=('flac', '320k'), requested=None, answers=({},)):
+    """Resolve once and report every tier the source was asked for, in order.
+
+    ``answers`` supplies the reply for each ``musicUrl`` call positionally, so
+    one entry lets a call fail and the next lets the one graceful retry
+    succeed.  A ``{'__throw': ...}`` entry makes that call raise instead.
+    """
+    if NODE is None:
+        pytest.skip('Node executable unavailable; Deno coverage is separate')
+    candidate = {'source_id': 'fixture', 'source_version': '1', 'item_id': 'lx:kw:42',
+                 'title': 'Song', 'artist': 'Artist', 'qualities': list(tiers),
+                 'quality_sizes': {'flac': 10000, 'flac24bit': 20000, '320k': 1000}}
+    payload = {'candidate': candidate}
+    if requested is not None:
+        payload['quality'] = requested
+    process = subprocess.run([NODE, '--input-type=module', '-e', RETRY_HARNESS, str(SHIM)],
+                             input=json.dumps({'payload': payload, 'answers': list(answers)}),
+                             text=True, encoding='utf-8', capture_output=True, timeout=10, check=False)
+    assert process.returncode == 0, process.stderr
+    return json.loads(process.stdout)
+
+
 @pytest.mark.parametrize('tiers,requested,expected', [
     (('flac', '320k'), None, '320k'),
     (('flac24bit', 'flac'), None, 'flac24bit'),
     ((), None, '320k'),
     (('flac', '320k'), 'flac', 'flac'),
     (('flac', '320k'), '320k', '320k'),
-    (('flac', '320k'), 'unavailable', 'flac'),
+    # A name the shim cannot recognise is no request at all, so the default
+    # rule decides exactly as it would have for an absent field.
+    (('flac', '320k'), 'unavailable', '320k'),
 ])
 def test_real_shim_default_and_explicit_quality_selection(tiers, requested, expected):
     assert resolve(tiers=tiers, requested=requested)['selected'] == expected
@@ -162,3 +211,61 @@ def test_real_shim_resolve_leaves_expiry_empty_when_the_answer_states_none():
         if stated is not None:
             answer['expires_at'] = stated
         assert resolve(answer=answer)['resolved']['expires_at'] is None, stated
+
+
+def test_real_shim_forwards_an_explicit_lossless_request_the_source_never_declared():
+    """A legal request is intent: it is asked for even with no declared tiers."""
+    trace = resolve_trace(tiers=(), requested='flac',
+                          answers=[{'url': 'https://cdn.example/song.flac', 'quality': 'flac'}])
+    assert trace['asked'] == ['flac']
+    assert trace['resolved']['quality'] == 'flac'
+    assert trace['resolved']['extension'] == 'flac'
+
+
+def test_real_shim_no_request_with_empty_tiers_still_uses_the_shim_default():
+    trace = resolve_trace(tiers=(), answers=[{'url': 'https://cdn.example/song.mp3'}])
+    assert trace['asked'] == ['320k']
+    assert trace['resolved']['quality'] == 'mp3'
+
+
+def test_real_shim_adopts_a_request_absent_from_the_declared_tiers():
+    trace = resolve_trace(tiers=('320k',), requested='flac',
+                          answers=[{'url': 'https://cdn.example/song.mp3', 'quality': '320k'}])
+    assert trace['asked'] == ['flac']
+    assert trace['resolved']['quality'] == '320k'
+
+
+def test_real_shim_retries_once_with_the_declared_best_when_an_undeclared_request_fails():
+    """One retry, at the best tier the source itself declared, and no more."""
+    trace = resolve_trace(tiers=('128k', '320k'), requested='flac',
+                          answers=[{}, {'url': 'https://cdn.example/song.mp3', 'quality': '320k'}])
+    assert trace['asked'] == ['flac', '320k']
+    assert len(trace['asked']) == 2
+    # The report names the tier that actually answered, never the failed ask.
+    assert trace['resolved']['quality'] == '320k'
+    assert trace['resolved']['extension'] == 'mp3'
+    # The declared size belongs to the tier that was really used.
+    assert trace['resolved']['declared_size'] == 1000
+    assert trace['resolved']['size_is_advisory'] is True
+
+
+def test_real_shim_retries_a_throwing_undeclared_request_exactly_once():
+    trace = resolve_trace(tiers=('320k',), requested='flac',
+                          answers=[{'__throw': 'lx source threw'},
+                                   {'url': 'https://cdn.example/song.mp3', 'quality': '320k'}])
+    assert trace['asked'] == ['flac', '320k']
+    assert trace['resolved']['quality'] == '320k'
+
+
+def test_real_shim_never_retries_a_request_the_source_declared():
+    trace = resolve_trace(tiers=('flac', '320k'), requested='flac', answers=[{}])
+    assert trace['asked'] == ['flac']
+    assert trace['resolved'] is None
+    assert 'no media URL' in trace['error']
+
+
+def test_real_shim_never_retries_a_declared_request_that_throws():
+    trace = resolve_trace(tiers=('flac', '320k'), requested='flac', answers=[{'__throw': 'boom'}])
+    assert trace['asked'] == ['flac']
+    assert trace['resolved'] is None
+    assert 'boom' in trace['error']

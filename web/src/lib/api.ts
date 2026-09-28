@@ -76,6 +76,15 @@ export type SourceStatus = {
 /** How one channel has behaved lately, as `GET /sources/health` rolls it up. */
 export type SourceHealthVerdict = 'ok' | 'degraded' | 'failing' | 'unknown'
 
+/** The lossless verdict the health roll-up recorded for one channel. */
+export type LosslessStatus = 'unknown' | 'lossless' | 'lossy'
+
+/**
+ * What a probe judged a channel by: the container the source declared, and the
+ * tier it answered with. Either is null when the answer did not name one.
+ */
+export type LosslessEvidence = { extension?: string | null; quality?: string | null }
+
 export type SourceHealthRow = {
   id: string
   name: string | null
@@ -99,6 +108,16 @@ export type SourceHealthRow = {
   last_error_stage: string | null
   last_health: boolean | null
   last_health_status: string | null
+  /** The measured capability: true or false when probed, null when unknown. */
+  lossless: boolean | null
+  /** The probe's verdict for this channel, as the roll-up recorded it. */
+  lossless_status: LosslessStatus
+  /** True when the recorded verdict is older than the roll-up's TTL. */
+  lossless_stale: boolean
+  /** When the probe ran, in epoch seconds; null when it never ran. */
+  lossless_checked_at: number | null
+  /** What the verdict was judged from, for the operator to read back. */
+  lossless_evidence: LosslessEvidence
 }
 
 export type SourceHealthReport = {
@@ -673,6 +692,26 @@ export function updateSource(
 export function deleteSource(id: string): Promise<MutationReport<SourceItem & { uninstalled: string[] }>> {
   return request<MutationReport<SourceItem & { uninstalled: string[] }>>(
     `/sources/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+/** What one manual lossless check measured, as the probe reports it. */
+export type LosslessCheckReport = {
+  status: LosslessStatus
+  evidence: LosslessEvidence
+  /** When the probe ran, in epoch seconds. */
+  checked_at: number
+}
+
+/**
+ * Run the panel's one manual lossless check for a channel.
+ *
+ * A channel's lossless support cannot be read off a candidate, so the operator
+ * asks for one real resolve. The verdict it reaches is what the channel's row
+ * then shows, and what the panel's own search reads as a tie-break.
+ */
+export function checkSourceLossless(id: string): Promise<LosslessCheckReport> {
+  return request<LosslessCheckReport>(`/sources/${encodeURIComponent(id)}/lossless-check`,
+                                      { method: 'POST' })
 }
 
 export function listBots(): Promise<{ items: BotItem[] }> {

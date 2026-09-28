@@ -307,8 +307,10 @@ class MessageWorker(_StreamWorker):
                  ai_ranker: Callable | None = None, group: str = "musicdl-workers", consumer: str | None = None,
                  max_results: int = 10, search_timeout: float = 10.0, selection_ttl: int = 600,
                  pending_idle_ms: int = 30001, max_attempts: int = 3, retry_window_seconds: int = 86400,
-                 quality_policy: str = "lossless_first", quality_preference: str | None = None):
+                 quality_policy: str = "lossless_first", quality_preference: str | None = None,
+                 lossless_capability: Mapping[str, bool | None] | Callable[[str], bool | None] | None = None):
         self.quality_policy, self.quality_preference = quality_policy, quality_preference
+        self.lossless_capability = lossless_capability
         self.redis, self.registry, self.wecom = redis, registry, wecom
         self.state = state or RedisStateStore(redis)
         self.retry_window_seconds = _retry_window(retry_window_seconds)
@@ -333,8 +335,13 @@ class MessageWorker(_StreamWorker):
         command = _command(payload)
         if command.kind is not CommandKind.SEARCH:
             return None
-        result = await search_sources(self.registry, str(command.value), timeout=self.search_timeout,
-                                      quality_policy=self.quality_policy, quality_preference=self.quality_preference)
+        options = dict(timeout=self.search_timeout, quality_policy=self.quality_policy,
+                       quality_preference=self.quality_preference)
+        if self.lossless_capability is not None:
+            # The channel-ordering bias is optional, so an unmeasured
+            # deployment keeps the exact search signature it always had.
+            options["lossless_capability"] = self.lossless_capability
+        result = await search_sources(self.registry, str(command.value), **options)
         if self.ai_ranker:
             try:
                 ranked = await _call(self.ai_ranker, result, str(command.value))

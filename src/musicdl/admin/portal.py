@@ -11,7 +11,7 @@ from html import escape
 from pydantic import ValidationError
 from typing import Any, Callable
 
-from musicdl.config import AppSettings
+from musicdl.config import AppSettings, WorkerSettings
 from musicdl.ai.diagnose import probe_endpoint
 from musicdl.media import download_candidate, download_with_fallback
 from musicdl.media.language import resolve_language
@@ -25,6 +25,7 @@ from musicdl.admin.source_fetch import (
 )
 from musicdl.plugins.install import install_source, preview_source
 from musicdl.sources.models import Candidate, normalize_text
+from musicdl.sources.quality import requested_quality
 from musicdl.sources.search import search_sources
 from .auth import AdminAuth, RateLimiter
 from .config import EDITABLE, ConfigManager
@@ -196,7 +197,23 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     search_timeout = _positive(getattr(worker, "search_timeout", None), 10.0)
     resolve_timeout = _positive(getattr(worker, "resolve_stream_timeout", None), 30.0)
     health_timeout = _positive(getattr(worker, "health_timeout", None), 10.0)
+    # The tier the panel asks a channel for has to be the tier the worker would
+    # have asked for, so it is read from the same settings object the worker was
+    # assembled from rather than from a second copy of the defaults.  A router
+    # mounted without a worker falls back to the one deployment default.
+    default_worker = WorkerSettings()
+    quality_policy = getattr(worker, "quality_policy", None) or default_worker.quality_policy
+    quality_preference = getattr(worker, "quality_preference", None)
     credential_paths = {"/admin/", "/admin/change-credentials", "/admin/change-credentials-form"}
+
+    def tier_for(candidate: Candidate) -> str | None:
+        """The tier this candidate is asked for, by the worker's own rules.
+
+        The ask is per-candidate: a channel the search listed may declare tiers
+        while its replacement declares none, or the other way round, so each one
+        is computed from its own declaration rather than inherited.
+        """
+        return requested_quality(candidate, policy=quality_policy, preference=quality_preference)
 
     def start_session(response: Response) -> str:
         """Issue a session and bind the CSRF token its forms will carry."""
@@ -607,6 +624,27 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return with_reload_report({**removed, "uninstalled": uninstalled},
                                   await rebuild_runtime("delete_source"))
 
+    @router.post("/sources/{source_id}/lossless-check")
+    async def check_source_lossless(source_id: str, request: Request):
+        """Ask one channel whether it really serves lossless, once, on demand.
+
+        The panel's own search cannot tell a FLAC channel from an MP3 one from a
+        candidate alone -- the catalogue that answers it declares no tiers -- so
+        the operator can run one check here.  What comes back is the probe's own
+        verdict, an ``unknown`` included: a channel the probe could not judge is
+        reported as unmeasured, never as incapable.  The check also refreshes
+        the health roll-up the panel's search reads as a tie-break.
+        """
+        mutate(request)
+        service = active_runtime()
+        entry = service.registry.get(source_id)
+        if entry is None or not getattr(entry, "enabled", True):
+            raise HTTPException(404, "source not found")
+        probe = getattr(service, "lossless_probe", None)
+        if probe is None:
+            raise HTTPException(503, "lossless probe is unavailable")
+        return await probe.check(source_id, source_version=entry.version)
+
     @router.get("/search")
     async def search(request: Request, q: str = "", limit: int = 50):
         """The panel's own search: exactly the query the workers run.
@@ -620,7 +658,10 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         if not 1 <= limit <= 200:
             raise HTTPException(422, "invalid limit")
         try:
-            result = await search_sources(service.registry, q, timeout=search_timeout)
+            result = await search_sources(service.registry, q, timeout=search_timeout,
+                                          quality_policy=quality_policy,
+                                          quality_preference=quality_preference,
+                                          lossless_capability=getattr(service, "lossless_capability", None))
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         # A search the panel ran is also the cheapest health probe every enabled
@@ -688,6 +729,11 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         # titled on the channel that failed.
         handed = body.get("query")
         query = handed.strip() if isinstance(handed, str) and handed.strip() else candidate.title
+        # What the operator asked for, by the worker's own rules.  In this
+        # deployment the listed candidate declares no tiers at all, which under
+        # ``lossless_first`` still means "ask for FLAC" and under
+        # ``best_available`` means "ask for nothing".
+        quality = tier_for(candidate)
 
         def recorded(event) -> None:
             """Keep the attempt in the log and in the channel's roll-up."""
@@ -723,6 +769,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                 async with asyncio.timeout(_stream_budget(source, resolve_timeout)):
                     result = await download_candidate(candidate, source, media_root,
                                                       request_id=request_id, language=language,
+                                                      quality=quality,
                                                       verify_duration=verify_duration, record=recorded)
             except MediaError as exc:
                 raise failed(exc.code) from None
@@ -736,7 +783,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         attempt = await download_with_fallback(
             candidate, resolvers, media_root, request_id=request_id, query=query, refresh=refresh,
             resolve_stream_timeout=_stream_budget(resolvers.get(candidate.source_id), resolve_timeout),
-            refresh_timeout=search_timeout, language=language,
+            refresh_timeout=search_timeout, language=language, quality=quality,
+            quality_policy=quality_policy,
             health_timeout=health_timeout, verify_duration=verify_duration, record=recorded)
         if attempt.download is not None:
             return report(candidate.source_id, None, attempt.download)
@@ -746,8 +794,9 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             try:
                 replacement_source = resolvers[replacement.source_id]
                 async with asyncio.timeout(_stream_budget(replacement_source, resolve_timeout)):
-                    result = await download_candidate(replacement, replacement_source,
-                                                      media_root, request_id=request_id, language=language,
+                    result = await download_candidate(replacement, replacement_source, media_root,
+                                                      request_id=request_id, language=language,
+                                                      quality=tier_for(replacement),
                                                       verify_duration=verify_duration, record=recorded)
             except MediaError as exc:
                 code = exc.code

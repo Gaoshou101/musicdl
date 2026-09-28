@@ -83,7 +83,9 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
                          max_results_per_source: int = 100,
                          preference: Mapping[str, int] | Callable[[str], int] | None = None,
                          quality_policy: str = "lossless_first",
-                         quality_preference: str | None = None) -> SearchResult:
+                         quality_preference: str | None = None,
+                         lossless_capability: Mapping[str, bool | None] | Callable[[str], bool | None] | None = None
+                         ) -> SearchResult:
     """Search every enabled source, and answer with one candidate per recording.
 
     Two channels offering the same recording are the normal case, so one of
@@ -103,7 +105,14 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     if not isinstance(max_results_per_source, int) or isinstance(max_results_per_source, bool) or not 1 <= max_results_per_source <= 1000:
         raise ValueError("invalid_max_results_per_source")
     def rank_of(candidate, priority):
-        return quality_key(candidate, priority, policy=quality_policy, preference=quality_preference)
+        quality = quality_key(candidate, priority, policy=quality_policy, preference=quality_preference)
+        if quality_policy != "lossless_first":
+            # Compatibility mode keeps the historical quality key byte for byte.
+            return quality
+        # A measured capability leads the quality key and is all-zero when
+        # nothing was measured, so an unknown channel leaves the order exactly
+        # as v1.0.5 left it.
+        return (_lossless_bias(lossless_capability, candidate.source_id),) + quality
 
     entries = registry.enabled()
     outcomes = await asyncio.gather(*(_invoke(e, query, timeout, max_results_per_source) for e in entries))
@@ -152,7 +161,7 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     def ordering(row):
         relevance, c, entry = row
         quality = rank_of(c, entry.priority)
-        return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], -quality[4], -quality[5],
+        return (relevance, *(-value for value in quality),
                 c.title.casefold(), c.artist.casefold(), c.source_id.casefold(), c.item_id.casefold())
     ranked = ((relevance_of(c), c, entry) for c, entry in retained)
     ordered = tuple(c for _, c, _ in sorted(ranked, key=ordering))
@@ -220,3 +229,22 @@ def _preference_weight(preference: Mapping[str, int] | Callable[[str], int] | No
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
     return int(value)
+
+
+def _lossless_bias(lookup: Mapping[str, bool | None] | Callable[[str], bool | None] | None,
+                   source_id: str) -> int:
+    """Whether a channel was measured able to serve lossless, as an ordering bias.
+
+    Only a recorded ``True`` moves a channel up.  ``False`` and an absent
+    record mean the same thing here -- no usable measurement -- so they leave
+    the order untouched, and a lookup that raises, names nothing, or answers
+    with something that is not a bool is read the same way: a tie-break input
+    must never be the reason a search fails.
+    """
+    if lookup is None:
+        return 0
+    try:
+        value = lookup(source_id) if callable(lookup) else lookup[source_id]
+    except Exception:
+        return 0
+    return 1 if value is True else 0

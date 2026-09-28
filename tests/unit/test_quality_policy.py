@@ -6,7 +6,12 @@ from musicdl.sources.models import Candidate
 
 
 def candidate(**overrides):
-    return Candidate(source_id='source', source_version='1', item_id='song', title='Song', artist='Artist', format='mp3', **overrides)
+    # ``format`` defaults to mp3 but must stay overridable, so the frozen-table
+    # cases can ask what v1.0.5 did with a candidate that claimed a lossless
+    # container while declaring no tiers.
+    fields = {'format': 'mp3', **overrides}
+    return Candidate(source_id='source', source_version='1', item_id='song', title='Song',
+                     artist='Artist', **fields)
 
 
 def test_policy_defaults():
@@ -26,6 +31,70 @@ def test_best_available_omits_quality_request():
     choose = getattr(quality, 'requested_quality', None)
     assert callable(choose), 'shared quality policy selector is required'
     assert choose(candidate(qualities=('flac',)), policy='best_available') is None
+
+
+def test_lossless_first_requests_flac_when_qualities_are_empty():
+    """An empty declaration is not evidence the source cannot serve lossless.
+
+    ``lossless_first`` is the request itself, so a source that declares no
+    tiers is still asked for the lossless container; the answer, not the ask,
+    decides what was really served.
+    """
+    choose = getattr(quality, 'requested_quality', None)
+    assert callable(choose), 'shared quality policy selector is required'
+    assert quality.LOSSLESS_REQUEST == 'flac'
+    assert choose(candidate(qualities=())) == quality.LOSSLESS_REQUEST
+
+
+def test_empty_qualities_honor_explicit_preference_without_mutation():
+    """A configured preference is a request even when nothing declared it.
+
+    Asking for a tier is intent, not evidence: the candidate keeps exactly the
+    declarations the source made, so a later fallback decision can never
+    mistake the request for something the source offered.
+    """
+    empty = candidate(qualities=())
+    assert tuple(empty.qualities) == ()
+    assert quality.requested_quality(empty, preference='flac') == 'flac'
+    assert quality.requested_quality(empty, preference='320k') == '320k'
+    assert tuple(empty.qualities) == ()
+
+
+# Frozen v1.0.5 outcomes for ``best_available``.  The iron law is literal:
+# that policy must never diverge from v1.0.5, with or without a preference
+# and with or without declared tiers.  v1.0.5 read it as: a declared
+# preference wins; otherwise no preference asks for nothing at all; otherwise
+# fall back to the declared tiers and, when nothing was declared, to the
+# candidate's own lossless format.
+@pytest.mark.parametrize('qualities,format_,preference,expected', [
+    ((), 'mp3', None, None),
+    ((), 'mp3', 'flac', None),
+    ((), 'mp3', '320k', None),
+    ((), 'mp3', 'unsupported', None),
+    ((), 'flac', None, None),
+    ((), 'flac', 'flac', 'flac'),
+    (('320k',), 'mp3', None, None),
+    (('320k',), 'mp3', '320k', '320k'),
+    (('320k',), 'mp3', 'flac', '320k'),
+    (('320k',), 'mp3', 'unsupported', '320k'),
+    (('flac', '320k'), 'mp3', None, None),
+    (('flac', '320k'), 'mp3', 'flac', 'flac'),
+    (('flac', '320k'), 'mp3', '320k', '320k'),
+    (('flac', '320k'), 'mp3', 'unsupported', 'flac'),
+])
+def test_best_available_request_selection_matches_v105(qualities, format_, preference, expected):
+    """``best_available`` never proactively asks, whatever the declarations are."""
+    chosen = quality.requested_quality(candidate(qualities=qualities, format=format_),
+                                       policy='best_available', preference=preference)
+    assert chosen == expected
+
+
+def test_lossless_first_declared_tier_selection_matches_v105():
+    """``lossless_first`` keeps its declared-tier selection unchanged."""
+    choose = quality.requested_quality
+    assert choose(candidate(qualities=('320k', 'flac'))) == 'flac'
+    assert choose(candidate(qualities=('128k', '320k'))) == '320k'
+    assert choose(candidate(qualities=('flac', 'flac24bit'))) == 'flac24bit'
 
 from musicdl.media.models import DownloadMetadata, MediaError, _CloseOnce
 from musicdl.media.fallback import download_with_fallback
