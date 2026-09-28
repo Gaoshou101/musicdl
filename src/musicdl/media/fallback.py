@@ -16,6 +16,7 @@ from .models import (
     ArtifactRecord,
     ArtifactStore,
     DownloadEvent,
+    DownloadMetadata,
     DownloadResult,
     DownloadSource,
     FallbackResult,
@@ -32,6 +33,32 @@ def _budget(value: float | None, *, default: float | None = None) -> float | Non
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
         raise ValueError("invalid_timeout")
     return float(value)
+
+
+async def _resolve_media(source: DownloadSource, candidate: Candidate, quality: str | None, *,
+                         request_id: str,
+                         record: Callable[[DownloadEvent], None] | None) -> DownloadMetadata:
+    """Resolve one descriptor the way ``download_candidate`` reports a dead channel.
+
+    The pre-resolve and the re-resolve happen in this module rather than inside
+    ``download_candidate``, so a resolver that fails in a way that function would have
+    normalised has to be normalised here too.  A channel that could not answer is the
+    business failure the refresh path replaces, never an uncertain effect that leaves
+    the job to be retried and dead-lettered instead of re-prompted; and because
+    ``download_candidate`` is not the one reporting it, the attempt is put on the event
+    stream here so a channel's roll-up still counts the failure.  A ``MediaError`` keeps
+    its own code and the caller's existing classification, with no second event.
+    """
+    try:
+        return await source_download(source, candidate, quality=quality)
+    except MediaError:
+        raise
+    except Exception:
+        emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id,
+                                         candidate.source_version, "download", "failed",
+                                         error_code="download_failed",
+                                         requested_quality=quality))
+        raise MediaError("download_failed") from None
 
 
 async def download_with_fallback(
@@ -94,7 +121,8 @@ async def download_with_fallback(
                         if exc.code != "media_url_expired":
                             raise
                     await _close_metadata(resolved)
-                    fresh = await source_download(source_obj, target, quality=requested)
+                    fresh = await _resolve_media(source_obj, target, requested,
+                                               request_id=request_id, record=record)
                     try:
                         return await download_candidate(target, source_obj, media_root, quality=requested,
                                                         resolved_metadata=fresh, **common)
@@ -102,7 +130,8 @@ async def download_with_fallback(
                         await _close_metadata(fresh)
                 if quality_policy != "lossless_first" or not is_lossless(quality) or reservation is not None:
                     return await download_candidate(candidate, source, media_root, quality=quality, **common)
-                metadata = await source_download(source, candidate, quality=quality)
+                metadata = await _resolve_media(source, candidate, quality,
+                                               request_id=request_id, record=record)
                 try:
                     downgraded = proven_lossy(metadata.quality)
                     if downgraded:
