@@ -68,7 +68,9 @@ def test_success_does_not_enter_fallback(tmp_path):
     assert outcome.failed_source_id is None
     assert calls == []
     assert source.health_calls == 0
-    assert [(e.stage, e.status) for e in events] == [("download", "success")]
+    # No playing time was stated or measurable, so lenient mode records the
+    # gap and still delivers the file.
+    assert [(e.stage, e.status) for e in events] == [("duration", "unverified"), ("download", "success")]
 
 
 def test_failure_refreshes_once_excludes_source_and_checks_health(tmp_path):
@@ -406,6 +408,7 @@ def test_fallback_reresolves_a_descriptor_the_transport_retired(tmp_path):
     # download only counts once the live descriptor has produced the bytes.
     assert [(e.stage, e.status, e.error_code) for e in events] == [
         ("download", "failed", "media_url_expired"),
+        ("duration", "unverified", "duration_unverified"),
         ("download", "success", None),
     ]
 def test_a_reresolved_answer_stamps_the_quality_it_delivered(tmp_path):
@@ -452,5 +455,6 @@ def test_a_reresolved_answer_stamps_the_quality_it_delivered(tmp_path):
     assert [(e.stage, e.status, e.error_code) for e in events] == [
         ("quality_downgraded", "observed", None),
         ("download", "failed", "media_url_expired"),
+        ("duration", "unverified", "duration_unverified"),
         ("download", "success", None),
     ]

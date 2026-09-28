@@ -279,6 +279,7 @@ docker compose -p OLD_PROJECT -f compose.lite.yaml up -d
 | `MUSICDL_ADMIN__COOKIE_SECURE` | 管理员 Cookie 是否只通过 HTTPS 发送，默认为 `true`；仅可信的主机本地 HTTP（环回访问）可设为 `false` |
 | `MUSICDL_IMAGE_TAG` | `compose.quick.yaml` 和 `compose.prod.yaml` 使用的 Docker 镜像版本；lite 从源码构建两个镜像 |
 | `MUSICDL_DEPLOYMENT_MODE` | `compose.lite.yaml` 设置为 `lite`；其他清单使用默认的 `full` 模式 |
+| `MUSICDL_MEDIA__VERIFY_DURATION` | 下载完成后如何对照曲库时长校验：`lenient`（默认）在两边时长都已知时拒收试听片段或半截文件，无法校验的文件放行并记录 `duration_unverified` 事件；`strict` 连无法校验的文件也拒收 |
 | `MUSICDL_WORKER__QUALITY_POLICY` | 默认 `lossless_first`，优先声明支持无损的音质；无损文件通常大得多。`best_available` 恢复 v1.0.4 的选择行为。 |
 | `MUSICDL_WORKER__QUALITY_PREFERENCE` | 可选音质，如 `flac` 或 `320k`，优先声明支持该音质的渠道；未声明支持时回退无损优先，不报错。 |
 | `MUSICDL_AI__ENABLED` | 开启可选的 OpenAI 兼容 AI 辅助功能 |

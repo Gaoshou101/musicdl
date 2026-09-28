@@ -299,6 +299,19 @@ def test_worker_duration_budgets_are_strictly_validated(field, value):
         WorkerSettings(**{field: value})
 
 
+def test_media_verify_duration_defaults_to_lenient(monkeypatch):
+    assert AppSettings().media.verify_duration == "lenient"
+
+    monkeypatch.setenv("MUSICDL_MEDIA__VERIFY_DURATION", "strict")
+    assert AppSettings().media.verify_duration == "strict"
+
+
+def test_media_verify_duration_refuses_a_policy_this_build_does_not_know(monkeypatch):
+    monkeypatch.setenv("MUSICDL_MEDIA__VERIFY_DURATION", "whatever")
+    with pytest.raises(ValidationError):
+        AppSettings()
+
+
 def test_worker_settings_map_nested_environment(monkeypatch):
     monkeypatch.setenv("MUSICDL_WORKER__SEARCH_TIMEOUT", "7")
     monkeypatch.setenv("MUSICDL_WORKER__PENDING_IDLE_MS", "33000")
@@ -327,12 +340,14 @@ def test_worker_settings_defaults_are_accepted_by_the_real_job_worker():
                      retry_window_seconds=worker.retry_window_seconds,
                      resolve_stream_timeout=worker.resolve_stream_timeout,
                      refresh_timeout=worker.search_timeout, health_timeout=worker.health_timeout,
+                     verify_duration=settings.media.verify_duration,
                      selection_ttl=settings.wecom.selection_ttl)
 
     assert (real.job_timeout, real.pending_idle_ms) == (30.0, 32000)
     assert (real.resolve_stream_timeout, real.refresh_timeout, real.health_timeout) == (15.0, 8.0, 5.0)
     assert (real.redis_overhead_seconds, real.wecom_notice_timeout) == (REDIS_OVERHEAD_SECONDS,
                                                                        WECOM_NOTICE_TIMEOUT_SECONDS)
+    assert real.verify_duration == "lenient"
     assert real.pending_idle_ms > 1000 * (max(real.job_timeout, real.refresh_timeout) + real.redis_overhead_seconds)
 
 

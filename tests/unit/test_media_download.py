@@ -117,7 +117,15 @@ def test_download_publishes_valid_media_atomically(tmp_path):
     assert result.relative_path == Path("华语/Artist/Song - Artist.mp3")
     assert target.read_bytes() == data
     assert result.sha256 == hashlib.sha256(data).hexdigest()
-    assert events == [DownloadEvent("r", "1", "source", "v1", "download", "success", size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), relative_path="华语/Artist/Song - Artist.mp3", actual_quality="mp3")]
+    # ``ID3`` alone states no playing time, so the lenient policy records that
+    # the length could not be checked and then publishes the file anyway.
+    assert events == [
+        DownloadEvent("r", "1", "source", "v1", "duration", "unverified",
+                      error_code="duration_unverified"),
+        DownloadEvent("r", "1", "source", "v1", "download", "success", size_bytes=len(data),
+                      sha256=hashlib.sha256(data).hexdigest(),
+                      relative_path="华语/Artist/Song - Artist.mp3", actual_quality="mp3"),
+    ]
     assert not list(tmp_path.glob(".musicdl-*.part"))
 
 

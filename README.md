@@ -280,6 +280,7 @@ The administration panel is the preferred place to manage runtime settings. Envi
 | `MUSICDL_ADMIN__COOKIE_SECURE` | Whether administrator cookies require HTTPS; defaults to `true`, set `false` only for trusted host-local HTTP access via loopback |
 | `MUSICDL_IMAGE_TAG` | Docker image version used by `compose.quick.yaml` and `compose.prod.yaml`; lite builds both images from source |
 | `MUSICDL_DEPLOYMENT_MODE` | `lite` is set by `compose.lite.yaml`; other manifests use the default `full` mode |
+| `MUSICDL_MEDIA__VERIFY_DURATION` | How a finished download is checked against the catalogue duration: `lenient` (default) refuses a preview or a half-length file when both lengths are known and accepts what it cannot measure, recording a `duration_unverified` event; `strict` refuses what it cannot measure |
 | `MUSICDL_WORKER__QUALITY_POLICY` | Default `lossless_first`: prefer declared lossless tiers; lossless files can be much larger. `best_available` restores v1.0.4 selection behavior. |
 | `MUSICDL_WORKER__QUALITY_PREFERENCE` | Optional declared tier such as `flac` or `320k`; a supporting channel is preferred. Unsupported preferences fall back to lossless-first selection without an error. |
 | `MUSICDL_AI__ENABLED` | Enable optional OpenAI-compatible advisory features |

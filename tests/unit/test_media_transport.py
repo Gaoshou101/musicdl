@@ -1112,7 +1112,14 @@ def test_advisory_size_reports_real_byte_count(tmp_path, head):
     assert handed["metadata"].declared_size == len(ID3_BODY)
     assert result.size_bytes == len(ID3_BODY)
     assert (tmp_path / result.relative_path).stat().st_size == len(ID3_BODY)
-    assert len(events) == 1
-    assert events[0].size_bytes == len(ID3_BODY)
-    assert events[0].relative_path == result.relative_path.as_posix()
-    assert events[0].sha256 == hashlib.sha256(ID3_BODY).hexdigest()
+    # The bytes carry no length a container reader can trust, so the lenient
+    # duration policy says so and hands them over anyway; the success record is
+    # the one that has to describe the disk.
+    assert [(e.stage, e.status, e.error_code) for e in events] == [
+        ("duration", "unverified", "duration_unverified"),
+        ("download", "success", None),
+    ]
+    success = events[-1]
+    assert success.size_bytes == len(ID3_BODY)
+    assert success.relative_path == result.relative_path.as_posix()
+    assert success.sha256 == hashlib.sha256(ID3_BODY).hexdigest()

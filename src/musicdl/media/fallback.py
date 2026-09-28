@@ -55,8 +55,11 @@ async def download_with_fallback(
     fence: int | None = None,
     language: str | None = None,
     max_bytes: int = MAX_MEDIA_BYTES,
+    verify_duration: str = "lenient",
     record: Callable[[DownloadEvent], None] | None = None,
 ) -> FallbackResult:
+    if verify_duration not in {"lenient", "strict"}:
+        raise ValueError("invalid_verify_duration")
     resolve_stream_budget = _budget(resolve_stream_timeout)
     refresh_budget = _budget(refresh_timeout)
     health_budget = _budget(health_timeout, default=10.0)
@@ -74,7 +77,8 @@ async def download_with_fallback(
                 started = asyncio.get_running_loop().time()
                 common = dict(request_id=request_id, reservation=reservation,
                               artifact_store=artifact_store, owner=owner, fence=fence,
-                              language=language, max_bytes=max_bytes, record=record, prepare=prepare)
+                              language=language, max_bytes=max_bytes, verify_duration=verify_duration,
+                              record=record, prepare=prepare)
 
                 async def stream(source_obj, target, requested, resolved):
                     """Stream a descriptor this attempt already holds.

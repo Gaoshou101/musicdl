@@ -17,7 +17,7 @@ class _Secret:
 def _settings():
     return SimpleNamespace(
         redis=SimpleNamespace(url=_Secret("redis://runtime-test/0"), connect_timeout=1.5, operation_timeout=2.5),
-        media=SimpleNamespace(root="/data/music"),
+        media=SimpleNamespace(root="/data/music", verify_duration="lenient"),
         wecom=SimpleNamespace(enabled=True, corp_id="corp-test", secret=_Secret("wecom-secret"), agent_id=7,
                               api_base="http://proxy.example:9080", selection_ttl=321),
         plugin=SimpleNamespace(service_url="http://plugin:8080", app_data_root="/data/app"),

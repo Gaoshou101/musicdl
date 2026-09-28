@@ -5,7 +5,8 @@ from musicdl.media.models import FallbackResult, DownloadResult
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
 from musicdl.wecom.state import RedisStateStore
-from musicdl.worker.workers import FALLBACK_NOTICE, TERMINAL_FAILURE_TEXT, JobDeferred, JobWorker
+from musicdl.worker.workers import (FALLBACK_NOTICE, REFUSAL_TEXT, TERMINAL_FAILURE_TEXT, JobDeferred,
+                                    JobWorker)
 
 class Redis:
     def __init__(self,messages=None): self.messages=messages or []; self.acks=[]
@@ -54,6 +55,58 @@ def test_job_route_resolves_candidate_and_downloads(monkeypatch):
     assert result.download.relative_path=="Song.mp3" and wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB）")]
     assert calls[0][1]=={"namespace":"{tenant}"}
     assert len(calls)==1
+
+def test_success_notice_reports_the_measured_bitrate(monkeypatch):
+    async def route(*a, **k):
+        return {"from_user": "u", "query": "q", "version": "v", "generation": 0,
+                "candidates": {"2": cand().model_dump(mode="json")}}
+
+    async def download(c, *args, **kwargs):
+        return SimpleNamespace(download=SimpleNamespace(relative_path="Song.flac", extension="flac",
+                                                        bitrate_kbps=1411),
+                               download_error=None, refresh_error=None, refreshed=None)
+
+    monkeypatch.setattr("musicdl.worker.workers.get_selection_for_request", route)
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", download)
+    wc = WeCom()
+    run(JobWorker(Redis(), wc, {}, "/tmp", state=State(), refresh=lambda *a: None)
+        .handle_job({"request_id": "r", "index": "2"}, job_id="1-0"))
+    assert wc.sent == [("u", "下载成功：Song.flac（FLAC 1411kbps）")]
+
+
+def test_success_notice_stays_plain_when_no_rate_was_measured(monkeypatch):
+    async def route(*a, **k):
+        return {"from_user": "u", "query": "q", "version": "v", "generation": 0,
+                "candidates": {"2": cand().model_dump(mode="json")}}
+
+    async def download(c, *args, **kwargs):
+        return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3", extension="mp3",
+                                                        bitrate_kbps=None),
+                               download_error=None, refresh_error=None, refreshed=None)
+
+    monkeypatch.setattr("musicdl.worker.workers.get_selection_for_request", route)
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", download)
+    wc = WeCom()
+    run(JobWorker(Redis(), wc, {}, "/tmp", state=State(), refresh=lambda *a: None)
+        .handle_job({"request_id": "r", "index": "2"}, job_id="1-0"))
+    assert wc.sent == [("u", "下载成功：Song.mp3")]
+
+
+def test_a_job_worker_refuses_an_unknown_duration_policy():
+    with pytest.raises(ValueError, match="invalid verify duration"):
+        JobWorker(Redis(), WeCom(), {}, "/tmp", state=State(), refresh=lambda *a: None,
+                  verify_duration="whatever")
+
+
+def test_a_refused_download_is_explained_in_words_a_person_can_act_on():
+    result = SimpleNamespace(download_error="incomplete_audio", refresh_error=None)
+    assert JobWorker._failure_text(result) == "取到的是试听片段或文件不完整，请换一个音源"
+
+
+def test_every_other_failure_still_names_the_code_that_caused_it():
+    result = SimpleNamespace(download_error=None, refresh_error="search_error")
+    assert JobWorker._failure_text(result) == "下载失败，已重试：search_error"
+
 
 def test_handle_user_selection_uses_state_namespace(monkeypatch):
     calls=[]
@@ -402,6 +455,27 @@ def test_refreshed_candidates_rebind_one_generation_and_prompt_once(monkeypatch)
     assert effect(st,"1-0","rebind")["status"]=="done" and effect_result(st,"1-0","rebind")["generation"]==1
     assert len(wc.sent)==1 and wc.sent[0][0]=="u" and wc.sent[0][1].endswith("回复序号下载。")
     assert wc.sent[0][1].startswith(FALLBACK_NOTICE)
+    assert wc.sent[0][1].count("Song — Artist")==2
+    assert effect(st,"1-0","selection_prompt")["status"]=="done"
+
+def test_a_refusal_keeps_its_own_words_above_a_refreshed_list(monkeypatch):
+    # Offering a second list must not swallow the reason the first one failed:
+    # a person who asked for a song and got a preview is told so, even when
+    # there are fresh choices to pick from.
+    st=State()
+    async def download(candidate,sources,root,**kwargs):
+        return FallbackResult(download=None,download_error="incomplete_audio",refreshed=refresh_result(2,"v2"))
+    async def issue(self,context,ttl=600,max_attempts=5): return "tok-2"
+    async def bind(*_a,**_k): return None
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
+    monkeypatch.setattr(State,"issue_selection",issue)
+    monkeypatch.setattr("musicdl.worker.workers.bind_user_selection",bind)
+    wc=WeCom()
+    worker=JobWorker(Redis(),wc,{},"/tmp",state=st,refresh=lambda *a:None)
+    run(worker.handle_job(job_payload(),job_id="1-0"))
+    assert len(wc.sent)==1 and wc.sent[0][0]=="u"
+    assert wc.sent[0][1].startswith(REFUSAL_TEXT["incomplete_audio"])
+    assert FALLBACK_NOTICE not in wc.sent[0][1]
     assert wc.sent[0][1].count("Song — Artist")==2
     assert effect(st,"1-0","selection_prompt")["status"]=="done"
 

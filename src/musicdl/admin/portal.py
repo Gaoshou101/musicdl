@@ -180,6 +180,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                         runtime: Callable[[], Any] | None = None,
                         reloader: Callable[[], Any] | None = None,
                         media_root: str | Path | None = None,
+                        verify_duration: str = "lenient",
                         worker: Any | None = None,
                         source_broker: Any | None = None,
                         source_fetcher: Callable[[str], Any] | None = None) -> APIRouter:
@@ -188,6 +189,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     config = config or ConfigManager(AppSettings())
     source_health = source_health or SourceHealthStore()
     logs = logs or LogBuffer()
+    if verify_duration not in {"lenient", "strict"}:
+        raise ValueError("invalid_verify_duration")
     source_fetch_slots = asyncio.Semaphore(SOURCE_FETCH_CONCURRENCY)
     router = APIRouter(prefix="/admin")
     search_timeout = _positive(getattr(worker, "search_timeout", None), 10.0)
@@ -720,7 +723,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                 async with asyncio.timeout(_stream_budget(source, resolve_timeout)):
                     result = await download_candidate(candidate, source, media_root,
                                                       request_id=request_id, language=language,
-                                                      record=recorded)
+                                                      verify_duration=verify_duration, record=recorded)
             except MediaError as exc:
                 raise failed(exc.code) from None
             except TimeoutError:
@@ -734,7 +737,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             candidate, resolvers, media_root, request_id=request_id, query=query, refresh=refresh,
             resolve_stream_timeout=_stream_budget(resolvers.get(candidate.source_id), resolve_timeout),
             refresh_timeout=search_timeout, language=language,
-            health_timeout=health_timeout, record=recorded)
+            health_timeout=health_timeout, verify_duration=verify_duration, record=recorded)
         if attempt.download is not None:
             return report(candidate.source_id, None, attempt.download)
         code = attempt.download_error or "download_failed"
@@ -745,7 +748,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                 async with asyncio.timeout(_stream_budget(replacement_source, resolve_timeout)):
                     result = await download_candidate(replacement, replacement_source,
                                                       media_root, request_id=request_id, language=language,
-                                                      record=recorded)
+                                                      verify_duration=verify_duration, record=recorded)
             except MediaError as exc:
                 code = exc.code
             except TimeoutError:

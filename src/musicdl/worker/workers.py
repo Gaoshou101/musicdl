@@ -14,8 +14,8 @@ from musicdl.ai.models import AIRankResult
 from musicdl.config import REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS
 from musicdl.media.fallback import download_with_fallback
 from musicdl.media.download import source_download
-from musicdl.sources.quality import (QUALITY_REVISION, is_lossless, proven_lossy, requested_quality,
-                                     served_quality)
+from musicdl.sources.quality import (QUALITY_REVISION, bitrate_kbps, format_bytes, is_lossless,
+                                     proven_lossy, requested_quality, served_quality)
 from musicdl.media.language import resolve_language
 from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, MediaError
 from musicdl.sources.models import Candidate
@@ -31,6 +31,9 @@ TERMINAL_FAILURE_TEXT = "处理失败，请稍后重试。"
 # A re-prompt answers the same question a second time, so it says why the first
 # answer is gone: the refreshed list may be rows the user has already read.
 FALLBACK_NOTICE = "上一次的结果下载失败，这里是最新的结果："
+# A refusal a person can act on is said in words they can act on, instead of
+# the internal code that caused it.
+REFUSAL_TEXT = {"incomplete_audio": "取到的是试听片段或文件不完整，请换一个音源"}
 EFFECT_REPLAY_LIMIT = 100
 _MEDIA_TYPES = {"mp3": "audio/mpeg", "flac": "audio/flac", "m4a": "audio/mp4", "ogg": "audio/ogg"}
 
@@ -131,6 +134,34 @@ def _positive_seconds(value, name: str):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
         raise ValueError(name)
     return float(value)
+
+
+def _success_text(download) -> str:
+    """The success notice, with a measured rate whenever there really is one.
+
+    ``DownloadResult.bitrate_kbps`` is the delivered byte count over the real
+    playing time, so it is a measurement rather than a channel's claim, and it
+    wins over the tier label whenever the container could be read.  A file the
+    reader could not open falls back to the tier the source stated, and the
+    notice still reports the bytes that were really written.  A download that
+    measured nothing and stated nothing keeps the notice plain: showing a
+    number nobody measured would be the same lie this feature exists to stop.
+    """
+    text = f"下载成功：{download.relative_path}"
+    container = str(getattr(download, "extension", "") or "").lstrip(".").upper()
+    size = getattr(download, "size_bytes", None)
+    measured = getattr(download, "bitrate_kbps", None)
+    rate = measured if measured is not None else bitrate_kbps(getattr(download, "quality", None))
+    if rate is not None:
+        label = f"{container} {rate}kbps".strip()
+    elif size is not None:
+        label = container
+    else:
+        label = ""
+    downgrade = "未取到无损" if getattr(download, "quality_downgraded", False) else ""
+    details = " · ".join(part for part in
+                         (label, format_bytes(size) if size is not None else "", downgrade) if part)
+    return f"{text}（{details}）" if details else text
 
 
 def _retry_window(value) -> int:
@@ -372,6 +403,7 @@ class JobWorker(_StreamWorker):
                  job_timeout: float = 10.0, resolve_stream_timeout: float | None = None,
                  refresh_timeout: float | None = None, health_timeout: float = 10.0,
                  retry_window_seconds: int = 86400, selection_ttl: int = 600, max_results: int = 10,
+                 verify_duration: str = "lenient",
                  redis_overhead_seconds: float = REDIS_OVERHEAD_SECONDS,
                  wecom_notice_timeout: float = WECOM_NOTICE_TIMEOUT_SECONDS,
                  quality_policy: str = "lossless_first", quality_preference: str | None = None):
@@ -384,6 +416,9 @@ class JobWorker(_StreamWorker):
         if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= 100:
             raise ValueError("invalid max results")
         self.max_results = max_results
+        if verify_duration not in {"lenient", "strict"}:
+            raise ValueError("invalid verify duration")
+        self.verify_duration = verify_duration
         self.redis_overhead_seconds = _positive_seconds(redis_overhead_seconds, "invalid redis overhead")
         self.wecom_notice_timeout = _positive_seconds(wecom_notice_timeout, "invalid wecom notice timeout")
         self.resolve_stream_timeout = _positive_seconds(resolve_stream_timeout, "invalid resolve stream timeout")
@@ -478,7 +513,7 @@ class JobWorker(_StreamWorker):
             user = str(payload.get("from_user") or payload.get("user") or "")
             if result.download is not None:
                 await self._notify(job_id, "success_notice", owner, deadline, user,
-                                   success_message(result.download))
+                                   _success_text(result.download))
                 return result
             await self._finish_failure(job_id, payload, candidate, owner, deadline, result, user)
             return result
@@ -581,6 +616,7 @@ class JobWorker(_StreamWorker):
                 health_timeout=self.health_timeout, language=language, quality=quality,
                 quality_policy=self.quality_policy,
                 max_quality_switches=min(1, max(0, self.max_attempts - 1)),
+                verify_duration=self.verify_duration,
                 prepare=prepare if quality is not None and reservation is None else None,
                 **({"artifact_store": self.state, "owner": owner, "fence": lease.fence}
                    if quality is not None and reservation is None else reserved))
@@ -630,7 +666,8 @@ class JobWorker(_StreamWorker):
             resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
             health_timeout=self.health_timeout, reservation=record, artifact_store=self.state,
             quality=(outcome or {}).get("requested_quality"),
-            owner=owner, fence=record.fence, language=_recorded_language(record))
+            owner=owner, fence=record.fence, language=_recorded_language(record),
+            verify_duration=self.verify_duration)
         if result.download is None:
             raise EffectUncertain(result.download_error or "artifact_uncertain")
         outcome = outcome or {}
@@ -721,7 +758,8 @@ class JobWorker(_StreamWorker):
             return
         await self._notify(job_id, "selection_prompt", owner, deadline, user,
                            selection_message(str(payload.get("query") or ""), refreshed.candidates,
-                                             max_items=self.max_results, notice=FALLBACK_NOTICE))
+                                             max_items=self.max_results,
+                                             notice=self._refreshed_notice(result)))
 
     async def _rebind(self, job_id: str, payload: dict[str, Any], refreshed, owner: str, deadline: float,
                       user: str, corp_id: str) -> str | None:
@@ -749,8 +787,23 @@ class JobWorker(_StreamWorker):
         return token
 
     @staticmethod
+    def _refusal(result) -> str | None:
+        """The words a person can act on, when the reason is one they can act on."""
+        return REFUSAL_TEXT.get(result.download_error or result.refresh_error or "")
+
+    @staticmethod
     def _failure_text(result) -> str:
-        return f"下载失败，已重试：{result.download_error or result.refresh_error or 'unknown'}"
+        code = result.download_error or result.refresh_error or "unknown"
+        return JobWorker._refusal(result) or f"下载失败，已重试：{code}"
+
+    @staticmethod
+    def _refreshed_notice(result) -> str:
+        """The line above a refreshed list: why the first answer is gone.
+
+        A refusal a person can act on keeps its own words here too, so offering
+        a second list never swallows the reason the first one failed.
+        """
+        return JobWorker._refusal(result) or FALLBACK_NOTICE
 
     async def _notify(self, job_id: str, effect: str, owner: str, deadline: float, user: str, text: str) -> None:
         """Send one bounded WeCom notice under its own fence; never resend an uncertain send."""
