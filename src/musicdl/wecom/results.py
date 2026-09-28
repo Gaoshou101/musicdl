@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
+from musicdl.media.models import DownloadResult
+from musicdl.sources.quality import format_bytes
 from musicdl.sources.models import Candidate, normalize_text
 
 
@@ -11,7 +13,7 @@ from musicdl.sources.models import Candidate, normalize_text
 # an unreadable name still beats hiding where the bytes will come from.
 PLATFORM_NAMES = {"kg": "酷狗", "kw": "酷我", "tx": "QQ音乐", "wy": "网易云"}
 
-# One row is ``1. title — artist《album》  ·  duration  ·  quality  ·  catalogue``.
+# One row is ``1. title — artist《album》  ·  duration  ·  quality  ·  size  ·  catalogue``.
 TITLE_ARTIST = " — "
 META_SEPARATOR = "  ·  "
 SELECTION_PROMPT = "\n\n回复序号下载。"
@@ -49,6 +51,17 @@ def _quality(candidate: Candidate) -> str:
     return " ".join(parts)
 
 
+def _size(candidate: Candidate) -> str:
+    return format_bytes(candidate.size)
+
+
+def success_message(result: DownloadResult) -> str:
+    """Describe the bytes actually downloaded, using their final container."""
+    label = result.extension.lstrip(".").upper() or result.media_type
+    details = " · ".join(part for part in (label, format_bytes(result.size_bytes)) if part)
+    return f"下载成功：{result.relative_path}（{details}）"
+
+
 def _album(candidate: Candidate) -> str:
     """``《album》``, unless the album only repeats the song it belongs to."""
     album = candidate.album
@@ -60,7 +73,7 @@ def _album(candidate: Candidate) -> str:
 def _meta(candidate: Candidate) -> list[str]:
     """What tells two rows with one title and artist apart."""
     return [part for part in (_duration(candidate.duration), _quality(candidate),
-                              platform_name(candidate.platform)) if part]
+                              _size(candidate), platform_name(candidate.platform)) if part]
 
 
 def _row(index: int, title: str, artist: str, album: str, meta: Sequence[str]) -> str:
@@ -81,8 +94,8 @@ def _fit_row(index: int, candidate: Candidate, rows: Sequence[str], max_bytes: i
     """One row, giving up what it can spare until it fits the budget.
 
     What one row can spare, in the order it gives it up: the catalogue, the
-    quality, the running time, the album, and only then a character of the title
-    or the artist, the two fields a row cannot lose.  A row that cannot fit even
+    size, the quality, the running time, the album, and only then a character of
+    the title or the artist, the two fields a row cannot lose.  A row that cannot fit even
     then is not rendered -- and neither is anything after it, because a listing
     with a hole in its numbering reads as the wrong answer to the number above
     it.
@@ -113,8 +126,8 @@ def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_
     """One short line per candidate, never more than ``max_bytes`` of UTF-8.
 
     A row leads with what a person chooses by -- the title, the artist, the
-    album -- and spends whatever room is left on the running time, the quality
-    and the catalogue.  A field the channel did not state is left out instead
+    album -- and spends whatever room is left on the running time, the quality,
+    the size and the catalogue.  A field the channel did not state is left out instead
     of printed as ``未知``: ten rows of one catalogue's placeholders is what
     made the reply unreadable.
     """

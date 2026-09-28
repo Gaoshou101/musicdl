@@ -17,7 +17,7 @@ from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, Medi
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult, search_sources
 from musicdl.wecom.commands import CommandKind, ParsedCommand, parse_command
-from musicdl.wecom.results import NO_RESULTS_TEXT, selection_message
+from musicdl.wecom.results import NO_RESULTS_TEXT, selection_message, success_message
 from musicdl.media.validation import validated_destination
 from musicdl.wecom.state import EffectLease, RedisStateStore, SelectionContext, SelectionRejected
 from .selection import bind_user_selection, get_user_selection, get_selection_for_user, get_selection_for_request, _get_by_token
@@ -469,7 +469,7 @@ class JobWorker(_StreamWorker):
             user = str(payload.get("from_user") or payload.get("user") or "")
             if result.download is not None:
                 await self._notify(job_id, "success_notice", owner, deadline, user,
-                                   f"下载成功：{result.download.relative_path}")
+                                   success_message(result.download))
                 return result
             await self._finish_failure(job_id, payload, candidate, owner, deadline, result, user)
             return result
