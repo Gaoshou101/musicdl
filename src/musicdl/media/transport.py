@@ -17,7 +17,7 @@ from musicdl.plugins.broker import (
     _resolve_global_addresses, coerce_egress_policy,
 )
 
-from .models import MAX_MEDIA_BYTES, DownloadMetadata, MediaError, _CloseOnce
+from .models import MAX_MEDIA_BYTES, DeclaredSize, DownloadMetadata, MediaError, _CloseOnce
 from .validation import detect_media
 
 MAX_RESPONSE_HEADER_COUNT = 64
@@ -433,10 +433,34 @@ class SecureMediaTransport:
                 raise MediaTransportError("media_response_invalid")
             extension, media_type = detected[0].lstrip("."), detected[1]
             content_length = hop.content_length
+            # Two kinds of expected size reach this point.  A value the main
+            # process observed itself (``Content-Length``, or a size the source
+            # stands behind) is authoritative: the transfer has to match it
+            # exactly, which is the 1.0.4 behaviour, and one byte more is a
+            # refusal.  A source's own reference size is advisory -- measured
+            # 2026-09-27, a QQ 音乐 FLAC answer carried 15 bytes more than the
+            # ``_types`` entry the source repeats -- so only a body shorter than
+            # the reference is refused, and the length the server actually sent
+            # is what this product reports and records.
+            declared = media.declared_size
+            advisory_size = declared if media.size_is_advisory else None
+            exact_size = content_length if media.size_is_advisory or declared is None else declared
             if content_length is not None and content_length > self.max_bytes:
                 raise MediaError("file_too_large")
-            if media.declared_size is not None and content_length is not None and content_length != media.declared_size:
+            if exact_size is not None and content_length is not None and content_length != exact_size:
                 raise MediaError("size_mismatch")
+            if advisory_size is not None and content_length is not None and content_length < advisory_size:
+                raise MediaError("size_mismatch")
+            # An accepted reference size is never echoed back: the panel, the
+            # download record and the success message all read the length this
+            # download is answerable for, and they have to agree with the bytes
+            # on disk.  An answer that states its own ``Content-Length`` gives
+            # that length up front; an answer that states none (a chunked body)
+            # only gives it while the bytes arrive, so the stream fills a cell
+            # the caller reads once the body has been delivered.
+            reported_size: int | DeclaredSize | None = content_length if advisory_size is not None else exact_size
+            if advisory_size is not None and content_length is None:
+                reported_size = DeclaredSize()
 
             async def close_response() -> None:
                 await self._close_handles((response, wrapped, raw), close_once)
@@ -455,7 +479,7 @@ class SecureMediaTransport:
                         observed += len(prefix)
                         if observed > self.max_bytes:
                             raise MediaError("file_too_large")
-                        if media.declared_size is not None and observed > media.declared_size:
+                        if exact_size is not None and observed > exact_size:
                             raise MediaError("size_mismatch")
                         yield prefix
                     while True:
@@ -480,13 +504,17 @@ class SecureMediaTransport:
                         observed += len(chunk)
                         if observed > self.max_bytes:
                             raise MediaError("file_too_large")
-                        if media.declared_size is not None and observed > media.declared_size:
+                        if exact_size is not None and observed > exact_size:
                             raise MediaError("size_mismatch")
                         yield chunk
-                    if content_length is not None and observed != content_length:
+                    if exact_size is not None and observed != exact_size:
                         raise MediaError("size_mismatch")
-                    if media.declared_size is not None and observed != media.declared_size:
+                    if advisory_size is not None and observed < advisory_size:
                         raise MediaError("size_mismatch")
+                    if isinstance(reported_size, DeclaredSize):
+                        # Every byte the body held has been handed over, so the
+                        # length it really is is now known.
+                        reported_size.value = observed
                 except BaseException as exc:
                     primary = exc
                     raise
@@ -498,7 +526,7 @@ class SecureMediaTransport:
                             raise
 
             return DownloadMetadata(chunks=chunks(), extension=extension,
-                                    media_type=media_type, declared_size=media.declared_size,
+                                    media_type=media_type, declared_size=reported_size,
                                     _close_once=close_once)
         except asyncio.CancelledError:
             if close_once is not None:

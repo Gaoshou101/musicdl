@@ -130,10 +130,62 @@ def test_search_maps_replayed_items_and_drops_the_unusable_ones():
     assert step.response.ok
     assert step.response.result == [
         {"source_id": "qsvip", "source_version": "1", "item_id": "lx:qsvip:42", "title": "晴天",
-         "artist": "周杰伦", "album": "叶惠美", "duration": 269, "bitrate": None, "format": None, "size": None},
+         "artist": "周杰伦", "album": "叶惠美", "duration": 269, "bitrate": None, "format": None,
+         "size": None, "qualities": [], "quality_sizes": {}},
         {"source_id": "qsvip", "source_version": "1", "item_id": "lx:qsvip:99", "title": "夜曲",
-         "artist": "周杰伦", "album": None, "duration": None, "bitrate": None, "format": None, "size": None},
+         "artist": "周杰伦", "album": None, "duration": None, "bitrate": None, "format": None,
+         "size": None, "qualities": [], "quality_sizes": {}},
     ]
+
+
+QUALITY_SOURCE = """
+const { EVENT_NAMES, on, send } = globalThis.lx;
+const song = {
+  id: "42", name: "晴天", singer: "周杰伦", duration: 269, type: "flac24bit",
+  _types: { "320k": { size: "1.5 MB" }, "flac24bit": { size: "24.5 MB" },
+            "192k": { size: "0.8 MB" }, "unknown": { size: "9 MB" } },
+};
+on(EVENT_NAMES.request, async ({ action }) => {
+  if (action === "musicSearch") return { list: [song] };
+  if (action === "musicUrl") return "https://cdn.zhihu.example/42/song.flac";
+  throw new Error("action not supported");
+});
+send(EVENT_NAMES.inited, { sources: { qsvip: { type: "music", actions: ["musicSearch", "musicUrl"] } } });
+"""
+
+
+@requires_deno
+def test_search_extracts_only_ranked_quality_keys_and_truthful_size_format_values():
+    step = _run(_invocation(QUALITY_SOURCE, payload={"query": "晴天"}))
+
+    assert step.response.ok, step.response.error
+    assert step.response.result == [{
+        "source_id": "qsvip", "source_version": "1", "item_id": "lx:qsvip:42",
+        "title": "晴天", "artist": "周杰伦", "album": None, "duration": 269,
+        "bitrate": None, "format": "flac", "size": 25_690_112,
+        "qualities": ["flac24bit", "320k", "192k"],
+        "quality_sizes": {"320k": 1_572_864, "flac24bit": 25_690_112, "192k": 838_861},
+    }]
+
+
+@requires_deno
+@pytest.mark.parametrize(("requested", "used", "size"), [
+    ("320k", "320k", 1_572_864),
+    ("unavailable", "flac24bit", 25_690_112),
+])
+def test_resolve_uses_only_candidate_supported_quality_and_its_own_declared_size(requested, used, size):
+    candidate = {
+        "source_id": "qsvip", "source_version": "1", "item_id": "lx:qsvip:42",
+        "title": "晴天", "artist": "周杰伦", "qualities": ["320k", "flac24bit"],
+        "quality_sizes": {"320k": 1_572_864, "flac24bit": 25_690_112},
+    }
+    step = _run(_invocation(QUALITY_SOURCE, operation="resolve",
+                            payload={"candidate": candidate, "quality": requested}))
+
+    assert step.response.ok, step.response.error
+    assert step.response.result["quality"] == used
+    assert step.response.result["declared_size"] == size
+    assert step.response.result["size_is_advisory"] is True
 
 
 @requires_deno
@@ -142,7 +194,8 @@ def test_resolve_maps_a_candidate_back_into_the_sources_own_id():
     assert step.response.ok
     assert step.response.result == {"candidate_id": "lx:qsvip:42",
                                     "url": "https://cdn.zhihu.example/42/song.mp3",
-                                    "extension": "mp3", "media_type": "audio/mpeg", "declared_size": None}
+                                    "extension": "mp3", "media_type": "audio/mpeg", "declared_size": None,
+                                    "size_is_advisory": False, "quality": "320k"}
 
 
 DIRECT_LINK_SOURCE = """

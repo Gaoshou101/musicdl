@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import ipaddress
 import socket
 import threading
@@ -7,8 +8,10 @@ import time
 import pytest
 
 from musicdl.contracts.plugin import EgressPolicy, ResolvedMedia
+from musicdl.media import DownloadEvent, download_candidate
 from musicdl.media.models import MediaError
 from musicdl.media.transport import SecureMediaTransport
+from musicdl.sources.models import Candidate
 
 # A body that really is an mp3: a version-4 ID3 header with no tag frames.  The
 # transport classifies the head of every response now, so the fixture has to
@@ -55,8 +58,9 @@ class FakeTLS:
         return sock
 
 
-def media(url="https://täst.example/song.mp3", *, size=None):
-    return ResolvedMedia(candidate_id="1", url=url, extension="mp3", media_type="audio/mpeg", declared_size=size)
+def media(url="https://täst.example/song.mp3", *, size=None, advisory=False):
+    return ResolvedMedia(candidate_id="1", url=url, extension="mp3", media_type="audio/mpeg",
+                         declared_size=size, size_is_advisory=advisory)
 
 
 def transport(raw=b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY):
@@ -353,6 +357,180 @@ def test_transport_rejects_a_size_mismatch():
     wrong_size = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\n" + frame
     instance, *_ = transport(wrong_size)
     error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_uses_content_length_as_declared_size_when_media_size_is_unknown():
+    instance, *_ = transport()
+
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert metadata.declared_size == len(ID3_BODY)
+    assert asyncio.run(read()) == ID3_BODY
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_keeps_declared_size_unknown_without_content_length():
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    assert metadata.declared_size is None
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ID3_BODY
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_accepts_an_advisory_size_the_server_exceeded():
+    # Measured 2026-09-27: a QQ 音乐 FLAC answer carried 15 bytes more than the
+    # `_types.flac.size` entry its 洛雪 source repeats.  A reference value is not
+    # a contract, so a longer body is accepted -- and the length that reaches
+    # the download record is the one the server really sent, never the
+    # reference.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+
+    metadata = asyncio.run(instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ID3_BODY
+    assert metadata.declared_size == len(ID3_BODY)
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_refuses_a_body_shorter_than_an_advisory_size():
+    # The same reference value still refuses a body that never reaches it: the
+    # short side is what "the file is incomplete" looks like.
+    frame = b"\xff\xfb\x90\x64" + b"\x00" * 5
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\n" + frame
+    instance, *_ = transport(raw)
+    error_code(instance.open(media(size=10, advisory=True), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_refuses_a_short_advisory_body_that_has_no_content_length():
+    # A chunked answer states no length of its own, so the short side of the
+    # reference value is the only size check left and it still has to hold.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+    metadata = asyncio.run(instance.open(media(size=25, advisory=True), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        with pytest.raises(MediaError, match="size_mismatch"):
+            async for _ in metadata.chunks:
+                pass
+
+    asyncio.run(read())
+
+
+def test_transport_reports_the_real_length_for_an_advisory_size_without_content_length():
+    # A chunked answer states no length of its own, so before the body arrives
+    # there is nothing to report -- and the reference value is not it either.
+    # What the metadata reports once the bytes have been delivered is the
+    # length the server really sent.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+    metadata = asyncio.run(instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",)))
+    assert metadata.declared_size is None
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ID3_BODY
+    assert metadata.declared_size == len(ID3_BODY)
+    assert metadata.declared_size != 4
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_refuses_an_authoritative_size_the_server_exceeded():
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 25\r\n\r\n" + ID3_BODY + b"x" * 15
+    instance, *_ = transport(raw)
+    error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_refuses_an_authoritative_size_the_server_fell_short_of():
+    frame = b"\xff\xfb\x90\x64" + b"\x00" * 5
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\n" + frame
+    instance, *_ = transport(raw)
+    error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_still_refuses_a_body_that_overruns_an_advisory_answers_own_header():
+    # `size_is_advisory` relaxes the source's reference value, not the
+    # transport's own honesty check: the body still has to be exactly the
+    # number of bytes the response itself announced.
+    class OverreadingResponse:
+        status = 200
+
+        def __init__(self):
+            self.body = ID3_BODY + b"x"
+
+        def begin(self):
+            pass
+
+        def getheaders(self):
+            return [("Content-Type", "audio/mpeg"), ("Content-Length", str(len(ID3_BODY)))]
+
+        def read(self, size=-1):
+            count = len(self.body) if size < 0 else size
+            value, self.body = self.body[:count], self.body[count:]
+            return value
+
+        def close(self):
+            pass
+
+    instance, *_ = transport()
+    instance.response_factory = lambda _sock: OverreadingResponse()
+    metadata = asyncio.run(instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        with pytest.raises(MediaError, match="size_mismatch"):
+            async for _ in metadata.chunks:
+                pass
+
+    asyncio.run(read())
+
+
+def test_transport_rejects_body_overrun_against_content_length_without_media_size():
+    class OverreadingResponse:
+        status = 200
+
+        def __init__(self):
+            self.body = ID3_BODY + b"x"
+
+        def begin(self):
+            pass
+
+        def getheaders(self):
+            return [("Content-Type", "audio/mpeg"), ("Content-Length", str(len(ID3_BODY)))]
+
+        def read(self, size=-1):
+            count = len(self.body) if size < 0 else size
+            value, self.body = self.body[:count], self.body[count:]
+            return value
+
+        def close(self):
+            pass
+
+    instance, *_ = transport()
+    instance.response_factory = lambda _sock: OverreadingResponse()
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        chunks = []
+        with pytest.raises(MediaError, match="size_mismatch"):
+            async for chunk in metadata.chunks:
+                chunks.append(chunk)
+        assert chunks == []
+
+    asyncio.run(read())
 
 
 def test_transport_publishes_the_container_the_bytes_name_over_a_disagreeing_label():
@@ -688,3 +866,49 @@ def test_transport_refuses_an_ip_literal_without_the_grant():
 
     asyncio.run(metadata.aclose())
     assert seen["resolve"] == ("103.79.184.97", 443)
+
+
+@pytest.mark.parametrize("head", [
+    # The answer states its own length, so the real size is known up front.
+    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n",
+    # A chunked answer states none, so the real size is only known once the
+    # body has been delivered -- and it is still the real size that is reported.
+    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n",
+])
+def test_advisory_size_reports_real_byte_count(tmp_path, head):
+    """An accepted reference size never reaches a record; the bytes do.
+
+    The panel's download report, the download record and the success message
+    all read ``DownloadResult.size_bytes``/``DownloadMetadata.declared_size``, so
+    a source's stale reference value must not be echoed into any of them -- and
+    the three have to agree with the bytes on disk whether or not the answer
+    bothered to state a length of its own.
+    """
+    raw = head + ID3_BODY
+    instance, *_ = transport(raw)
+
+    handed: dict[str, object] = {}
+
+    class Source:
+        async def download(self, _candidate):
+            metadata = await instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",))
+            handed["metadata"] = metadata
+            return metadata
+
+        async def health(self):
+            return True
+
+    candidate = Candidate(source_id="source", source_version="v1", item_id="1",
+                          title="Song", artist="Artist", format="mp3")
+    events = []
+    result = asyncio.run(download_candidate(candidate, Source(), tmp_path, request_id="r",
+                                            record=events.append))
+
+    assert len(ID3_BODY) != 4
+    assert handed["metadata"].declared_size == len(ID3_BODY)
+    assert result.size_bytes == len(ID3_BODY)
+    assert (tmp_path / result.relative_path).stat().st_size == len(ID3_BODY)
+    assert len(events) == 1
+    assert events[0].size_bytes == len(ID3_BODY)
+    assert events[0].relative_path == result.relative_path.as_posix()
+    assert events[0].sha256 == hashlib.sha256(ID3_BODY).hexdigest()

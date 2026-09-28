@@ -29,6 +29,7 @@ def _resolved_media(**overrides):
         "extension": "mp3",
         "media_type": "audio/mpeg",
         "declared_size": 123,
+        "quality": None,
     }
     values.update(overrides)
     from musicdl.contracts.plugin import ResolvedMedia
@@ -271,7 +272,30 @@ def test_resolved_media_accepts_supported_descriptor_formats(extension, media_ty
         "extension": extension,
         "media_type": media_type,
         "declared_size": 123,
+        "quality": None,
+        "size_is_advisory": False,
     }
+
+
+def test_resolved_media_adds_optional_quality_and_accepts_old_json_without_it():
+    media = _resolved_media(quality="flac24bit")
+    old_snapshot = {
+        "candidate_id": "candidate-1", "url": "https://media.example.test/path/song.mp3?token=opaque",
+        "extension": "mp3", "media_type": "audio/mpeg", "declared_size": 123,
+    }
+
+    assert media.quality == "flac24bit"
+    from musicdl.contracts.plugin import ResolvedMedia
+
+    assert ResolvedMedia.model_validate(old_snapshot).quality is None
+    # A 1.0.4 resolve answer predates the advisory flag and keeps the
+    # authoritative meaning its size always had.
+    assert ResolvedMedia.model_validate(old_snapshot).size_is_advisory is False
+
+
+def test_resolved_media_marks_a_reference_size_as_advisory():
+    assert _resolved_media(size_is_advisory=True).size_is_advisory is True
+    assert _resolved_media().size_is_advisory is False
 
 
 def test_resolved_media_accepts_size_boundaries_and_optional_size():
@@ -346,9 +370,15 @@ def test_resolved_media_rejects_invalid_declared_sizes(declared_size):
         _resolved_media(declared_size=declared_size)
 
 
-def test_resolved_media_is_frozen_and_uses_only_the_five_contract_fields():
+def test_resolved_media_is_frozen_and_uses_only_the_six_contract_fields():
     media = _resolved_media()
 
     with pytest.raises(ValidationError):
         media.extension = "flac"
-    assert set(media.model_dump()) == {"candidate_id", "url", "extension", "media_type", "declared_size"}
+    assert set(media.model_dump()) == {"candidate_id", "url", "extension", "media_type", "declared_size", "quality", "size_is_advisory"}
+
+
+@pytest.mark.parametrize("quality", ["", "bad value", "quality!", "q" * 17])
+def test_resolved_media_rejects_invalid_quality_values(quality):
+    with pytest.raises(ValidationError):
+        _resolved_media(quality=quality)

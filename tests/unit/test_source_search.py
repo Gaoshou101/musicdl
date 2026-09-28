@@ -4,7 +4,7 @@ import pytest
 
 from musicdl.sources.models import Candidate
 from musicdl.sources.registry import SourceEntry, SourceRegistry
-from musicdl.sources.search import search_result_version, search_sources
+from musicdl.sources.search import quality_key, search_result_version, search_sources
 
 
 def candidate(source, item, title="Song"):
@@ -133,6 +133,55 @@ def test_quality_sort_prefers_higher_mp3_bitrate_over_lexical_title():
         return [Candidate(source_id="a", source_version="1", item_id="low", title="A", artist="Artist", format="mp3", bitrate=64), Candidate(source_id="a", source_version="1", item_id="high", title="Z", artist="Artist", format="mp3", bitrate=320)]
     result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "artist"))
     assert [c.item_id for c in result.candidates] == ["high", "low"]
+
+
+def test_quality_key_is_a_six_tuple_with_quality_rank_before_bitrate():
+    lossless = Candidate(source_id="a", source_version="1", item_id="flac", title="A", artist="Artist",
+                         album="Album", duration=100, format="flac", bitrate=900, size=4096)
+    wave = Candidate(source_id="a", source_version="1", item_id="wav", title="B", artist="Artist",
+                     album="Album", duration=100, format="wav", bitrate=2000, size=4096)
+
+    assert quality_key(lossless, 3) == (1, 55, 900, 5, 4096, -3)
+    assert quality_key(wave, 3) == (1, 52, 2000, 5, 4096, -3)
+    assert quality_key(lossless, 3) > quality_key(wave, 3)
+
+
+def test_candidates_with_all_quality_fields_unknown_keep_v104_quality_order():
+    rows = [
+        Candidate(source_id="a", source_version="1", item_id="b", title="B", artist="Artist",
+                  album="Album", duration=100),
+        Candidate(source_id="a", source_version="1", item_id="a", title="A", artist="Artist",
+                  duration=100),
+        Candidate(source_id="a", source_version="1", item_id="c", title="C", artist="Artist"),
+    ]
+    old_key = lambda c: (0, -1, sum(value is not None for value in
+                                    (c.album, c.duration, c.bitrate, c.format, c.size)), -1, -2)
+
+    old_order = [row.item_id for row in sorted(rows, key=old_key, reverse=True)]
+    new_order = [row.item_id for row in sorted(rows, key=lambda row: quality_key(row, 2), reverse=True)]
+
+    assert new_order == old_order
+    assert all(row.qualities == () for row in rows)
+
+
+def test_the_new_quality_key_is_used_for_selected_candidates_and_fallback_offers():
+    async def lossless(query):
+        return [Candidate(source_id="a", source_version="1", item_id="flac", title="Song", artist="Artist",
+                          platform="tx", format="flac", bitrate=900, size=1000)]
+    async def same_recording_offer(query):
+        return [Candidate(source_id="b", source_version="1", item_id="same-copy", title="Song", artist="Artist",
+                          platform="tx", format="flac", bitrate=900, size=2000)]
+    async def lower_rank(query):
+        return [Candidate(source_id="c", source_version="1", item_id="wav", title="Song", artist="Artist",
+                          platform="tx", format="wav", bitrate=2000, size=1000)]
+    result = asyncio.run(search_sources(SourceRegistry([
+        SourceEntry("a", "1", lossless), SourceEntry("b", "1", same_recording_offer),
+        SourceEntry("c", "1", lower_rank),
+    ]), "song"))
+
+    assert [(candidate.source_id, candidate.format) for candidate in result.candidates] == [
+        ("b", "flac"), ("c", "wav")]
+    assert result.offers == (("b", "a"), ("c",))
 
 def test_source_result_boundaries_and_max_results_argument():
     async def generator(query):

@@ -50,13 +50,56 @@ class _CloseOnce:
             raise cancellation
 
 
-@dataclass(frozen=True)
+class DeclaredSize:
+    """The size a download is answerable for, filled in while its bytes arrive.
+
+    A size a source states is a reference rather than a contract -- measured
+    2026-09-27, a QQ 音乐 FLAC answer carried 15 bytes more than the entry its
+    洛雪 source repeats -- so the number a download is answerable for is the one
+    the server really sent.  A transport that was handed only a reference
+    learns that number while the body streams, and everything downstream (the
+    download record, the panel, the success message) reads it afterwards, so
+    the value has to be shared with the stream instead of fixed up front.  An
+    authoritative size needs no cell: it is known before the first byte.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: int | None = None) -> None:
+        self.value = value
+
+
 class DownloadMetadata:
-    chunks: AsyncIterable[bytes]
-    extension: str | None = None
-    media_type: str | None = None
-    declared_size: int | None = None
-    _close_once: _CloseOnce | None = field(default=None, repr=False, compare=False)
+    """The bytes one download hands over, and the size they are answerable for.
+
+    Read-only to callers: ``declared_size`` is a property and the only writer is
+    the stream itself, which records the length it really delivered.
+    """
+
+    __slots__ = ("chunks", "extension", "media_type", "_declared_size", "_close_once")
+
+    def __init__(
+        self,
+        chunks: AsyncIterable[bytes],
+        extension: str | None = None,
+        media_type: str | None = None,
+        declared_size: int | DeclaredSize | None = None,
+        _close_once: _CloseOnce | None = None,
+    ) -> None:
+        self.chunks = chunks
+        self.extension = extension
+        self.media_type = media_type
+        self._declared_size = declared_size if isinstance(declared_size, DeclaredSize) else DeclaredSize(declared_size)
+        self._close_once = _close_once
+
+    @property
+    def declared_size(self) -> int | None:
+        """The length this download really is, once it has been delivered."""
+        return self._declared_size.value
+
+    def note_size(self, value: int) -> None:
+        """Record the length the bytes turned out to be."""
+        self._declared_size.value = value
 
     async def aclose(self) -> None:
         if self._close_once is not None:
