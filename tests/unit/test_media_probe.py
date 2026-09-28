@@ -27,6 +27,22 @@ def test_range_fallback_uses_total_not_fragment(range_header, expected):
     assert all(sock.closed for sock in sockets)
 
 
+def test_a_range_request_the_server_ignored_is_not_a_size():
+    """A 200 answers the range request with the whole body, so it names no total.
+
+    The fallback may not degrade into the range-less GET the caller refused, and
+    a whole-answer ``Content-Length`` is not the length of the audio a download
+    is judged against -- it is left empty rather than guessed.
+    """
+    transport, sockets, *_ = redirect_transport([
+        b"HTTP/1.1 200 OK\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 9999\r\n\r\n"])
+    result = asyncio.run(probe.probe_media(transport, media(), policy=("xn--tst-qla.example",)))
+    assert result["size"] is None
+    assert b"Range: bytes=0-0\r\n" in sockets[1].sent
+    assert all(sock.closed for sock in sockets)
+
+
 def test_probe_redirect_enforces_policy():
     transport, sockets, *_ = redirect_transport([
         b"HTTP/1.1 302 Found\r\nLocation: https://private.example/a\r\n\r\n"])

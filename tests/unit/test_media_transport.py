@@ -430,6 +430,25 @@ def test_transport_refuses_a_short_advisory_body_that_has_no_content_length():
     asyncio.run(read())
 
 
+def test_transport_reports_the_real_length_for_an_advisory_size_without_content_length():
+    # A chunked answer states no length of its own, so before the body arrives
+    # there is nothing to report -- and the reference value is not it either.
+    # What the metadata reports once the bytes have been delivered is the
+    # length the server really sent.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+    metadata = asyncio.run(instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",)))
+    assert metadata.declared_size is None
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ID3_BODY
+    assert metadata.declared_size == len(ID3_BODY)
+    assert metadata.declared_size != 4
+    asyncio.run(metadata.aclose())
+
+
 def test_transport_refuses_a_descriptor_the_source_has_already_retired():
     """The instant is part of the descriptor, so the socket is never opened.
 
@@ -1053,19 +1072,32 @@ def test_transport_refuses_an_ip_literal_without_the_grant():
     assert seen["resolve"] == ("103.79.184.97", 443)
 
 
-def test_advisory_size_reports_real_byte_count(tmp_path):
+@pytest.mark.parametrize("head", [
+    # The answer states its own length, so the real size is known up front.
+    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n",
+    # A chunked answer states none, so the real size is only known once the
+    # body has been delivered -- and it is still the real size that is reported.
+    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n",
+])
+def test_advisory_size_reports_real_byte_count(tmp_path, head):
     """An accepted reference size never reaches a record; the bytes do.
 
     The panel's download report, the download record and the success message
     all read ``DownloadResult.size_bytes``/``DownloadMetadata.declared_size``, so
-    a source's stale reference value must not be echoed into any of them.
+    a source's stale reference value must not be echoed into any of them -- and
+    the three have to agree with the bytes on disk whether or not the answer
+    bothered to state a length of its own.
     """
-    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    raw = head + ID3_BODY
     instance, *_ = transport(raw)
+
+    handed: dict[str, object] = {}
 
     class Source:
         async def download(self, _candidate):
-            return await instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",))
+            metadata = await instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",))
+            handed["metadata"] = metadata
+            return metadata
 
         async def health(self):
             return True
@@ -1077,6 +1109,7 @@ def test_advisory_size_reports_real_byte_count(tmp_path):
                                             record=events.append))
 
     assert len(ID3_BODY) != 4
+    assert handed["metadata"].declared_size == len(ID3_BODY)
     assert result.size_bytes == len(ID3_BODY)
     assert (tmp_path / result.relative_path).stat().st_size == len(ID3_BODY)
     assert len(events) == 1
