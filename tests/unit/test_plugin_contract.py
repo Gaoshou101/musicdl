@@ -450,10 +450,14 @@ def test_a_stated_instant_is_never_read_as_earlier_than_it_was_written():
                            now=datetime(2030, 1, 1, tzinfo=timezone.utc))
     with pytest.raises(ValidationError):
         _resolved_media(expires_at="2026-09-28T12:00:00-00:00:00.9")
-    # The latest instant a datetime can name has no later one to round up to,
-    # and rounding into it must not raise out of a contract validator.
-    assert parse_instant("9999-12-31T23:59:59.9999991Z") == datetime.max.replace(
+    # The latest instant a datetime can name is read when it is stated exactly.
+    # Stated with a fraction past it there is no later instant to round up to,
+    # and standing on the truncated value would name an instant the text never
+    # stated -- earlier by that same step -- so the text is not read; neither
+    # case may raise out of a contract validator.
+    assert parse_instant("9999-12-31T23:59:59.999999Z") == datetime.max.replace(
         tzinfo=timezone.utc)
+    assert parse_instant("9999-12-31T23:59:59.9999991Z") is None
     # Neither may naming a UTC instant this type cannot hold: the reading is
     # unavailable, not fatal.
     assert parse_instant("9999-12-31T23:59:59.999999-01:00") is None

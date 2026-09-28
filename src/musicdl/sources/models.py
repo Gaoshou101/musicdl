@@ -122,7 +122,15 @@ class Candidate(BaseModel):
     @field_validator("expires_at", mode="before")
     @classmethod
     def clean_expiry(cls, value: Any) -> Any:
-        """Keep only an absolute instant; whatever is not one is simply absent."""
+        """Keep only an absolute instant; whatever is not one is simply absent.
+
+        A row is kept either way, because refusing it would drop a candidate the
+        source can still serve, so an expiry this process cannot read becomes
+        the same thing as one the row never stated: an unknown lifetime, which
+        the download re-resolves rather than trusts.  A ``ResolvedMedia`` expiry
+        is refused outright instead, because that answer is the one a download
+        would use.
+        """
         if value is None or value == "":
             return None
         parsed = parse_instant(value)

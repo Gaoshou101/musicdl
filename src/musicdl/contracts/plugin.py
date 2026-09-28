@@ -154,9 +154,12 @@ class PluginResponse(BaseModel):
 # last half minute -- and it reads an offset's own fraction differently for
 # ``+`` and ``-``: ``12:00:00-00:00:00.9`` comes back as a zero offset, 0.9 s
 # early, while ``+00:00:00.9`` comes back 0.9 s late.  So the spelling is fixed
-# here, and every shape outside it reads as no instant at all: a stated expiry
-# this process cannot read is refused outright by the contract rather than
-# dropped or guessed at, and a lifetime that is not stated refuses nothing.
+# here, and every shape outside it reads as no instant at all.  The two hosts
+# read that choice differently on purpose: ``ResolvedMedia`` refuses an expiry it
+# cannot read outright, because that answer is the one a download would use,
+# while a search row keeps its candidate and clears the field, because refusing
+# the row would drop a candidate the source can still serve and an empty
+# lifetime is the rule this branch already applies to a row that states none.
 _INSTANT = re.compile(
     r"(?P<date>\d{4}-?\d{2}-?\d{2})"
     r"[Tt ](?P<hour>\d{2})"
@@ -217,15 +220,18 @@ def parse_instant(value: Any) -> datetime | None:
     # up by the smallest step a datetime has: at most one fraction reaches here
     # and it sits on the seconds field, so the instant is never read as earlier
     # than it was written and never as more than a microsecond later than it
-    # was.  A fraction of zeros is not precision and does not round.  At the
-    # representable ceiling there is no later instant to name, so the truncated
-    # value stands and the refusal it could cause is confined to the last
-    # microsecond of year 9999 in UTC.
+    # was.  A fraction of zeros is not precision and does not round.
     tail = fraction[1:]
-    try:
-        return parsed + timedelta(microseconds=1 if tail[6:].strip("0") else 0)
-    except OverflowError:
+    if not tail[6:].strip("0"):
         return parsed
+    # At the representable ceiling there is no later instant to name, and the
+    # truncated value would be an instant the text never stated -- earlier by
+    # that same step -- so the text is not read at all, exactly as an offset
+    # fraction is not read.
+    try:
+        return parsed + timedelta(microseconds=1)
+    except OverflowError:
+        return None
 
 
 def format_instant(value: datetime) -> str:
