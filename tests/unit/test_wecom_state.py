@@ -603,7 +603,11 @@ def test_download_candidate_publishes_through_the_store_and_replays_without_the_
 
     first, record, second = run(scenario())
     assert source.calls == 1 and record.state == "published"
-    assert first.relative_path.as_posix() == "Song.mp3" and second == first
+    assert first.relative_path.as_posix() == "Song.mp3"
+    # A replay names the same container the fresh download wrote, so the
+    # answer a caller keeps is never emptier than the file on disk.
+    assert first.actual_quality == second.actual_quality == "mp3"
+    assert second == first
     assert (tmp_path / "Song.mp3").read_bytes() == ID3
     assert list((tmp_path / ".musicdl-staging").iterdir()) == []
 

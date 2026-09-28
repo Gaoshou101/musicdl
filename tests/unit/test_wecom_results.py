@@ -66,9 +66,9 @@ def test_max_items_caps_the_listing_and_the_numbers_stay_continuous():
 
 def test_an_oversized_row_spends_the_budget_on_the_row_and_not_on_the_extras():
     wide = row(title="\u6b4c" * 40, artist="\u827a" * 40, album="\u4e13\u8f91" * 20, duration=200,
-               format="flac", platform="wy")
+               format="flac", size=33554432, platform="wy")
     roomy, tight = format_results([wide]), format_results([wide], max_bytes=256)
-    assert all(part in roomy for part in ("\u4e13\u8f91", "FLAC", "\u7f51\u6613\u4e91"))
+    assert all(part in roomy for part in ("\u4e13\u8f91", "FLAC", "32.0 MB", "\u7f51\u6613\u4e91"))
     assert len(tight.encode("utf-8")) <= 256
     assert tight == "1. " + "\u6b4c" * 40 + " \u2014 " + "\u827a" * 40
 
@@ -132,3 +132,32 @@ def test_selection_message_refuses_a_query_that_is_not_text_and_a_budget_without
     with pytest.raises(ValueError): selection_message(None, [row()])
     with pytest.raises(ValueError): selection_message("q", [row()], max_bytes=255)
     with pytest.raises(ValueError): selection_message("q", [row()], max_items=0)
+
+
+def test_size_is_between_quality_and_platform_and_zero_is_known():
+    assert format_results([row(duration=65, format="flac", size=33554432, platform="wy")]) == "1. Song — Artist  ·  1:05  ·  FLAC  ·  32.0 MB  ·  网易云"
+    assert format_results([row(size=0)]).endswith("0 B")
+
+
+def test_metadata_degrades_platform_then_size_then_quality_then_duration():
+    from musicdl.wecom.results import _fit_row
+    candidate = row(album="Album", duration=65, format="flac", size=33554432, platform="wy")
+    stages = ["1. Song — Artist《Album》  ·  1:05  ·  FLAC  ·  32.0 MB",
+              "1. Song — Artist《Album》  ·  1:05  ·  FLAC",
+              "1. Song — Artist《Album》  ·  1:05",
+              "1. Song — Artist《Album》", "1. Song — Artist"]
+    for expected in stages:
+        assert _fit_row(1, candidate, [], len(expected.encode("utf-8"))) == expected
+
+
+@pytest.mark.parametrize(("extension", "media_type", "size", "label"), [
+    ("flac", "audio/flac", 33554432, "FLAC · 32.0 MB"),
+    ("mp3", "audio/mpeg", 1024, "MP3 · 1.00 KB"),
+    ("", "audio/ogg", 0, "audio/ogg · 0 B"),
+])
+def test_success_uses_final_download_metadata(extension, media_type, size, label):
+    from pathlib import Path
+    from musicdl.media.models import DownloadResult
+    from musicdl.wecom.results import success_message
+    result = DownloadResult(Path("Song.flac"), "hash", size, media_type, extension, "unknown")
+    assert success_message(result) == f"下载成功：Song.flac（{label}）"

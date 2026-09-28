@@ -349,3 +349,17 @@ def test_worker_settings_defaults_are_accepted_by_the_real_job_worker():
                                                                        WECOM_NOTICE_TIMEOUT_SECONDS)
     assert real.verify_duration == "lenient"
     assert real.pending_idle_ms > 1000 * (max(real.job_timeout, real.refresh_timeout) + real.redis_overhead_seconds)
+
+
+def test_worker_quality_policy_maps_environment(monkeypatch):
+    monkeypatch.setenv('MUSICDL_WORKER__QUALITY_POLICY', 'best_available')
+    monkeypatch.setenv('MUSICDL_WORKER__QUALITY_PREFERENCE', '320k')
+    settings = AppSettings()
+    assert settings.worker.quality_policy == 'best_available'
+    assert settings.worker.quality_preference == '320k'
+
+
+def test_worker_quality_policy_rejects_invalid_policy_but_accepts_unknown_preference():
+    with pytest.raises(ValidationError):
+        WorkerSettings(quality_policy='random')
+    assert WorkerSettings(quality_preference='unknown').quality_preference == 'unknown'

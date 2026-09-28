@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   MagnifyingGlass,
   MusicNotes,
@@ -17,12 +17,13 @@ import {
   errorMessage,
   mediaUrl,
   searchCandidates,
+  probeCandidateSizes,
 } from '@/lib/api'
 import { formatBytes, formatDuration, shortHash } from '@/lib/format'
 
 type RowState = { status: 'idle' | 'busy' | 'done' | 'error'; report?: DownloadReport; error?: string }
 
-const rowKey = (candidate: Candidate) => `${candidate.source_id}:${candidate.item_id}`
+const rowKey = (candidate: Candidate) => JSON.stringify([candidate.source_id, candidate.item_id])
 
 export default function SearchPage() {
   const [query, setQuery] = useState('')
@@ -31,11 +32,15 @@ export default function SearchPage() {
   const [report, setReport] = useState<SearchReport | null>(null)
   const [error, setError] = useState('')
   const [sourceFilter, setSourceFilter] = useState('all')
+  const [probeEnabled, setProbeEnabled] = useState(false)
+  const [probedSizes, setProbedSizes] = useState<Record<string, number | null>>({})
+  const [probing, setProbing] = useState<Record<string, boolean>>({})
   const [downloads, setDownloads] = useState<Record<string, RowState>>({})
 
   const runSearch = useCallback(async (text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
+    setReport(null)
     setSearching(true)
     setError('')
     setDownloads({})
@@ -90,8 +95,31 @@ export default function SearchPage() {
   // catalogue search would otherwise each show the same list under a different
   // name, which is what made the old filter useless.
   // One row per recording, each carrying the channels that can serve it.
-  const rows = candidates.map((candidate, index) => ({ candidate, channels: offeredBy(index, candidate) }))
-  const visible = sourceFilter === 'all' ? rows : rows.filter((row) => row.channels.includes(sourceFilter))
+  const visible = useMemo(() => {
+    const rows = (report?.candidates ?? []).map((candidate, index) => ({
+      candidate, channels: report?.offers?.[index]?.length ? report.offers[index] : [candidate.source_id],
+    }))
+    return sourceFilter === 'all' ? rows : rows.filter((row) => row.channels.includes(sourceFilter))
+  }, [report, sourceFilter])
+
+  useEffect(() => {
+    setProbedSizes({})
+    setProbing({})
+    if (!probeEnabled || searching || !visible.length) return
+    const selected = visible.slice(0, 10).map(({ candidate }) => candidate)
+    const controller = new AbortController()
+    let active = true
+    setProbing(Object.fromEntries(selected.map((candidate) => [rowKey(candidate), true])))
+    void probeCandidateSizes(selected, controller.signal).then((results) => {
+      if (!active) return
+      setProbedSizes(Object.fromEntries(selected.map((candidate) => [rowKey(candidate), results[candidate.source_id]?.[candidate.item_id]?.size ?? null])))
+    }).catch(() => {
+      // A failed optional probe leaves the search and its declared sizes usable.
+    }).finally(() => {
+      if (active) setProbing({})
+    })
+    return () => { active = false; controller.abort() }
+  }, [probeEnabled, searching, visible])
   const sourceIds = Array.from(new Set(candidates.flatMap((item, index) => offeredBy(index, item)))).sort()
   // One catalogue search answers for every installed lx source, so its count is
   // one answer rather than one answer per channel.
@@ -210,6 +238,12 @@ export default function SearchPage() {
       {candidates.length > 0 && (
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-semibold">搜索结果</h2>
+          <button type="button" aria-pressed={probeEnabled}
+            onClick={() => setProbeEnabled((enabled) => !enabled)}
+            className="text-sm px-3 py-2 rounded-lg border border-neutral-700"
+            title="仅探测当前列表前 10 条结果的文件大小">
+            {probeEnabled ? '关闭大小探测' : '探测文件大小'}
+          </button>
           {sourceIds.length > 1 && (
             <select
               value={sourceFilter}
@@ -238,7 +272,9 @@ export default function SearchPage() {
               candidate.duration ? formatDuration(candidate.duration) : null,
               candidate.bitrate ? `${candidate.bitrate} kbps` : null,
               candidate.format,
-              candidate.size ? formatBytes(candidate.size) : null,
+              probing[rowKey(candidate)] ? '…' :
+                (probedSizes[rowKey(candidate)] ?? candidate.size) != null
+                  ? formatBytes(probedSizes[rowKey(candidate)] ?? candidate.size) : null,
             ].filter((value): value is string => Boolean(value))
 
             return (

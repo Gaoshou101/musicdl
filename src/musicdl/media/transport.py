@@ -11,13 +11,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
-from musicdl.contracts.plugin import ResolvedMedia
+from musicdl.contracts.plugin import ResolvedMedia, has_expired
 from musicdl.plugins.broker import (
     ActionDenied, EgressPolicy, EgressTarget, PluginManifest, _parse_action_url,
     _resolve_global_addresses, coerce_egress_policy,
 )
 
-from .models import MAX_MEDIA_BYTES, DownloadMetadata, MediaError, _CloseOnce
+from .models import MAX_MEDIA_BYTES, DeclaredSize, DownloadMetadata, MediaError, _CloseOnce
 from .validation import detect_media
 
 MAX_RESPONSE_HEADER_COUNT = 64
@@ -25,7 +25,7 @@ MAX_RESPONSE_HEADER_FIELD_BYTES = 8 * 1024
 MAX_RESPONSE_HEADERS_BYTES = 64 * 1024
 # The response fields whose single reading this product acts on, so a repeat
 # has to agree with itself instead of being combined into a list.
-_SINGLE_VALUE_HEADERS = frozenset({"content-length", "location"})
+_SINGLE_VALUE_HEADERS = frozenset({"content-length", "content-range", "location"})
 # Enough bytes for every signature `detect_container` knows, except the one that
 # states its own length: an ISO base media file is a 4-byte size, `ftyp`, a
 # major brand, a minor version, and then the brand list -- 16 bytes before the
@@ -290,19 +290,26 @@ class SecureMediaTransport:
                     value += chunk
         return value
 
-    async def _fetch_hop(self, url: str, egress: EgressPolicy, deadline: float) -> _Hop:
+    async def _fetch_hop(self, url: str, egress: EgressPolicy, deadline: float, *,
+                         method: str = "GET", range_probe: bool = False,
+                         guard: Callable[[], None] | None = None) -> _Hop:
         """Open one hop and read nothing past its status line and headers.
 
         The caller owns the returned handles on success; every failure path
         closes whatever this hop already acquired, so a redirect chain that
         ends in a refusal leaves no socket behind.
         """
+        if method not in {"GET", "HEAD"} or (range_probe and method != "GET"):
+            raise ValueError("invalid_probe_method")
+        # Probes keep their admission slot until blocking header operations
+        # drain, even after their caller has returned an unknown result.
+        run = self._run_acquire if method == "HEAD" or range_probe else self._run
         target = _target_for_url(url, egress)
         approved, port = target.host, target.port
         raw = wrapped = response = None
         try:
             try:
-                candidates = await self._run(
+                candidates = await run(
                     lambda: _resolve_global_addresses(self.resolver, approved, port), deadline)
             except ActionDenied as exc:
                 code = "media_address_denied" if exc.code == "address_denied" else "media_dns_failed"
@@ -346,13 +353,24 @@ class SecureMediaTransport:
                 setter = getattr(wrapped, "settimeout", None)
                 if setter is not None:
                     setter(max(0.001, remaining))
-                request = (f"GET {target.target} HTTP/1.1\r\nHost: {target.authority}\r\n"
+                request = (f"{method} {target.target} HTTP/1.1\r\nHost: {target.authority}\r\n"
                            "Accept: application/octet-stream\r\n"
                            "Accept-Encoding: identity\r\n"
-                           "Connection: close\r\n\r\n").encode("ascii")
+                           + ("Range: bytes=0-0\r\n" if range_probe else "")
+                           + "Connection: close\r\n\r\n").encode("ascii")
+                if guard is not None:
+                    # The descriptor's stated instant is asked inside the
+                    # function that writes, as the last step before the wire:
+                    # DNS and the handshake can outlast the door check, and
+                    # this work is handed to a worker thread, so a check made
+                    # on the event loop before the hand-off can pass while the
+                    # URL is retired before that thread runs.  Only a check on
+                    # the same side of that queue as the write is the last word
+                    # on whether a withdrawn link reaches the socket.
+                    guard()
                 wrapped.sendall(request)
 
-            await self._run(send_request, deadline)
+            await run(send_request, deadline)
             try:
                 response = await self._run_acquire(lambda: self.response_factory(wrapped), deadline)
             except MediaError:
@@ -369,8 +387,8 @@ class SecureMediaTransport:
                     setter(max(0.001, remaining))
                 response.begin()
 
-            await self._run(begin_response, deadline)
-            headers, content_length, content_type = await self._run(
+            await run(begin_response, deadline)
+            headers, content_length, content_type = await run(
                 lambda: self._response_headers(response), deadline)
             return _Hop(target=target, status=int(getattr(response, "status", 0)), headers=headers,
                         content_length=content_length, content_type=content_type,
@@ -390,6 +408,25 @@ class SecureMediaTransport:
             timeout_ms = self.default_timeout_ms
         if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
             raise MediaTransportError("media_timeout")
+        # A descriptor's stated lifetime is part of the descriptor: the URL is
+        # retired the moment it passes, so the last step before the socket
+        # refuses it instead of opening a link the source has withdrawn.  The
+        # caller that held the answer re-resolves on this code; a caller that
+        # ignored the instant until now gets the same honest refusal.
+        def refuse_expired() -> None:
+            """Refuse wherever the transfer could still act on the URL.
+
+            The door is not the only place the instant matters: DNS and the TCP
+            handshake happen after it, a CDN answers a hop later still, and a
+            body can outlast the deadline by minutes.  Every step that can still
+            start or extend a transfer asks again, so a URL that dies in flight
+            stops being streamed and the caller re-resolves it rather than this
+            process finishing work on a link the source has withdrawn.
+            """
+            if has_expired(media.expires_at):
+                raise MediaTransportError("media_url_expired")
+
+        refuse_expired()
         deadline = self.clock() + timeout_ms / 1000
         egress = coerce_egress_policy(policy)
 
@@ -404,7 +441,8 @@ class SecureMediaTransport:
             # ``media_redirect_denied`` refusal.
             url = media.url
             for redirects in range(self.max_redirects + 1):
-                hop = await self._fetch_hop(url, egress, deadline)
+                refuse_expired()
+                hop = await self._fetch_hop(url, egress, deadline, guard=refuse_expired)
                 response, wrapped, raw = hop.response, hop.wrapped, hop.raw
                 if not 300 <= hop.status < 400:
                     break
@@ -416,6 +454,10 @@ class SecureMediaTransport:
                 raw = wrapped = response = None
             if not 200 <= hop.status < 300:
                 raise MediaTransportError("media_response_invalid")
+            # The head can arrive after the instant the source named, exactly as
+            # DNS and the handshake can outlast it, so no body byte is read
+            # until the URL is still live.
+            refuse_expired()
             # Neither the answer's extension nor its Content-Type label is the
             # verdict; both are written by whichever CDN answered, and the same
             # link shape has been measured carrying two different containers
@@ -433,10 +475,34 @@ class SecureMediaTransport:
                 raise MediaTransportError("media_response_invalid")
             extension, media_type = detected[0].lstrip("."), detected[1]
             content_length = hop.content_length
+            # Two kinds of expected size reach this point.  A value the main
+            # process observed itself (``Content-Length``, or a size the source
+            # stands behind) is authoritative: the transfer has to match it
+            # exactly, which is the 1.0.4 behaviour, and one byte more is a
+            # refusal.  A source's own reference size is advisory -- measured
+            # 2026-09-27, a QQ 音乐 FLAC answer carried 15 bytes more than the
+            # ``_types`` entry the source repeats -- so only a body shorter than
+            # the reference is refused, and the length the server actually sent
+            # is what this product reports and records.
+            declared = media.declared_size
+            advisory_size = declared if media.size_is_advisory else None
+            exact_size = content_length if media.size_is_advisory or declared is None else declared
             if content_length is not None and content_length > self.max_bytes:
                 raise MediaError("file_too_large")
-            if media.declared_size is not None and content_length is not None and content_length != media.declared_size:
+            if exact_size is not None and content_length is not None and content_length != exact_size:
                 raise MediaError("size_mismatch")
+            if advisory_size is not None and content_length is not None and content_length < advisory_size:
+                raise MediaError("size_mismatch")
+            # An accepted reference size is never echoed back: the panel, the
+            # download record and the success message all read the length this
+            # download is answerable for, and they have to agree with the bytes
+            # on disk.  An answer that states its own ``Content-Length`` gives
+            # that length up front; an answer that states none (a chunked body)
+            # only gives it while the bytes arrive, so the stream fills a cell
+            # the caller reads once the body has been delivered.
+            reported_size: int | DeclaredSize | None = content_length if advisory_size is not None else exact_size
+            if advisory_size is not None and content_length is None:
+                reported_size = DeclaredSize()
 
             async def close_response() -> None:
                 await self._close_handles((response, wrapped, raw), close_once)
@@ -455,10 +521,16 @@ class SecureMediaTransport:
                         observed += len(prefix)
                         if observed > self.max_bytes:
                             raise MediaError("file_too_large")
-                        if media.declared_size is not None and observed > media.declared_size:
+                        if exact_size is not None and observed > exact_size:
                             raise MediaError("size_mismatch")
+                        refuse_expired()
                         yield prefix
                     while True:
+                        # A body can outlast the URL's stated lifetime by
+                        # minutes, so the read that would extend the transfer
+                        # asks again before it does.
+                        refuse_expired()
+
                         def read_chunk() -> bytes:
                             remaining = _remaining(self.clock, deadline)
                             setter = getattr(wrapped, "settimeout", None)
@@ -475,18 +547,27 @@ class SecureMediaTransport:
                             raise
                         except (OSError, http.client.HTTPException, ValueError) as exc:
                             raise MediaTransportError("media_response_invalid") from exc
+                        # Even the last read can begin while the URL is live
+                        # and return after the instant has passed, so the
+                        # bytes it produced are neither yielded nor answered
+                        # as a finished transfer.
+                        refuse_expired()
                         if not chunk:
                             break
                         observed += len(chunk)
                         if observed > self.max_bytes:
                             raise MediaError("file_too_large")
-                        if media.declared_size is not None and observed > media.declared_size:
+                        if exact_size is not None and observed > exact_size:
                             raise MediaError("size_mismatch")
                         yield chunk
-                    if content_length is not None and observed != content_length:
+                    if exact_size is not None and observed != exact_size:
                         raise MediaError("size_mismatch")
-                    if media.declared_size is not None and observed != media.declared_size:
+                    if advisory_size is not None and observed < advisory_size:
                         raise MediaError("size_mismatch")
+                    if isinstance(reported_size, DeclaredSize):
+                        # Every byte the body held has been handed over, so the
+                        # length it really is is now known.
+                        reported_size.value = observed
                 except BaseException as exc:
                     primary = exc
                     raise
@@ -498,8 +579,9 @@ class SecureMediaTransport:
                             raise
 
             return DownloadMetadata(chunks=chunks(), extension=extension,
-                                    media_type=media_type, declared_size=media.declared_size,
-                                    _close_once=close_once)
+                                    media_type=media_type, declared_size=reported_size,
+                                    _close_once=close_once, quality=media.quality,
+                                    expires_at=media.expires_at)
         except asyncio.CancelledError:
             if close_once is not None:
                 try:

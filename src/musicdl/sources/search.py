@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import Candidate, normalize_text
+from .quality import is_lossless, quality_rank
 from .registry import SourceEntry, SourceRegistry
 
 
@@ -80,7 +81,9 @@ async def _invoke(entry: SourceEntry, query: str, timeout: float, max_results: i
 
 async def search_sources(registry: SourceRegistry, query: str, *, timeout: float = 10.0,
                          max_results_per_source: int = 100,
-                         preference: Mapping[str, int] | Callable[[str], int] | None = None) -> SearchResult:
+                         preference: Mapping[str, int] | Callable[[str], int] | None = None,
+                         quality_policy: str = "lossless_first",
+                         quality_preference: str | None = None) -> SearchResult:
     """Search every enabled source, and answer with one candidate per recording.
 
     Two channels offering the same recording are the normal case, so one of
@@ -99,6 +102,9 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
         raise ValueError("invalid_timeout")
     if not isinstance(max_results_per_source, int) or isinstance(max_results_per_source, bool) or not 1 <= max_results_per_source <= 1000:
         raise ValueError("invalid_max_results_per_source")
+    def rank_of(candidate, priority):
+        return quality_key(candidate, priority, policy=quality_policy, preference=quality_preference)
+
     entries = registry.enabled()
     outcomes = await asyncio.gather(*(_invoke(e, query, timeout, max_results_per_source) for e in entries))
     by_identity: dict[tuple, tuple[Candidate, SourceEntry]] = {}
@@ -116,8 +122,8 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
             # panel last saw working, then stable identity. Priority is part of
             # the quality key, so a channel an operator ranked higher still
             # outranks one that merely answered a search recently.
-            rank = quality_key(candidate, entry.priority)
-            incumbent_rank = quality_key(incumbent[0], incumbent[1].priority) if incumbent else None
+            rank = rank_of(candidate, entry.priority)
+            incumbent_rank = rank_of(incumbent[0], incumbent[1].priority) if incumbent else None
             prefer = _preference_weight(preference, candidate.source_id)
             incumbent_prefer = _preference_weight(preference, incumbent[0].source_id) if incumbent else None
             stable = (candidate.source_id.casefold(), candidate.item_id.casefold())
@@ -145,25 +151,37 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
 
     def ordering(row):
         relevance, c, entry = row
-        quality = quality_key(c, entry.priority)
-        return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], entry.priority,
+        quality = rank_of(c, entry.priority)
+        return (relevance, -quality[0], -quality[1], -quality[2], -quality[3], -quality[4], -quality[5],
                 c.title.casefold(), c.artist.casefold(), c.source_id.casefold(), c.item_id.casefold())
     ranked = ((relevance_of(c), c, entry) for c, entry in retained)
     ordered = tuple(c for _, c, _ in sorted(ranked, key=ordering))
-    offers = tuple(_offers_of(offered[candidate.canonical_version_key], preference)
+    offers = tuple(_offers_of(offered[candidate.canonical_version_key], preference, rank_of)
                    for candidate in ordered)
     return SearchResult(ordered, tuple(s for s, _ in outcomes), search_result_version(ordered), offers)
 
 
-def quality_key(candidate: Candidate, priority: int) -> tuple:
+def quality_key(candidate: Candidate, priority: int, *, policy: str = "lossless_first",
+                preference: str | None = None) -> tuple[int, int, int, int, int, int]:
     """Higher values are better; unknown quality fields rank lowest."""
-    lossless = (candidate.format or "").casefold() in {"flac", "alac", "ape", "wav", "aiff"}
+    # Keep the extra tier axis neutral in compatibility mode, preserving the
+    # historical format/bitrate/completeness/size/priority order on the same metadata.
+    preferred = preference.strip().casefold() if preference else None
+    legacy = policy == "best_available" and not preferred
+    declared = () if legacy else candidate.qualities
+    supported_preference = preferred in candidate.qualities if preferred else False
+    lossless = is_lossless(candidate.format) or any(is_lossless(value) for value in declared)
+    tier_rank = 0 if legacy else max((quality_rank(value) for value in declared),
+                                     default=quality_rank(candidate.format))
     completeness = sum(value is not None for value in (candidate.album, candidate.duration, candidate.bitrate, candidate.format, candidate.size))
-    return (int(lossless), candidate.bitrate if candidate.bitrate is not None else -1, completeness, candidate.size if candidate.size is not None else -1, -priority)
+    return (2 if supported_preference else int(lossless), tier_rank,
+            candidate.bitrate if candidate.bitrate is not None else -1,
+            completeness, candidate.size if candidate.size is not None else -1, -priority)
 
 
 def _offers_of(group: Sequence[tuple[Candidate, SourceEntry]],
-               preference: Mapping[str, int] | Callable[[str], int] | None) -> tuple[str, ...]:
+               preference: Mapping[str, int] | Callable[[str], int] | None,
+               rank_of=quality_key) -> tuple[str, ...]:
     """The channels that offered one recording, best first, once each.
 
     The order is the order a download reaches them in: the same quality key the
@@ -174,8 +192,8 @@ def _offers_of(group: Sequence[tuple[Candidate, SourceEntry]],
     """
     def order(pair: tuple[Candidate, SourceEntry]) -> tuple:
         candidate, entry = pair
-        lossless, bitrate, completeness, size, priority = quality_key(candidate, entry.priority)
-        return (-lossless, -bitrate, -completeness, -size, -priority,
+        quality = rank_of(candidate, entry.priority)
+        return (*(-value for value in quality),
                 -_preference_weight(preference, candidate.source_id),
                 candidate.source_id.casefold(), candidate.item_id.casefold())
     names: list[str] = []

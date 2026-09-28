@@ -267,6 +267,8 @@ class WorkerSettings(BaseModel):
     """Worker budgets whose cross-field slack is validated before the app can start."""
 
     model_config = ConfigDict(extra="forbid")
+    quality_policy: Literal["lossless_first", "best_available"] = "lossless_first"
+    quality_preference: str | None = None
     search_timeout: float = Field(default=8.0, gt=0, le=30)
     resolve_stream_timeout: float = Field(default=15.0, gt=0, le=30)
     health_timeout: float = Field(default=5.0, gt=0, le=30)

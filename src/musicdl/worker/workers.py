@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import math
 import secrets
+from dataclasses import replace
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
@@ -12,12 +13,15 @@ from typing import Any, Callable
 from musicdl.ai.models import AIRankResult
 from musicdl.config import REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS
 from musicdl.media.fallback import download_with_fallback
+from musicdl.media.download import source_download
+from musicdl.sources.quality import (QUALITY_REVISION, bitrate_kbps, format_bytes, is_lossless,
+                                     proven_lossy, requested_quality, served_quality)
 from musicdl.media.language import resolve_language
 from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, MediaError
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult, search_sources
 from musicdl.wecom.commands import CommandKind, ParsedCommand, parse_command
-from musicdl.wecom.results import NO_RESULTS_TEXT, selection_message
+from musicdl.wecom.results import NO_RESULTS_TEXT, selection_message, success_message
 from musicdl.media.validation import validated_destination
 from musicdl.wecom.state import EffectLease, RedisStateStore, SelectionContext, SelectionRejected
 from .selection import bind_user_selection, get_user_selection, get_selection_for_user, get_selection_for_request, _get_by_token
@@ -133,20 +137,31 @@ def _positive_seconds(value, name: str):
 
 
 def _success_text(download) -> str:
-    """The success notice, with a measured rate only when there really is one.
+    """The success notice, with a measured rate whenever there really is one.
 
     ``DownloadResult.bitrate_kbps`` is the delivered byte count over the real
-    playing time, so it is a measurement rather than a channel's claim.  A file
-    whose container could not be read leaves the notice exactly as it was:
-    showing a number nobody measured would be the same lie this feature exists
-    to stop.
+    playing time, so it is a measurement rather than a channel's claim, and it
+    wins over the tier label whenever the container could be read.  A file the
+    reader could not open falls back to the tier the source stated, and the
+    notice still reports the bytes that were really written.  A download that
+    measured nothing and stated nothing keeps the notice plain: showing a
+    number nobody measured would be the same lie this feature exists to stop.
     """
     text = f"下载成功：{download.relative_path}"
-    bitrate = getattr(download, "bitrate_kbps", None)
-    if bitrate is None:
-        return text
     container = str(getattr(download, "extension", "") or "").lstrip(".").upper()
-    return f"{text}（{container} {bitrate}kbps）" if container else f"{text}（{bitrate}kbps）"
+    size = getattr(download, "size_bytes", None)
+    measured = getattr(download, "bitrate_kbps", None)
+    rate = measured if measured is not None else bitrate_kbps(getattr(download, "quality", None))
+    if rate is not None:
+        label = f"{container} {rate}kbps".strip()
+    elif size is not None:
+        label = container
+    else:
+        label = ""
+    downgrade = "未取到无损" if getattr(download, "quality_downgraded", False) else ""
+    details = " · ".join(part for part in
+                         (label, format_bytes(size) if size is not None else "", downgrade) if part)
+    return f"{text}（{details}）" if details else text
 
 
 def _retry_window(value) -> int:
@@ -291,7 +306,9 @@ class MessageWorker(_StreamWorker):
     def __init__(self, redis: Any, registry: Any, wecom: Any, *, state: RedisStateStore | None = None,
                  ai_ranker: Callable | None = None, group: str = "musicdl-workers", consumer: str | None = None,
                  max_results: int = 10, search_timeout: float = 10.0, selection_ttl: int = 600,
-                 pending_idle_ms: int = 30001, max_attempts: int = 3, retry_window_seconds: int = 86400):
+                 pending_idle_ms: int = 30001, max_attempts: int = 3, retry_window_seconds: int = 86400,
+                 quality_policy: str = "lossless_first", quality_preference: str | None = None):
+        self.quality_policy, self.quality_preference = quality_policy, quality_preference
         self.redis, self.registry, self.wecom = redis, registry, wecom
         self.state = state or RedisStateStore(redis)
         self.retry_window_seconds = _retry_window(retry_window_seconds)
@@ -316,7 +333,8 @@ class MessageWorker(_StreamWorker):
         command = _command(payload)
         if command.kind is not CommandKind.SEARCH:
             return None
-        result = await search_sources(self.registry, str(command.value), timeout=self.search_timeout)
+        result = await search_sources(self.registry, str(command.value), timeout=self.search_timeout,
+                                      quality_policy=self.quality_policy, quality_preference=self.quality_preference)
         if self.ai_ranker:
             try:
                 ranked = await _call(self.ai_ranker, result, str(command.value))
@@ -387,7 +405,9 @@ class JobWorker(_StreamWorker):
                  retry_window_seconds: int = 86400, selection_ttl: int = 600, max_results: int = 10,
                  verify_duration: str = "lenient",
                  redis_overhead_seconds: float = REDIS_OVERHEAD_SECONDS,
-                 wecom_notice_timeout: float = WECOM_NOTICE_TIMEOUT_SECONDS):
+                 wecom_notice_timeout: float = WECOM_NOTICE_TIMEOUT_SECONDS,
+                 quality_policy: str = "lossless_first", quality_preference: str | None = None):
+        self.quality_policy, self.quality_preference = quality_policy, quality_preference
         self.redis, self.wecom, self.sources, self.media_root = redis, wecom, sources, media_root
         self.state, self.refresh, self.language_advisor = state or RedisStateStore(redis), refresh, language_advisor
         if not isinstance(selection_ttl, int) or isinstance(selection_ttl, bool) or not 60 <= selection_ttl <= 86400:
@@ -528,14 +548,17 @@ class JobWorker(_StreamWorker):
         return await resolve_language(candidate, self.language_advisor)
 
     async def _reserve(self, job_id: str, candidate: Candidate, owner: str, lease: EffectLease,
-                       deadline: float, language: str) -> ArtifactRecord | None:
-        """Persist the deterministic artifact reservation before any source call.
+                       deadline: float, language: str, *, actual_extension: str | None = None,
+                       actual_media_type: str | None = None) -> ArtifactRecord | None:
+        """Persist the deterministic destination before publication.
+
+        Quality requests reserve after body validation so the final extension is actual.
 
         A candidate without a usable extension has no deterministic target, so it keeps the
         unreserved download path instead of inventing a reservation.
         """
         root = Path(self.media_root).resolve(strict=False)
-        extension = str(candidate.format or "").lstrip(".").lower()
+        extension = str(actual_extension or candidate.format or "").lstrip(".").lower()
         if not extension:
             return None
         try:
@@ -545,7 +568,7 @@ class JobWorker(_StreamWorker):
         base_relative = base.resolve(strict=False).relative_to(root).as_posix()
         record = await self.state.prepare_artifact(
             job_id, candidate, media_root=root, base_relative_path=base_relative, extension=extension,
-            media_type=_MEDIA_TYPES.get(extension, f"audio/{extension}"), declared_size=None,
+            media_type=actual_media_type or _MEDIA_TYPES.get(extension, f"audio/{extension}"), declared_size=None,
             owner=owner, fence=lease.fence, ttl=self.job_ttl)
         if record.fence > lease.fence:
             raise EffectUncertain("artifact_uncertain")
@@ -570,9 +593,16 @@ class JobWorker(_StreamWorker):
             if not (record.result or {}).get("ok", False):
                 return FallbackResult(download=None,
                                       download_error=_effect_code(record, "download_failed"))
-            return await self._replay_download(job_id, payload, candidate, owner, deadline)
+            return await self._replay_download(job_id, payload, candidate, owner, deadline, record.result or {})
         language = await self._download_language(job_id, candidate)
-        reservation = await self._reserve(job_id, candidate, owner, lease, deadline, language)
+        quality = requested_quality(candidate, policy=self.quality_policy, preference=self.quality_preference)
+        reservation = (await self.state.get_artifact(job_id) if quality is not None else
+                       await self._reserve(job_id, candidate, owner, lease, deadline, language))
+
+        async def prepare(extension, media_type):
+            return await self._reserve(job_id, candidate, owner, lease, deadline, language,
+                                       actual_extension=extension, actual_media_type=media_type)
+
         language = _recorded_language(reservation) or language
         reserved = {} if reservation is None else {
             "reservation": reservation, "artifact_store": self.state, "owner": owner, "fence": lease.fence}
@@ -583,8 +613,13 @@ class JobWorker(_StreamWorker):
                 request_id=str(payload["request_id"]), query=str(payload.get("query") or candidate.title),
                 refresh=self._guarded_refresh(job_id, owner, deadline),
                 resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
-                health_timeout=self.health_timeout, language=language,
-                verify_duration=self.verify_duration, **reserved)
+                health_timeout=self.health_timeout, language=language, quality=quality,
+                quality_policy=self.quality_policy,
+                max_quality_switches=min(1, max(0, self.max_attempts - 1)),
+                verify_duration=self.verify_duration,
+                prepare=prepare if quality is not None and reservation is None else None,
+                **({"artifact_store": self.state, "owner": owner, "fence": lease.fence}
+                   if quality is not None and reservation is None else reserved))
         except asyncio.CancelledError:
             await guard.uncertain_quietly(lease, "download_cancelled")
             raise
@@ -605,11 +640,21 @@ class JobWorker(_StreamWorker):
             if code == "artifact_uncertain":
                 raise EffectUncertain(code)
             return result
-        await guard.complete(lease, {"ok": True})
+        # A downgrade switch asks the alternate for whichever tier *it* declares,
+        # which is not always the tier the job started with.  The tier that was
+        # actually requested of the source that answered is the one the record
+        # keeps, so replaying it asks for the same thing the live run did.
+        await guard.complete(lease, {"ok": True,
+                                     "requested_quality": (getattr(result.download, "requested_quality", None)
+                                                           or quality),
+                                     "actual_quality": (getattr(result.download, "actual_quality", None)
+                                                        or getattr(result.download, "quality", None)),
+                                     "quality_revision": getattr(result.download, "quality_revision", QUALITY_REVISION),
+                                     "quality_downgraded": getattr(result.download, "quality_downgraded", False)})
         return result
 
     async def _replay_download(self, job_id: str, payload: dict[str, Any], candidate: Candidate,
-                               owner: str, deadline: float):
+                               owner: str, deadline: float, outcome: dict | None = None):
         """Replay a completed download from its durable artifact record without a source call."""
         record = await self.state.get_artifact(job_id)
         if record is None or record.state == "uncertain":
@@ -620,11 +665,55 @@ class JobWorker(_StreamWorker):
             refresh=self._guarded_refresh(job_id, owner, deadline),
             resolve_stream_timeout=self.resolve_stream_timeout, refresh_timeout=self.refresh_timeout,
             health_timeout=self.health_timeout, reservation=record, artifact_store=self.state,
+            quality=(outcome or {}).get("requested_quality"),
             owner=owner, fence=record.fence, language=_recorded_language(record),
             verify_duration=self.verify_duration)
         if result.download is None:
             raise EffectUncertain(result.download_error or "artifact_uncertain")
-        return result
+        outcome = outcome or {}
+        # A replay repeats what the first attempt verified, down to the revision
+        # that verified it: a record written before this revision existed must not
+        # look like one this revision stands behind, so a missing revision is
+        # replayed as 0 instead of as the current number.
+        # The bytes on disk are the evidence a replay stands on, so the verdict is
+        # recomputed the way a fresh download computes it rather than repeated
+        # from the record.  Both directions of a stale verdict are reachable: a
+        # record written by an earlier revision could call genuine FLAC a
+        # downgrade because the source labelled the answer ``320k``, and one
+        # could clear a downgrade because the tier recorded beside an answer is
+        # the tier the alternate was asked for -- the tier the job itself asked
+        # for is nowhere in the record.  So the job's own ask is recomputed from
+        # the candidate and the answer is read off the container the artifact
+        # proves, which is exactly the pair the live run judged: a lossless
+        # request under ``lossless_first`` that came back with bytes proving
+        # lossy, and nothing else -- a job that asked for a lossy tier, or that
+        # asked under ``best_available``, downgraded nothing by being answered.
+        #
+        # A stored label is re-read unless the record predates this verifier.  A
+        # label an earlier revision stored was judged by rules this revision no
+        # longer stands behind, so the artifact's own container is the evidence
+        # that is left: the label is dropped rather than reconciled against bytes
+        # it may describe under rules that have since changed.  Measured shape: a
+        # stale ``320k`` beside an m4a artifact kept a lossy tier the file never
+        # proves, and a stale ``320k`` beside genuine FLAC would have done the
+        # same.  A record written at this revision or a later one was judged by
+        # rules at least as strict as these, so its label stands: dropping it
+        # would discard a verdict a stricter verifier read off the same bytes.
+        revision = int(outcome.get("quality_revision") or 0)
+        recorded = outcome.get("actual_quality") if revision >= QUALITY_REVISION else None
+        actual_quality = served_quality(recorded or result.download.actual_quality,
+                                        result.download.extension)
+        job_ask = requested_quality(candidate, policy=self.quality_policy,
+                                    preference=self.quality_preference)
+        downgraded = (self.quality_policy == "lossless_first" and is_lossless(job_ask)
+                      and proven_lossy(actual_quality))
+        return replace(result, download=replace(result.download,
+                       quality=actual_quality or result.download.quality,
+                       actual_quality=actual_quality,
+                       requested_quality=(outcome.get("requested_quality")
+                                          or result.download.requested_quality),
+                       quality_downgraded=downgraded,
+                       quality_revision=revision))
 
     def _guarded_sources(self, job_id: str, owner: str, deadline: float) -> dict:
         """Wrap every source so the shared health call is a separate fenced effect."""
@@ -826,8 +915,8 @@ class _GuardedSource:
         self.source, self.worker = source, worker
         self.job_id, self.owner, self.deadline = job_id, owner, deadline
 
-    async def download(self, candidate: Candidate):
-        return await self.source.download(candidate)
+    async def download(self, candidate: Candidate, *, quality: str | None = None):
+        return await source_download(self.source, candidate, quality=quality)
 
     async def health(self):
         guard = self.worker._guard(self.job_id, "health", self.owner, self.deadline)

@@ -1,7 +1,7 @@
 import asyncio, json, time, pytest
 from types import SimpleNamespace
 from test_wecom_state import ID3, ScriptRedis, Source, playable_metadata
-from musicdl.media.models import FallbackResult
+from musicdl.media.models import FallbackResult, DownloadResult
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
 from musicdl.wecom.state import RedisStateStore
@@ -49,10 +49,10 @@ def test_selection_invalid_or_missing_is_acked(monkeypatch):
 def test_job_route_resolves_candidate_and_downloads(monkeypatch):
     calls=[]
     async def route(*a,**k): calls.append((a,k)); return {"from_user":"u","query":"q","version":"v","generation":0,"candidates":{"2":cand().model_dump(mode="json")}}
-    async def download(c,*args,**kwargs): assert c.item_id=="id" and kwargs["request_id"]=="r"; return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3"),download_error=None,refresh_error=None,refreshed=None)
+    async def download(c,*args,**kwargs): assert c.item_id=="id" and kwargs["request_id"]=="r"; return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3", extension="mp3", media_type="audio/mpeg", size_bytes=1024),download_error=None,refresh_error=None,refreshed=None)
     monkeypatch.setattr("musicdl.worker.workers.get_selection_for_request",route); monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download); wc=WeCom()
     result=run(JobWorker(Redis(),wc,{},"/tmp",state=State(),refresh=lambda *a:None).handle_job({"request_id":"r","index":"2"},job_id="1-0"))
-    assert result.download.relative_path=="Song.mp3" and wc.sent==[("u","下载成功：Song.mp3")]
+    assert result.download.relative_path=="Song.mp3" and wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB）")]
     assert calls[0][1]=={"namespace":"{tenant}"}
     assert len(calls)==1
 
@@ -190,7 +190,7 @@ def test_job_delivery_settings_are_strictly_validated(kwargs):
         JobWorker(Redis(),WeCom(),{},"/tmp",state=State(),**kwargs)
 
 def test_job_success_delete_failure_is_not_recorded_as_business_failure(monkeypatch):
-    async def download(*_a,**_k): return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3"),download_error=None,refresh_error=None)
+    async def download(*_a,**_k): return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3", extension="mp3", media_type="audio/mpeg", size_bytes=1024),download_error=None,refresh_error=None)
     class Broken(StreamRedis):
         async def delete(self,*_a,**_k): raise RuntimeError("delete unavailable")
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
@@ -240,7 +240,7 @@ def test_handle_job_requires_an_explicit_valid_stream_id(job_id):
 
 def test_run_once_forwards_the_stream_id_as_the_job_id(monkeypatch):
     seen=[]
-    async def download(*_a,**_k): return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3"),download_error=None,refresh_error=None,refreshed=None)
+    async def download(*_a,**_k): return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3", extension="mp3", media_type="audio/mpeg", size_bytes=1024),download_error=None,refresh_error=None,refreshed=None)
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
     raw=json.dumps({"request_id":"r","from_user":"u","candidate":cand().model_dump(mode="json")}).encode()
     redis=Redis([("7-3",{b"payload":raw})]); worker=JobWorker(redis,WeCom(),{},"/tmp",state=State(),refresh=lambda *_a:None)
@@ -254,26 +254,26 @@ def test_stream_candidate_is_immutable_and_the_route_is_never_read(monkeypatch):
     async def route(*a,**k):
         lookups.append(a); return {"from_user":"attacker","query":"other","candidates":{"2":cand("other").model_dump(mode="json")}}
     async def download(c,*_a,**_k):
-        downloaded.append(c.item_id); return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3"),download_error=None,refresh_error=None,refreshed=None)
+        downloaded.append(c.item_id); return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3", extension="mp3", media_type="audio/mpeg", size_bytes=1024),download_error=None,refresh_error=None,refreshed=None)
     monkeypatch.setattr("musicdl.worker.workers.get_selection_for_request",route)
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
     raw=json.dumps({"request_id":"r","from_user":"u","query":"q","candidate":cand("id").model_dump(mode="json")}).encode()
     redis=Redis([("1-0",{b"payload":raw})]); wc=WeCom()
     assert run(JobWorker(redis,wc,{},"/tmp",state=State(),refresh=lambda *_a:None).run_once())==1
-    assert lookups==[] and downloaded==["id"] and wc.sent==[("u","下载成功：Song.mp3")]
+    assert lookups==[] and downloaded==["id"] and wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB）")]
 
 def test_legacy_job_freezes_exactly_one_route_snapshot(monkeypatch):
     lookups=[]; downloaded=[]
     async def route(*a,**k):
         lookups.append(a); return {"from_user":"u","query":"q","candidates":{"2":cand("id").model_dump(mode="json")}}
     async def download(c,*_a,**_k):
-        downloaded.append(c.item_id); return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3"),download_error=None,refresh_error=None,refreshed=None)
+        downloaded.append(c.item_id); return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3", extension="mp3", media_type="audio/mpeg", size_bytes=1024),download_error=None,refresh_error=None,refreshed=None)
     monkeypatch.setattr("musicdl.worker.workers.get_selection_for_request",route)
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
     raw=json.dumps({"request_id":"r","index":"2","from_user":"u"}).encode()
     redis=Redis([("1-0",{b"payload":raw})]); wc=WeCom()
     assert run(JobWorker(redis,wc,{},"/tmp",state=State(),refresh=lambda *_a:None).run_once())==1
-    assert len(lookups)==1 and downloaded==["id"] and wc.sent==[("u","下载成功：Song.mp3")]
+    assert len(lookups)==1 and downloaded==["id"] and wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB）")]
 
 def test_job_string_candidate_is_parsed_and_malformed_json_is_rejected(monkeypatch):
     seen=[]
@@ -361,8 +361,7 @@ def refresh_result(count=1,version="v2"):
                         statuses=(),version=version)
 
 def ok_download():
-    return SimpleNamespace(download=SimpleNamespace(relative_path="Song.mp3"),download_error=None,
-                           refresh_error=None,refreshed=None)
+    return FallbackResult(download=DownloadResult("Song.mp3", "a" * 64, 1024, "audio/mpeg", "mp3", "未知"))
 
 def test_job_claims_the_download_effect_and_reserves_before_the_source_call(monkeypatch,tmp_path):
     st=State(); seen={}
@@ -428,7 +427,7 @@ def test_published_artifact_is_replayed_without_a_second_source_call(monkeypatch
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
     worker=JobWorker(Redis(),wc,{"src":src},"/tmp",state=st,refresh=lambda *a:None)
     result=run(worker.handle_job(job_payload(),job_id="1-0"))
-    assert result.download.relative_path=="Song.mp3" and wc.sent==[("u","下载成功：Song.mp3")]
+    assert result.download.relative_path=="Song.mp3" and wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB）")]
     assert seen["reservation"].state=="published" and seen["reservation"].sha256=="a"*64
     assert seen["reservation"].size_bytes==10 and seen["artifact_store"] is st and seen["fence"]==1
     assert src.calls==0
@@ -538,7 +537,7 @@ def test_notice_timeout_is_capped_by_the_remaining_handler_deadline(monkeypatch)
                            job_timeout=0.5,wecom_notice_timeout=10.0)
     run(tight_worker.handle_job(job_payload(),job_id="1-0"))
     assert len(budgets)==2 and budgets[0]==10.0 and 0.0<budgets[1]<=0.5
-    assert roomy.sent==[("u","下载成功：Song.mp3")] and tight.sent==[("u","下载成功：Song.mp3")]
+    assert roomy.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB）")] and tight.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB）")]
 
 def test_hanging_notice_is_bounded_and_never_resent(monkeypatch):
     st=State(); now=time.monotonic()
@@ -661,3 +660,41 @@ def test_a_prepared_reservation_takes_priority_over_the_shared_language_resolver
                        language_advisor=lambda _candidate: "华语")
 
     assert run(worker._download_language("job-1", cand())) == "日韩"
+
+
+def published_artifact(state, job_id="1-0"):
+    """A finished download whose bytes are already on disk, as a replay finds them."""
+    state.script.hashes[f"{{tenant}}:artifact:{job_id}"] = {
+        "job_id": job_id, "candidate_id": "id",
+        "temporary_relative_path": ".musicdl-staging/a.1.part",
+        "target_relative_path": "未知/Artist/Song.mp3",
+        "allocation_slot": "1", "extension": ".mp3", "media_type": "audio/mpeg", "size_bytes": "10",
+        "sha256": "a" * 64, "owner": "earlier", "fence": "1", "state": "published"}
+
+
+def test_replay_of_a_record_without_a_quality_revision_reports_revision_zero(monkeypatch):
+    """A record written before this verifier existed must not look like it passed it."""
+    st = State()
+    seed_effect(st, "1-0", "download", owner="earlier", fence=1, result='{"ok":true}')
+    published_artifact(st)
+    async def download(candidate, sources, root, **kwargs):
+        return ok_download()
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", download)
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=st, refresh=lambda *a: None)
+    result = run(worker.handle_job(job_payload(), job_id="1-0"))
+    assert result.download.quality_revision == 0
+
+
+def test_replay_repeats_the_quality_verdict_the_record_holds(monkeypatch):
+    """Both tiers and the revision that verified them survive a replay unchanged."""
+    st = State()
+    seed_effect(st, "1-0", "download", owner="earlier", fence=1,
+                result='{"ok":true,"requested_quality":"flac","actual_quality":"320k","quality_revision":7}')
+    published_artifact(st)
+    async def download(candidate, sources, root, **kwargs):
+        return ok_download()
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", download)
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=st, refresh=lambda *a: None)
+    result = run(worker.handle_job(job_payload(), job_id="1-0"))
+    assert (result.download.requested_quality, result.download.actual_quality) == ("flac", "320k")
+    assert result.download.quality_revision == 7

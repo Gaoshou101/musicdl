@@ -370,3 +370,91 @@ def test_reservation_owner_and_fence_are_forwarded_to_download(tmp_path, monkeyp
     assert outcome.download == "downloaded"
     assert captured["reservation"] is reservation
     assert (captured["artifact_store"], captured["owner"], captured["fence"]) == ("store", "owner", 7)
+
+
+def test_fallback_reresolves_a_descriptor_the_transport_retired(tmp_path):
+    """A descriptor that dies between resolve and stream is resolved again.
+
+    The transport refuses a URL the source has already retired, so the frozen
+    answer can never be streamed blind; the fallback asks the source for a live
+    one and keeps the download instead of reporting a failure.
+    """
+    retired, alive = "2000-01-01T00:00:00Z", "2999-01-01T00:00:00Z"
+
+    class Retiring(Source):
+        def __init__(self):
+            super().__init__()
+            self.resolved = 0
+
+        async def download(self, item, quality=None):
+            self.resolved += 1
+            return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg",
+                                    quality="flac",
+                                    expires_at=retired if self.resolved == 1 else alive)
+
+    source = Retiring()
+    events = []
+
+    async def refresh(query, excluded):
+        return result()
+
+    outcome = asyncio.run(download_with_fallback(
+        candidate(), {"a": source}, tmp_path, request_id="r", query="Song",
+        quality="flac", quality_policy="lossless_first", refresh=refresh, record=events.append))
+
+    assert outcome.download is not None
+    assert source.resolved == 2
+    # The retired answer is reported honestly rather than hidden, and the
+    # download only counts once the live descriptor has produced the bytes.
+    assert [(e.stage, e.status, e.error_code) for e in events] == [
+        ("download", "failed", "media_url_expired"),
+        ("duration", "unverified", "duration_unverified"),
+        ("download", "success", None),
+    ]
+def test_a_reresolved_answer_stamps_the_quality_it_delivered(tmp_path):
+    """The verdict describes the bytes that arrive, not the retired descriptor.
+
+    A source can answer 320k, have that URL retire before it is streamed, and
+    answer FLAC on the second resolve.  The file is lossless, so the record must
+    not keep calling it a downgrade just because the first answer was lossy.
+    """
+    retired, alive = "2000-01-01T00:00:00Z", "2999-01-01T00:00:00Z"
+    flac = b"fLaC" + b"\x00" * 12
+
+    class Retiring(Source):
+        def __init__(self):
+            super().__init__()
+            self.resolved = 0
+
+        async def download(self, item, quality=None):
+            self.resolved += 1
+            first = self.resolved == 1
+            return DownloadMetadata(chunks(ID3 if first else flac),
+                                    extension="mp3" if first else "flac",
+                                    media_type="audio/mpeg" if first else "audio/flac",
+                                    quality="320k" if first else "flac",
+                                    expires_at=retired if first else alive)
+
+    source = Retiring()
+    events = []
+
+    async def refresh(query, excluded):
+        return result()
+
+    outcome = asyncio.run(download_with_fallback(
+        candidate(), {"a": source}, tmp_path, request_id="r", query="Song", quality="flac",
+        quality_policy="lossless_first", max_quality_switches=0, refresh=refresh, record=events.append))
+
+    download = outcome.download
+    assert download is not None
+    assert source.resolved == 2
+    assert (download.extension, download.actual_quality) == (".flac", "flac")
+    assert download.quality_downgraded is False
+    # The lossy answer is still reported as it was observed -- the record just
+    # does not repeat that verdict about a file the second resolve made lossless.
+    assert [(e.stage, e.status, e.error_code) for e in events] == [
+        ("quality_downgraded", "observed", None),
+        ("download", "failed", "media_url_expired"),
+        ("duration", "unverified", "duration_unverified"),
+        ("download", "success", None),
+    ]

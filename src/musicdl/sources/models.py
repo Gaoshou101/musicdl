@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from musicdl.contracts.plugin import format_instant, parse_instant
+
+from .quality import QUALITY_RANKS, parse_size
 
 
 # A catalogue name is a short lowercase token (``kw``, ``wy``, ``tx``, ``kg``).
@@ -100,12 +105,36 @@ class Candidate(BaseModel):
     bitrate: int | None = Field(default=None, ge=0, le=10000)
     format: str | None = Field(default=None, max_length=16)
     size: int | None = Field(default=None, ge=0, le=10**15)
+    qualities: tuple[str, ...] = ()
+    quality_sizes: dict[str, int] = Field(default_factory=dict)
     # Which catalogue answered for this recording, when the channel that
     # listed it did not answer out of an index of its own.  The supplied lx
     # sources all resolve against the same four catalogues, so a row that does
     # not say which one it came from is a row nothing can tell apart from the
     # same song on another one.  ``None`` when the channel produced it itself.
     platform: str | None = Field(default=None, max_length=16)
+    # The instant the URL this row was last resolved to stops being usable,
+    # when the source stated one.  It rides along with the row so freezing a
+    # selection context keeps it, and a download that starts after it resolves
+    # again instead of reusing a URL the source has already retired.
+    expires_at: str | None = Field(default=None, max_length=32)
+
+    @field_validator("expires_at", mode="before")
+    @classmethod
+    def clean_expiry(cls, value: Any) -> Any:
+        """Keep only an absolute instant; whatever is not one is simply absent.
+
+        A row is kept either way, because refusing it would drop a candidate the
+        source can still serve, so an expiry this process cannot read becomes
+        the same thing as one the row never stated: an unknown lifetime, which
+        the download re-resolves rather than trusts.  A ``ResolvedMedia`` expiry
+        is refused outright instead, because that answer is the one a download
+        would use.
+        """
+        if value is None or value == "":
+            return None
+        parsed = parse_instant(value)
+        return format_instant(parsed) if parsed is not None else None
 
     @field_validator("source_id", "source_version", "item_id", "format", mode="before")
     @classmethod
@@ -140,6 +169,51 @@ class Candidate(BaseModel):
             return None
         if _PLATFORM_TOKEN.fullmatch(cleaned) is None:
             raise ValueError("invalid platform")
+        return cleaned
+
+    @field_validator("qualities", mode="before")
+    @classmethod
+    def clean_qualities(cls, value: Any) -> tuple[str, ...]:
+        """Keep distinct, known quality keys in their supplied display order."""
+        if value is None:
+            return ()
+        if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+            raise ValueError("qualities must be a sequence")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            if not isinstance(raw, str):
+                continue
+            name = normalize_text(raw).casefold()
+            if not name or len(name) > 16 or name not in QUALITY_RANKS or name in seen:
+                continue
+            cleaned.append(name)
+            seen.add(name)
+            if len(cleaned) == 12:
+                break
+        return tuple(cleaned)
+
+    @field_validator("quality_sizes", mode="before")
+    @classmethod
+    def clean_quality_sizes(cls, value: Any) -> dict[str, int]:
+        """Retain only named qualities with a parseable, nonnegative size."""
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise ValueError("quality_sizes must be a mapping")
+        cleaned: dict[str, int] = {}
+        for raw_name, raw_size in value.items():
+            if not isinstance(raw_name, str):
+                continue
+            name = normalize_text(raw_name).casefold()
+            if not name or len(name) > 16 or name not in QUALITY_RANKS or name in cleaned:
+                continue
+            size = parse_size(raw_size)
+            if size is None:
+                continue
+            cleaned[name] = size
+            if len(cleaned) == 12:
+                break
         return cleaned
 
     @property

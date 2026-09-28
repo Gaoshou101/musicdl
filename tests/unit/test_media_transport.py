@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import ipaddress
 import socket
 import threading
@@ -7,8 +8,10 @@ import time
 import pytest
 
 from musicdl.contracts.plugin import EgressPolicy, ResolvedMedia
+from musicdl.media import DownloadEvent, download_candidate
 from musicdl.media.models import MediaError
 from musicdl.media.transport import SecureMediaTransport
+from musicdl.sources.models import Candidate
 
 # A body that really is an mp3: a version-4 ID3 header with no tag frames.  The
 # transport classifies the head of every response now, so the fixture has to
@@ -55,8 +58,9 @@ class FakeTLS:
         return sock
 
 
-def media(url="https://täst.example/song.mp3", *, size=None):
-    return ResolvedMedia(candidate_id="1", url=url, extension="mp3", media_type="audio/mpeg", declared_size=size)
+def media(url="https://täst.example/song.mp3", *, size=None, advisory=False):
+    return ResolvedMedia(candidate_id="1", url=url, extension="mp3", media_type="audio/mpeg",
+                         declared_size=size, size_is_advisory=advisory)
 
 
 def transport(raw=b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY):
@@ -353,6 +357,384 @@ def test_transport_rejects_a_size_mismatch():
     wrong_size = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\n" + frame
     instance, *_ = transport(wrong_size)
     error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_uses_content_length_as_declared_size_when_media_size_is_unknown():
+    instance, *_ = transport()
+
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert metadata.declared_size == len(ID3_BODY)
+    assert asyncio.run(read()) == ID3_BODY
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_keeps_declared_size_unknown_without_content_length():
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    assert metadata.declared_size is None
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ID3_BODY
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_accepts_an_advisory_size_the_server_exceeded():
+    # Measured 2026-09-27: a QQ 音乐 FLAC answer carried 15 bytes more than the
+    # `_types.flac.size` entry its 洛雪 source repeats.  A reference value is not
+    # a contract, so a longer body is accepted -- and the length that reaches
+    # the download record is the one the server really sent, never the
+    # reference.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+
+    metadata = asyncio.run(instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ID3_BODY
+    assert metadata.declared_size == len(ID3_BODY)
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_refuses_a_body_shorter_than_an_advisory_size():
+    # The same reference value still refuses a body that never reaches it: the
+    # short side is what "the file is incomplete" looks like.
+    frame = b"\xff\xfb\x90\x64" + b"\x00" * 5
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\n" + frame
+    instance, *_ = transport(raw)
+    error_code(instance.open(media(size=10, advisory=True), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_refuses_a_short_advisory_body_that_has_no_content_length():
+    # A chunked answer states no length of its own, so the short side of the
+    # reference value is the only size check left and it still has to hold.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+    metadata = asyncio.run(instance.open(media(size=25, advisory=True), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        with pytest.raises(MediaError, match="size_mismatch"):
+            async for _ in metadata.chunks:
+                pass
+
+    asyncio.run(read())
+
+
+def test_transport_reports_the_real_length_for_an_advisory_size_without_content_length():
+    # A chunked answer states no length of its own, so before the body arrives
+    # there is nothing to report -- and the reference value is not it either.
+    # What the metadata reports once the bytes have been delivered is the
+    # length the server really sent.
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n" + ID3_BODY
+    instance, *_ = transport(raw)
+    metadata = asyncio.run(instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",)))
+    assert metadata.declared_size is None
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    assert asyncio.run(read()) == ID3_BODY
+    assert metadata.declared_size == len(ID3_BODY)
+    assert metadata.declared_size != 4
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_refuses_a_descriptor_the_source_has_already_retired():
+    """The instant is part of the descriptor, so the socket is never opened.
+
+    A caller that held an answer across its deadline reaches the same refusal a
+    fresh resolve would have produced, and the fallback path re-resolves on it
+    instead of streaming a link the source has withdrawn.
+    """
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, *_ = transport(raw)
+    retired = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                            media_type="audio/mpeg", expires_at="2000-01-01T00:00:00Z")
+    error_code(instance.open(retired, policy=("xn--tst-qla.example",)), "media_url_expired")
+    assert sock.sent == b"" and not sock.closed
+
+
+def test_transport_still_streams_a_descriptor_whose_lifetime_is_ahead():
+    """A stated lifetime in the future is not a refusal, and an absent one never is."""
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    metadata = asyncio.run(instance.open(live, policy=("xn--tst-qla.example",)))
+    assert sock.sent.startswith(b"GET /song.mp3")
+    asyncio.run(metadata.aclose())
+
+
+def test_transport_refuses_a_url_that_dies_before_its_body_is_read(monkeypatch):
+    """The instant is checked again after the head, not only at the door.
+
+    A URL can be live when ``open`` is called and retired by the time the CDN
+    answers, because DNS and the TCP handshake happen after the door check.  No
+    body byte is read for it, and the caller sees the same ``media_url_expired``
+    a fresh resolve would have produced.
+    """
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    # Live at the door, dead once the request is on the wire.
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: bool(sock.sent))
+    error_code(instance.open(live, policy=("xn--tst-qla.example",)), "media_url_expired")
+
+
+def test_transport_asks_again_after_dns_before_the_request_is_written(monkeypatch):
+    """The instant is asked again with the address resolved, before the write.
+
+    DNS and the handshake happen after the door check, so a link can be retired
+    between the two.  Nothing is written to the socket in that case, which is
+    what the caller needs to tell a withdrawn link from a served one.
+    """
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, _tls, seen = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    # Live at the door, dead by the time the address is known.
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: "resolve" in seen)
+    error_code(instance.open(live, policy=("xn--tst-qla.example",)), "media_url_expired")
+    assert sock.sent == b""
+
+
+def test_transport_asks_again_inside_the_thread_that_writes_the_request(monkeypatch):
+    """The instant is asked where the write happens, not only where it is queued.
+
+    The request is handed to a worker thread, so a check made on the event loop
+    before the hand-off can pass while the URL is retired before that thread
+    runs.  The socket is left untouched in that case, which is what the caller
+    needs to tell a withdrawn link from a served one.
+    """
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n" + ID3_BODY
+    instance, sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    # Live while the event loop holds the descriptor, dead by the time the write
+    # reaches the thread that performs it.
+    loop_thread = threading.get_ident()
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: threading.get_ident() != loop_thread)
+    error_code(instance.open(live, policy=("xn--tst-qla.example",)), "media_url_expired")
+    assert sock.sent == b""
+
+
+def test_transport_stops_a_body_read_that_only_finishes_after_the_expiry(monkeypatch):
+    """A blocking read is asked about after it returns, not only before it starts.
+
+    The read begins while the URL is live and returns its bytes after the
+    instant has passed, so the chunk it produced is not handed over: only the
+    head that was read to classify the body reaches the caller.
+    """
+    body = ID3_BODY + b"\x00" * 4000
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: "
+           + str(len(body)).encode() + b"\r\n\r\n" + body)
+    instance, _sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    state = {"reads": 0, "expired": False}
+    factory = instance.response_factory
+
+    class LateRead:
+        """Counts the body reads and lets the second one outlive the instant."""
+
+        def __init__(self, fp):
+            self._inner = factory(fp)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def read(self, *args):
+            value = self._inner.read(*args)
+            state["reads"] += 1
+            if state["reads"] == 2:
+                state["expired"] = True
+            return value
+
+    instance.response_factory = LateRead
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: state["expired"])
+    metadata = asyncio.run(instance.open(live, policy=("xn--tst-qla.example",)))
+
+    async def read():
+        delivered = 0
+        with pytest.raises(MediaError, match="media_url_expired"):
+            async for _chunk in metadata.chunks:
+                delivered += 1
+        return delivered
+
+    assert asyncio.run(read()) == 1
+
+
+def test_transport_refuses_an_eof_read_that_only_finishes_after_the_expiry(monkeypatch):
+    """A transfer is not finished on a link that was retired while it read.
+
+    The last read returns end-of-body after the instant has passed.  The bytes
+    may be complete, but the URL is not, so the caller gets the same refusal and
+    re-resolves instead of being told the withdrawn link delivered a file.
+    """
+    body = ID3_BODY
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: "
+           + str(len(body)).encode() + b"\r\n\r\n" + body)
+    instance, _sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    state = {"expired": False}
+    factory = instance.response_factory
+
+    class LateEof:
+        def __init__(self, fp):
+            self._inner = factory(fp)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def read(self, *args):
+            value = self._inner.read(*args)
+            if value == b"":
+                state["expired"] = True
+            return value
+
+    instance.response_factory = LateEof
+    monkeypatch.setattr("musicdl.media.transport.has_expired",
+                        lambda expires_at, now=None: state["expired"])
+    metadata = asyncio.run(instance.open(live, policy=("xn--tst-qla.example",)))
+
+    async def read():
+        return b"".join([chunk async for chunk in metadata.chunks])
+
+    with pytest.raises(MediaError, match="media_url_expired"):
+        asyncio.run(read())
+
+
+def test_transport_stops_a_body_whose_url_dies_mid_stream(monkeypatch):
+    """The read that would extend the transfer asks again and refuses.
+
+    A body can outlast the instant its source named, so the bytes that already
+    arrived stay delivered while the download stops at the next read instead of
+    finishing on a link the source has withdrawn.
+    """
+    body = ID3_BODY + b"\x00" * 4000
+    raw = (b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: "
+           + str(len(body)).encode() + b"\r\n\r\n" + body)
+    instance, _sock, *_ = transport(raw)
+    live = ResolvedMedia(candidate_id="1", url="https://t\u00e4st.example/song.mp3", extension="mp3",
+                         media_type="audio/mpeg", expires_at="2999-01-01T00:00:00Z")
+    state = {"streamed": False}
+
+    def expired(expires_at, now=None):
+        return state["streamed"]
+
+    monkeypatch.setattr("musicdl.media.transport.has_expired", expired)
+    metadata = asyncio.run(instance.open(live, policy=("xn--tst-qla.example",)))
+
+    async def read():
+        seen = 0
+        with pytest.raises(MediaError, match="media_url_expired"):
+            async for chunk in metadata.chunks:
+                seen += len(chunk)
+                # The source's instant passes while the body is arriving.
+                state["streamed"] = True
+        return seen
+
+    assert 0 < asyncio.run(read()) < len(body)
+
+
+def test_transport_refuses_an_authoritative_size_the_server_exceeded():
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 25\r\n\r\n" + ID3_BODY + b"x" * 15
+    instance, *_ = transport(raw)
+    error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_refuses_an_authoritative_size_the_server_fell_short_of():
+    frame = b"\xff\xfb\x90\x64" + b"\x00" * 5
+    raw = b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 9\r\n\r\n" + frame
+    instance, *_ = transport(raw)
+    error_code(instance.open(media(size=10), policy=("xn--tst-qla.example",)), "size_mismatch")
+
+
+def test_transport_still_refuses_a_body_that_overruns_an_advisory_answers_own_header():
+    # `size_is_advisory` relaxes the source's reference value, not the
+    # transport's own honesty check: the body still has to be exactly the
+    # number of bytes the response itself announced.
+    class OverreadingResponse:
+        status = 200
+
+        def __init__(self):
+            self.body = ID3_BODY + b"x"
+
+        def begin(self):
+            pass
+
+        def getheaders(self):
+            return [("Content-Type", "audio/mpeg"), ("Content-Length", str(len(ID3_BODY)))]
+
+        def read(self, size=-1):
+            count = len(self.body) if size < 0 else size
+            value, self.body = self.body[:count], self.body[count:]
+            return value
+
+        def close(self):
+            pass
+
+    instance, *_ = transport()
+    instance.response_factory = lambda _sock: OverreadingResponse()
+    metadata = asyncio.run(instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        with pytest.raises(MediaError, match="size_mismatch"):
+            async for _ in metadata.chunks:
+                pass
+
+    asyncio.run(read())
+
+
+def test_transport_rejects_body_overrun_against_content_length_without_media_size():
+    class OverreadingResponse:
+        status = 200
+
+        def __init__(self):
+            self.body = ID3_BODY + b"x"
+
+        def begin(self):
+            pass
+
+        def getheaders(self):
+            return [("Content-Type", "audio/mpeg"), ("Content-Length", str(len(ID3_BODY)))]
+
+        def read(self, size=-1):
+            count = len(self.body) if size < 0 else size
+            value, self.body = self.body[:count], self.body[count:]
+            return value
+
+        def close(self):
+            pass
+
+    instance, *_ = transport()
+    instance.response_factory = lambda _sock: OverreadingResponse()
+    metadata = asyncio.run(instance.open(media(), policy=("xn--tst-qla.example",)))
+
+    async def read():
+        chunks = []
+        with pytest.raises(MediaError, match="size_mismatch"):
+            async for chunk in metadata.chunks:
+                chunks.append(chunk)
+        assert chunks == []
+
+    asyncio.run(read())
 
 
 def test_transport_publishes_the_container_the_bytes_name_over_a_disagreeing_label():
@@ -688,3 +1070,56 @@ def test_transport_refuses_an_ip_literal_without_the_grant():
 
     asyncio.run(metadata.aclose())
     assert seen["resolve"] == ("103.79.184.97", 443)
+
+
+@pytest.mark.parametrize("head", [
+    # The answer states its own length, so the real size is known up front.
+    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 10\r\n\r\n",
+    # A chunked answer states none, so the real size is only known once the
+    # body has been delivered -- and it is still the real size that is reported.
+    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n",
+])
+def test_advisory_size_reports_real_byte_count(tmp_path, head):
+    """An accepted reference size never reaches a record; the bytes do.
+
+    The panel's download report, the download record and the success message
+    all read ``DownloadResult.size_bytes``/``DownloadMetadata.declared_size``, so
+    a source's stale reference value must not be echoed into any of them -- and
+    the three have to agree with the bytes on disk whether or not the answer
+    bothered to state a length of its own.
+    """
+    raw = head + ID3_BODY
+    instance, *_ = transport(raw)
+
+    handed: dict[str, object] = {}
+
+    class Source:
+        async def download(self, _candidate):
+            metadata = await instance.open(media(size=4, advisory=True), policy=("xn--tst-qla.example",))
+            handed["metadata"] = metadata
+            return metadata
+
+        async def health(self):
+            return True
+
+    candidate = Candidate(source_id="source", source_version="v1", item_id="1",
+                          title="Song", artist="Artist", format="mp3")
+    events = []
+    result = asyncio.run(download_candidate(candidate, Source(), tmp_path, request_id="r",
+                                            record=events.append))
+
+    assert len(ID3_BODY) != 4
+    assert handed["metadata"].declared_size == len(ID3_BODY)
+    assert result.size_bytes == len(ID3_BODY)
+    assert (tmp_path / result.relative_path).stat().st_size == len(ID3_BODY)
+    # The bytes carry no length a container reader can trust, so the lenient
+    # duration policy says so and hands them over anyway; the success record is
+    # the one that has to describe the disk.
+    assert [(e.stage, e.status, e.error_code) for e in events] == [
+        ("duration", "unverified", "duration_unverified"),
+        ("download", "success", None),
+    ]
+    success = events[-1]
+    assert success.size_bytes == len(ID3_BODY)
+    assert success.relative_path == result.relative_path.as_posix()
+    assert success.sha256 == hashlib.sha256(ID3_BODY).hexdigest()

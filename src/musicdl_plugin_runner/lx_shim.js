@@ -40,7 +40,10 @@ const LX_EVENTS = Object.freeze({ request: "request", inited: "inited", updateAl
 const LX_ITEM_PREFIX = "lx:";
 const LX_MAX_CANDIDATES = 100;
 const LX_DEFAULT_QUALITY = "320k";
-const LX_QUALITIES = new Set(["128k", "192k", "320k", "flac", "flac24bit"]);
+const LX_QUALITY_RANKS = Object.freeze({
+  master: 70, atmos_plus: 65, flac24bit: 60, flac: 55, alac: 54, ape: 53,
+  wav: 52, aiff: 51, "320k": 30, "192k": 20, "128k": 10,
+});
 const LX_MEDIA_TYPES = Object.freeze({
   mp3: "audio/mpeg",
   flac: "audio/flac",
@@ -358,6 +361,62 @@ function lxSongId(item) {
   return "";
 }
 
+function lxQualityName(value) {
+  if (typeof value !== "string") return "";
+  const name = value.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(LX_QUALITY_RANKS, name) && name.length <= 16 ? name : "";
+}
+
+function lxQualityRank(value) {
+  const name = lxQualityName(value);
+  return name ? LX_QUALITY_RANKS[name] : 0;
+}
+
+function lxParseSize(value) {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(/^([0-9]+(?:\.[0-9]+)?)\s*(bytes?|b|kib|kb|mib|mb|gib|gb|tib|tb)?$/i);
+  if (!match) return null;
+  const units = { b: 1, byte: 1, bytes: 1, kb: 1024, kib: 1024,
+    mb: 1024 ** 2, mib: 1024 ** 2, gb: 1024 ** 3, gib: 1024 ** 3,
+    tb: 1024 ** 4, tib: 1024 ** 4 };
+  const multiplier = match[2] ? units[match[2].toLowerCase()] : 1;
+  const size = Math.round(Number(match[1]) * multiplier);
+  return Number.isSafeInteger(size) && size >= 0 ? size : null;
+}
+
+// How long a URL stays usable, when the source states it.  A source that
+// states nothing leaves it null: inventing a lifetime would either discard a
+// live URL or bless a dead one, and neither is this shim's call to make.
+function lxExpiry(value) {
+  if (!value || typeof value !== "object") return "";
+  return typeof value.expires_at === "string" ? value.expires_at.trim() : "";
+}
+
+function lxQualityInfo(item) {
+  const types = item && item._types && typeof item._types === "object" && !Array.isArray(item._types)
+    ? item._types : {};
+  const sizes = {};
+  const names = new Set();
+  for (const [rawName, detail] of Object.entries(types)) {
+    const name = lxQualityName(rawName);
+    if (!name) continue;
+    names.add(name);
+    const size = detail && typeof detail === "object" ? lxParseSize(detail.size) : null;
+    if (size !== null) sizes[name] = size;
+  }
+  const current = lxQualityName(item && item.type);
+  if (current) names.add(current);
+  const qualities = [...names].sort((left, right) => lxQualityRank(right) - lxQualityRank(left) || left.localeCompare(right)).slice(0, 12);
+  const currentSize = current && Object.prototype.hasOwnProperty.call(sizes, current) ? sizes[current] : null;
+  const bitrate = current === "128k" || current === "192k" || current === "320k" ? Number.parseInt(current, 10) : null;
+  const format = current === "flac" || current === "flac24bit" ? "flac"
+    : ["alac", "ape", "wav", "aiff"].includes(current) ? current : null;
+  // The lifetime the row itself states rides along with it, so freezing a
+  // selection context keeps the instant the URL it was resolved to expires.
+  return { qualities, sizes, bitrate, format, size: currentSize, expiry: lxExpiry(item) };
+}
+
 function lxCandidate(source, item) {
   if (!item || typeof item !== "object") return null;
   const songId = lxSongId(item);
@@ -366,6 +425,7 @@ function lxCandidate(source, item) {
   if (!songId || !title || !artist) return null;
   const album = lxText(item.albumName, 500);
   const duration = Number(item.duration);
+  const quality = lxQualityInfo(item);
   return {
     source_id: invocation.manifest.plugin_id,
     source_version: invocation.manifest.version,
@@ -374,9 +434,12 @@ function lxCandidate(source, item) {
     artist,
     album: album || null,
     duration: Number.isFinite(duration) && duration > 0 ? Math.min(Math.floor(duration), 86400) : null,
-    bitrate: null,
-    format: null,
-    size: null,
+    bitrate: quality.bitrate,
+    format: quality.format,
+    size: quality.size,
+    qualities: quality.qualities,
+    quality_sizes: quality.sizes,
+    expires_at: quality.expiry || null,
   };
 }
 
@@ -467,8 +530,13 @@ async function lxResolve(payload) {
   if (!candidate || typeof candidate !== "object") throw new Error("lx resolve requires a candidate");
   const decoded = lxDecodeItemId(candidate.item_id);
   if (decoded === null) throw new Error("candidate was not produced by this lx source");
-  const quality = typeof payload.quality === "string" && LX_QUALITIES.has(payload.quality)
-    ? payload.quality : LX_DEFAULT_QUALITY;
+  const supported = Array.isArray(candidate.qualities)
+    ? candidate.qualities.map(lxQualityName).filter(Boolean) : [];
+  const requested = typeof payload.quality === "string" ? lxQualityName(payload.quality) : "";
+  const quality = requested && supported.includes(requested) ? requested
+    : typeof payload.quality !== "string" && supported.includes(LX_DEFAULT_QUALITY) ? LX_DEFAULT_QUALITY
+    : supported.slice().sort((left, right) => lxQualityRank(right) - lxQualityRank(left)
+      || left.localeCompare(right))[0] || LX_DEFAULT_QUALITY;
   const answer = await lxHandler({
     source: decoded.source,
     action: "musicUrl",
@@ -477,12 +545,38 @@ async function lxResolve(payload) {
   const url = lxAnswerUrl(answer);
   if (!url) throw new Error("lx source returned no media URL");
   const extension = lxExtension(url, quality);
+  const expiresAt = lxExpiry(answer);
+  // A requested tier is intent, not evidence of the codec or bitrate served.
+  const answerQuality = answer && typeof answer === "object" ? lxQualityName(answer.quality) : "";
+  const suffix = new URL(url).pathname.split(".").pop().toLowerCase();
+  // A codec-bearing suffix contradicts an incompatible answer label. Keep
+  // bitrate/bit-depth only when the explicit answer agrees with that container.
+  const actual = suffix === "flac" ? (["flac", "flac24bit"].includes(answerQuality) ? answerQuality : "flac")
+    : suffix === "mp3" ? (["128k", "192k", "320k"].includes(answerQuality) ? answerQuality : "mp3")
+    : ["aac", "ogg"].includes(suffix) ? suffix
+    : suffix === "m4a" ? (answerQuality === "alac" ? "alac" : null)
+    : answerQuality || null;
+  // `_types[quality].size` belongs to the tier this resolve asked for, so it is
+  // only a reference for the bytes when the answer agrees that this tier is
+  // what came back.  A `.flac` URL answered under a `320k` label is a different
+  // rendering, and the `320k` number says nothing about it.
+  const declaredSize = actual === quality && candidate.quality_sizes
+    && typeof candidate.quality_sizes === "object"
+    ? lxParseSize(candidate.quality_sizes[quality]) : null;
   return {
     candidate_id: String(candidate.item_id),
     url,
     extension,
     media_type: LX_MEDIA_TYPES[extension],
-    declared_size: null,
+    declared_size: declaredSize,
+    // `_types[quality].size` is the source's own reference value, not a
+    // contract: measured 2026-09-27, one QQ 音乐 FLAC answer carried 15 bytes
+    // more than the entry its source repeats.  Marking it advisory lets the
+    // transport refuse a body shorter than the reference while accepting a
+    // longer one and reporting the length the server really sent.
+    size_is_advisory: declaredSize !== null,
+    quality: actual,
+    expires_at: expiresAt || null,
   };
 }
 

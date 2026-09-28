@@ -24,6 +24,7 @@ from musicdl.media.transport import SecureMediaTransport
 from musicdl.plugins.client import PluginClient
 from musicdl.plugins.source import PluginSource
 from musicdl.plugins.store import StoredPlugin
+from musicdl.sources.quality import QUALITY_REVISION
 from musicdl.sources.registry import SourceEntry, SourceRegistry
 from musicdl.sources.search import search_sources
 from musicdl.wecom.state import (ARTIFACT_TRANSITION_SCRIPT, CLAIM_ARTIFACT_SCRIPT, CONSUME_SCRIPT,
@@ -564,15 +565,21 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
     assert (artifact.size_bytes, artifact.target_relative_path) == (
         DECLARED_SIZE, EXPECTED_RELATIVE.as_posix())
     assert artifact.sha256 == hashlib.sha256(MEDIA_BYTES).hexdigest()
-    assert effect.status == "done" and effect.result == {"ok": True}
+    assert effect.status == "done" and effect.result == {
+        "ok": True, "requested_quality": None, "actual_quality": "mp3",
+        "quality_revision": QUALITY_REVISION, "quality_downgraded": False}
     assert not list(slice_.media_root.rglob("*.part"))
 
     # WeCom saw the selection prompt and then the recorded success notice.
     assert slice_.wecom.sent[0][0] == FROM_USER
     assert "1. Song — Artist" in slice_.wecom.sent[0][1] and "回复序号下载。" in slice_.wecom.sent[0][1]
     assert slice_.wecom.sent[1][0] == FROM_USER
-    assert slice_.wecom.sent[1][1].startswith("下载成功：")
-    assert Path(slice_.wecom.sent[1][1].removeprefix("下载成功：")) == EXPECTED_RELATIVE
+    notice = slice_.wecom.sent[1][1]
+    assert notice.startswith("下载成功：")
+    relative_path, separator, metadata = notice.removeprefix("下载成功：").rpartition("（")
+    assert separator == "（"
+    assert Path(relative_path) == EXPECTED_RELATIVE
+    assert metadata == "MP3 · 13 B）"
 
     # Both stream messages were acknowledged only after their effects were recorded.
     assert slice_.redis.acks == [(slice_.state.message_stream, slice_.message_worker.group, "1-0"),

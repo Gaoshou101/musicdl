@@ -6,8 +6,8 @@ import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from musicdl.contracts.plugin import PluginRequest
-from musicdl.media.models import DownloadMetadata
+from musicdl.contracts.plugin import PluginRequest, has_expired
+from musicdl.media.models import DownloadMetadata, MediaError
 from musicdl.sources.models import Candidate, normalize_text
 from .client import PluginClient
 from .store import StoredPlugin
@@ -71,14 +71,39 @@ class PluginSource:
             return self.resolve_stream_timeout_ms
         return max(1, min(_MAX_TIMEOUT_MS, math.ceil(float(getattr(self.client, "timeout", 30.0)) * 1000)))
 
-    async def download(self, candidate: Candidate) -> DownloadMetadata:
+    async def download(self, candidate: Candidate, *, quality: str | None = None) -> DownloadMetadata:
         """Resolve one selected candidate, then stream it through the main-owned transport."""
         if self.transport is None:
             raise RuntimeError("download_failed")
         deadline = time.monotonic() + self._download_budget_ms() / 1000
-        media = await self.client.resolve(self.stored, candidate, timeout_ms=_remaining_ms(deadline))
-        if media.candidate_id != candidate.item_id:
-            raise RuntimeError("candidate_mismatch")
+
+        async def resolve():
+            return await self.client.resolve(self.stored, candidate, timeout_ms=_remaining_ms(deadline),
+                                             **({"quality": quality} if quality is not None else {}))
+
+        def usable(media):
+            if media.candidate_id != candidate.item_id:
+                raise RuntimeError("candidate_mismatch")
+            return not has_expired(media.expires_at)
+
+        media = await resolve()
+        if not usable(media):
+            # A descriptor the source has already retired is never opened: the
+            # answer is resolved once more so a live URL is streamed, and only a
+            # second retired answer ends the attempt with the stable code the
+            # fallback path already knows how to re-resolve on.
+            try:
+                media = await resolve()
+            except MediaError:
+                raise
+            except Exception as exc:
+                # The URL that prompted the second resolve is dead either way, so
+                # a resolve that fails outright keeps the stable code the
+                # fallback path already re-resolves on rather than collapsing
+                # into the opaque ``download_failed`` an unexpected error leaves.
+                raise MediaError("media_url_expired") from exc
+            if not usable(media):
+                raise MediaError("media_url_expired")
         return await self.transport.open(media, policy=self.stored.manifest.egress,
                                          timeout_ms=_remaining_ms(deadline))
 

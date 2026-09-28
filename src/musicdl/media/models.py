@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal, Protocol, get_args
 
 from musicdl.sources.models import Candidate
+from musicdl.sources.quality import QUALITY_REVISION
 from musicdl.sources.search import SearchResult
 
 MAX_MEDIA_BYTES = 500 * 1024 * 1024
@@ -20,7 +21,7 @@ _DOWNLOAD_CODES = frozenset({
     # build does not know.
     "incomplete_audio", "duration_unverified", "invalid_verify_duration",
     "media_dns_failed", "media_address_denied", "media_connect_failed", "media_tls_failed",
-    "media_timeout", "media_redirect_denied", "media_response_invalid",
+    "media_timeout", "media_redirect_denied", "media_response_invalid", "media_url_expired",
 })
 Language = Literal["华语", "欧美", "日韩", "未知"]
 LANGUAGES: frozenset[str] = frozenset(get_args(Language))
@@ -55,13 +56,64 @@ class _CloseOnce:
             raise cancellation
 
 
-@dataclass(frozen=True)
+class DeclaredSize:
+    """The size a download is answerable for, filled in while its bytes arrive.
+
+    A size a source states is a reference rather than a contract -- measured
+    2026-09-27, a QQ 音乐 FLAC answer carried 15 bytes more than the entry its
+    洛雪 source repeats -- so the number a download is answerable for is the one
+    the server really sent.  A transport that was handed only a reference
+    learns that number while the body streams, and everything downstream (the
+    download record, the panel, the success message) reads it afterwards, so
+    the value has to be shared with the stream instead of fixed up front.  An
+    authoritative size needs no cell: it is known before the first byte.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: int | None = None) -> None:
+        self.value = value
+
+
 class DownloadMetadata:
-    chunks: AsyncIterable[bytes]
-    extension: str | None = None
-    media_type: str | None = None
-    declared_size: int | None = None
-    _close_once: _CloseOnce | None = field(default=None, repr=False, compare=False)
+    """The bytes one download hands over, and the size they are answerable for.
+
+    Read-only to callers: ``declared_size`` is a property and the only writer is
+    the stream itself, which records the length it really delivered.
+    """
+
+    __slots__ = ("chunks", "extension", "media_type", "quality", "expires_at",
+                 "_declared_size", "_close_once")
+
+    def __init__(
+        self,
+        chunks: AsyncIterable[bytes],
+        extension: str | None = None,
+        media_type: str | None = None,
+        declared_size: int | DeclaredSize | None = None,
+        _close_once: _CloseOnce | None = None,
+        quality: str | None = None,
+        expires_at: str | None = None,
+    ) -> None:
+        self.chunks = chunks
+        self.extension = extension
+        self.media_type = media_type
+        self.quality = quality
+        # The instant this stream's URL stops being usable, copied from the
+        # descriptor the source answered with.  A descriptor already past it is
+        # refused rather than streamed, so a caller re-resolves instead.
+        self.expires_at = expires_at
+        self._declared_size = declared_size if isinstance(declared_size, DeclaredSize) else DeclaredSize(declared_size)
+        self._close_once = _close_once
+
+    @property
+    def declared_size(self) -> int | None:
+        """The length this download really is, once it has been delivered."""
+        return self._declared_size.value
+
+    def note_size(self, value: int) -> None:
+        """Record the length the bytes turned out to be."""
+        self._declared_size.value = value
 
     async def aclose(self) -> None:
         if self._close_once is not None:
@@ -159,7 +211,7 @@ class ArtifactStore(Protocol):
 
 
 class DownloadSource(Protocol):
-    async def download(self, candidate: Candidate) -> DownloadMetadata: ...
+    async def download(self, candidate: Candidate, *, quality: str | None = None) -> DownloadMetadata: ...
     async def health(self) -> bool: ...
 
 
@@ -176,6 +228,20 @@ class DownloadResult:
     # caller that shows them never repeats a channel's claim as a measurement.
     duration_seconds: float | None = None
     bitrate_kbps: int | None = None
+    quality: str | None = None
+    quality_downgraded: bool = False
+    # Which revision of the actual-quality verification produced `quality`.
+    # Persisted with the download record so a later, stricter verifier can spot
+    # a verdict it no longer stands behind and re-check it.
+    quality_revision: int = QUALITY_REVISION
+    # The tier the caller asked for and the tier the bytes turned out to be.
+    # ``actual_quality`` repeats the source's own label while the verified
+    # container can carry it and names that container otherwise, so a label the
+    # bytes contradict never reaches the report; it is never read back out of
+    # the request, so a source that quietly answers a lossless request with a
+    # lossy stream is reported as the downgrade it is.
+    requested_quality: str | None = None
+    actual_quality: str | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +257,11 @@ class DownloadEvent:
     sha256: str | None = None
     relative_path: str | None = None
     healthy: bool | None = None
+    # The tier the download asked for and the tier the bytes turned out to be,
+    # reported side by side: a source that quietly serves a lossy stream for a
+    # lossless request is a fact about the answer, not a guess about the request.
+    requested_quality: str | None = None
+    actual_quality: str | None = None
 
 
 @dataclass(frozen=True)

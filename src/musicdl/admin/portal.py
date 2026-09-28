@@ -15,6 +15,7 @@ from musicdl.config import AppSettings
 from musicdl.ai.diagnose import probe_endpoint
 from musicdl.media import download_candidate, download_with_fallback
 from musicdl.media.language import resolve_language
+from musicdl.media.probe import ProbeCache, probe_candidates
 from musicdl.media.models import MediaError
 from musicdl.admin.source_fetch import (
     SOURCE_FETCH_CONCURRENCY,
@@ -639,6 +640,21 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                              "catalogue": _shared_catalogue(service.registry, status.source_id)}
                             for status in result.statuses]}
 
+    probe_cache = ProbeCache()
+
+    @router.post("/search/probe")
+    async def search_probe(body: dict, request: Request):
+        mutate(request)
+        raw = body.get("candidates")
+        if not isinstance(raw, list) or len(raw) > 10:
+            raise HTTPException(400, "invalid_probe_request")
+        try:
+            candidates = [Candidate.model_validate(item) for item in raw]
+        except ValidationError:
+            raise HTTPException(400, "invalid_probe_request") from None
+        service = active_runtime()
+        return await probe_candidates(candidates, getattr(service, "resolvers", {}) or {}, cache=probe_cache)
+
     @router.post("/download")
     async def download(body: dict, request: Request):
         """Download one candidate the search just listed, into the media root.
@@ -684,7 +700,9 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                     "relative_path": str(result.relative_path).replace(os.sep, "/"),
                     "sha256": result.sha256, "size_bytes": result.size_bytes,
                     "media_type": result.media_type, "extension": result.extension,
-                    "language": getattr(result.language, "value", result.language)}
+                    "language": getattr(result.language, "value", result.language),
+                    "requested_quality": getattr(result, "requested_quality", None),
+                    "actual_quality": getattr(result, "actual_quality", None)}
 
         def failed(code: str) -> HTTPException:
             """The refusal to return, and one line for the service-log window.
