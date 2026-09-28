@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import re
 import unicodedata
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 from typing import Any, Literal
 from uuid import UUID
@@ -145,6 +146,116 @@ class PluginResponse(BaseModel):
         return self
 
 
+# Annex B of ISO 8601 puts a decimal fraction on the lowest field the text
+# states, and a fraction is read here only where the text put it: on the seconds
+# field.  Python's own reader puts a fraction on the seconds field whatever
+# field the text used -- measured, it reads ``12:00.5``, half a minute past
+# twelve, as ``12:00:00.5``, 29.5 s early, and a URL would be refused for its
+# last half minute -- and it reads an offset's own fraction differently for
+# ``+`` and ``-``: ``12:00:00-00:00:00.9`` comes back as a zero offset, 0.9 s
+# early, while ``+00:00:00.9`` comes back 0.9 s late.  So the spelling is fixed
+# here, and every shape outside it reads as no instant at all.  The two hosts
+# read that choice differently on purpose: ``ResolvedMedia`` refuses an expiry it
+# cannot read outright, because that answer is the one a download would use,
+# while a search row keeps its candidate and clears the field, because refusing
+# the row would drop a candidate the source can still serve and an empty
+# lifetime is the rule this branch already applies to a row that states none.
+_INSTANT = re.compile(
+    r"(?P<date>\d{4}-?\d{2}-?\d{2})"
+    r"[Tt ](?P<hour>\d{2})"
+    r"(?::?(?P<minute>\d{2})"
+    r"(?::?(?P<second>\d{2})(?P<fraction>[.,]\d+)?)?)?"
+    r"(?P<offset>Z|[+-]\d{2}(?::?\d{2})?(?::?\d{2})?)?"
+)
+
+
+def parse_instant(value: Any) -> datetime | None:
+    """The absolute instant a timestamp names, or ``None`` when none is stated.
+
+    A descriptor carries an expiry the source stated, never one this process
+    invented: a naive timestamp, an unparseable string and a missing field all
+    mean "no stated lifetime", which is different from "expired".
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > 32:
+        return None
+    stated = _INSTANT.fullmatch(text)
+    if stated is None:
+        return None
+    # The instant is read back from a spelling this process writes itself, so
+    # the reading no longer depends on how much of a shape Python's own reader
+    # happens to accept.
+    date = stated.group("date").replace("-", "")
+    hour = stated.group("hour")
+    minute = stated.group("minute") or "00"
+    second = stated.group("second") or "00"
+    fraction = stated.group("fraction") or ""
+    offset = stated.group("offset") or ""
+    if offset == "Z":
+        offset = "+00:00"
+    try:
+        parsed = datetime.fromisoformat(
+            f"{date[:4]}-{date[4:6]}-{date[6:8]}T{hour}:{minute}:{second}{fraction}{offset}")
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    # The reading is taken in UTC first, so the round-up below happens on the
+    # instant that is returned rather than on a wall clock that a later
+    # conversion could move past the ceiling again.
+    try:
+        parsed = parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        # The instant names a UTC value this type cannot hold --
+        # ``9999-12-31T23:59:59.999999-01:00`` does -- so no readable lifetime
+        # is stated, and none is enforced.
+        return None
+    # A datetime holds microseconds and nothing finer, and dropping the extra
+    # digits of a finer fraction reads the instant as *earlier* than the source
+    # wrote it: a URL whose source said it dies at ``12:00:00.0000001Z`` would
+    # be refused from ``12:00:00`` on, losing its last 100 ns of life.  The
+    # stated instant is a lower bound on the lifetime, so a nonzero tail rounds
+    # up by the smallest step a datetime has: at most one fraction reaches here
+    # and it sits on the seconds field, so the instant is never read as earlier
+    # than it was written and never as more than a microsecond later than it
+    # was.  A fraction of zeros is not precision and does not round.
+    tail = fraction[1:]
+    if not tail[6:].strip("0"):
+        return parsed
+    # At the representable ceiling there is no later instant to name, and the
+    # truncated value would be an instant the text never stated -- earlier by
+    # that same step -- so the text is not read at all, exactly as an offset
+    # fraction is not read.
+    try:
+        return parsed + timedelta(microseconds=1)
+    except OverflowError:
+        return None
+
+
+def format_instant(value: datetime) -> str:
+    """One canonical spelling, so two equal instants compare as equal text.
+
+    Sub-second precision is kept.  An expiry the source stated as
+    ``12:00:00.900Z`` is a real lifetime, and stamping it as ``12:00:00Z``
+    refuses a link that is live for another 900 ms.  A whole second keeps the
+    shorter spelling, so the common case reads the way it always has.
+    """
+    moment = value.astimezone(timezone.utc)
+    if moment.microsecond == 0:
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def has_expired(expires_at: str | None, now: datetime | None = None) -> bool:
+    """True only when a stated expiry has passed; an unstated one never expires."""
+    parsed = parse_instant(expires_at)
+    if parsed is None:
+        return False
+    return parsed <= (now or datetime.now(timezone.utc))
+
+
 class ResolvedMedia(BaseModel):
     """One playable media URL a plugin resolved for a confirmed candidate.
 
@@ -170,6 +281,22 @@ class ResolvedMedia(BaseModel):
     # an exact equality -- one byte more is still a refusal.
     size_is_advisory: StrictBool = False
     quality: StrictStr | None = Field(default=None, max_length=16, pattern=r"^[A-Za-z0-9_+-]{1,16}$")
+    # How long the resolved URL stays usable, when the source states it.  A
+    # selection context frozen from this descriptor keeps the instant, so a
+    # download that starts after it must resolve again rather than try a URL
+    # the source already considers dead.  A source that states nothing leaves
+    # this empty, and an empty lifetime is never treated as expired.
+    expires_at: StrictStr | None = Field(default=None, max_length=32)
+
+    @field_validator("expires_at", mode="before")
+    @classmethod
+    def expiry_is_an_absolute_instant(cls, value: Any) -> Any:
+        if value is None or value == "":
+            return None
+        parsed = parse_instant(value)
+        if parsed is None:
+            raise ValueError("expires_at must be an absolute instant")
+        return format_instant(parsed)
 
     @field_validator("url", mode="before")
     @classmethod

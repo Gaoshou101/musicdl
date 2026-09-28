@@ -96,6 +96,7 @@ class PluginClient:
         candidate: Candidate,
         *,
         timeout_ms: int | None = None,
+        quality: str | None = None,
     ) -> ResolvedMedia:
         request_timeout_ms = self._normalize_timeout_ms(timeout_ms, self.timeout)
         try:
@@ -104,7 +105,8 @@ class PluginClient:
                 request_id=uuid4(),
                 operation="resolve",
                 timeout_ms=request_timeout_ms,
-                payload={"candidate": candidate.public_representation},
+                payload={"candidate": candidate.public_representation,
+                         **({"quality": quality} if quality is not None else {})},
             )
             response = await self.invoke(stored, request)
         except asyncio.CancelledError:

@@ -274,6 +274,7 @@ def test_resolved_media_accepts_supported_descriptor_formats(extension, media_ty
         "declared_size": 123,
         "quality": None,
         "size_is_advisory": False,
+        "expires_at": None,
     }
 
 
@@ -370,12 +371,124 @@ def test_resolved_media_rejects_invalid_declared_sizes(declared_size):
         _resolved_media(declared_size=declared_size)
 
 
-def test_resolved_media_is_frozen_and_uses_only_the_six_contract_fields():
+def test_resolved_media_is_frozen_and_uses_only_the_eight_contract_fields():
     media = _resolved_media()
 
     with pytest.raises(ValidationError):
         media.extension = "flac"
-    assert set(media.model_dump()) == {"candidate_id", "url", "extension", "media_type", "declared_size", "quality", "size_is_advisory"}
+    assert set(media.model_dump()) == {
+        "candidate_id", "url", "extension", "media_type", "declared_size", "quality",
+        "size_is_advisory", "expires_at"}
+
+
+def test_resolved_media_keeps_only_an_absolute_expiry_instant():
+    # A stated lifetime rides along; anything that is not an absolute instant
+    # is refused outright rather than silently read as "no lifetime".
+    from musicdl.contracts.plugin import ResolvedMedia
+
+    assert _resolved_media(expires_at="2026-09-28T01:02:03Z").expires_at == "2026-09-28T01:02:03Z"
+    # One canonical spelling, so an offset and its UTC equivalent compare equal.
+    assert _resolved_media(expires_at="2026-09-28T09:02:03+08:00").expires_at == "2026-09-28T01:02:03Z"
+    assert _resolved_media(expires_at=None).expires_at is None
+    assert _resolved_media(expires_at="").expires_at is None
+    for value in ("soon", "2026-09-28T01:02:03", "2026-09-28", 12345, "x" * 33):
+        with pytest.raises(ValidationError):
+            _resolved_media(expires_at=value)
+
+
+def test_resolved_media_keeps_a_sub_second_expiry_instant():
+    # An instant is not rounded down into the second it falls in: a URL whose
+    # source said it dies at 12:00:00.900 is live until then, and stamping it as
+    # 12:00:00 refuses it for its last 900 ms -- a live link this process would
+    # not use.  The fraction is part of the lifetime the source stated.
+    from datetime import datetime, timedelta, timezone
+
+    from musicdl.contracts.plugin import has_expired, parse_instant
+
+    moment = datetime(2026, 9, 28, 12, 0, 0, 900000, tzinfo=timezone.utc)
+    stamped = _resolved_media(expires_at="2026-09-28T12:00:00.900Z").expires_at
+    assert parse_instant(stamped) == moment
+    assert not has_expired(stamped, now=moment - timedelta(milliseconds=500))
+    assert has_expired(stamped, now=moment)
+
+
+def test_a_stated_instant_is_never_read_as_earlier_than_it_was_written():
+    # A datetime holds microseconds and nothing finer, so the unrepresentable
+    # tail of a stated expiry has to round up: ``12:00:00.0000001`` is still in
+    # the future at ``12:00:00``, and reading it as that whole second refused a
+    # live URL for the last 100 ns of its life.
+    from datetime import datetime, timedelta, timezone
+
+    from musicdl.contracts.plugin import has_expired, parse_instant
+
+    second = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    stamped = _resolved_media(expires_at="2026-09-28T12:00:00.0000001Z").expires_at
+    parsed = parse_instant(stamped)
+    assert parsed is not None and parsed > second
+    assert not has_expired(stamped, now=second)
+    assert not has_expired(stamped, now=parsed - timedelta(microseconds=1))
+    assert has_expired(stamped, now=parsed)
+    # A fraction a datetime can hold keeps the value the source wrote, and a
+    # trailing zero is not precision.
+    exact = datetime(2026, 9, 28, 12, 0, 0, 123456, tzinfo=timezone.utc)
+    assert parse_instant("2026-09-28T12:00:00.1234560Z") == exact
+    assert _resolved_media(expires_at="2026-09-28T12:00:00.1234560Z").expires_at == (
+        "2026-09-28T12:00:00.123456Z")
+    # A fraction on the offset is precision this process cannot read, and the
+    # error it would make has no safe direction: Python reads
+    # ``12:00:00-00:00:00.9`` as a zero offset, naming an instant a whole 0.9 s
+    # earlier than the source wrote, while ``+00:00:00.9`` is read 0.9 s late.
+    # An instant stated that way states no lifetime this process can read, so
+    # no URL is refused on a reading it cannot stand behind -- while a stated
+    # expiry it cannot read at all is refused outright rather than dropped.
+    assert parse_instant("2026-09-28T12:00.1-00:00.0000001") is None
+    assert parse_instant("2026-09-28T12:00:00-00:00:00.9") is None
+    # A fraction of zeros on the offset is refused the same way: the shape is
+    # refused, not the value, so an offset is read only without one.
+    assert parse_instant("2026-09-28T12:00:00+00:00:00.0") is None
+    assert not has_expired("2026-09-28T12:00:00-00:00:00.9",
+                           now=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    with pytest.raises(ValidationError):
+        _resolved_media(expires_at="2026-09-28T12:00:00-00:00:00.9")
+    # The latest instant a datetime can name is read when it is stated exactly.
+    # Stated with a fraction past it there is no later instant to round up to,
+    # and standing on the truncated value would name an instant the text never
+    # stated -- earlier by that same step -- so the text is not read; neither
+    # case may raise out of a contract validator.
+    assert parse_instant("9999-12-31T23:59:59.999999Z") == datetime.max.replace(
+        tzinfo=timezone.utc)
+    assert parse_instant("9999-12-31T23:59:59.9999991Z") is None
+    # Neither may naming a UTC instant this type cannot hold: the reading is
+    # unavailable, not fatal.
+    assert parse_instant("9999-12-31T23:59:59.999999-01:00") is None
+    assert not has_expired("9999-12-31T23:59:59.999999-01:00",
+                           now=datetime(9999, 1, 1, tzinfo=timezone.utc))
+
+
+def test_a_stated_fraction_is_read_on_the_field_it_sits_on():
+    # ISO 8601 puts a decimal fraction on the lowest field the text states.
+    # Python's reader puts it on the seconds field whatever field the text used:
+    # measured, ``12:00.5`` -- half a minute past twelve -- came back as
+    # ``12:00:00.5``, 29.5 s early, and the URL was refused for its last half
+    # minute.  The instant is read from a spelling this process writes itself,
+    # so a fraction is read only where the text put it.
+    from datetime import datetime, timezone
+
+    from musicdl.contracts.plugin import parse_instant
+
+    assert parse_instant("2026-09-28T12:00.5+00:00") is None
+    assert parse_instant("2026-09-28T12.5+00:00") is None
+    assert parse_instant("20260928T1200.5+00:00") is None
+    # ``+`` is the offset's own sign, so a text where it also stands in for the
+    # date/time separator states no instant this process reads.
+    assert parse_instant("2026-09-28+12:00:00.1234567+00:00") is None
+    # A fraction on the seconds field is still read, exactly, in every spelling
+    # that puts it there.
+    half = datetime(2026, 9, 28, 12, 0, 0, 500000, tzinfo=timezone.utc)
+    assert parse_instant("2026-09-28T12:00:00.5Z") == half
+    assert parse_instant("20260928T120000.5Z") == half
+    assert parse_instant("2026-09-28 12:00:00.5Z") == half
+    assert parse_instant("2026-09-28T12:00:00,5Z") == half
 
 
 @pytest.mark.parametrize("quality", ["", "bad value", "quality!", "q" * 17])

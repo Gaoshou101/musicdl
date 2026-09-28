@@ -134,6 +134,9 @@ export type DownloadReport = {
   media_type: string
   extension: string
   language: string
+  /** The tier the download asked for, and the tier the bytes turned out to be. */
+  requested_quality?: string | null
+  actual_quality?: string | null
 }
 
 export type CheckState = 'ok' | 'failed' | 'unavailable' | 'not_required'

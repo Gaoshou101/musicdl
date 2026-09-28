@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import errno
 import hashlib
+import inspect
 import os
 import stat
 import tempfile
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 
+from musicdl.contracts.plugin import has_expired
 from musicdl.sources.models import Candidate
+from musicdl.sources.quality import served_quality
 
 from .models import (
     MAX_MEDIA_BYTES,
@@ -55,9 +58,13 @@ def _record_failure(
     request_id: str,
     size: int,
     code: str,
+    quality: str | None = None,
 ) -> None:
+    # A refused attempt has no answer to describe, so the failure reports only
+    # the tier that was asked for and leaves ``actual_quality`` empty.
     emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
-                                     "download", "failed", error_code=code, size_bytes=size or None))
+                                     "download", "failed", error_code=code, size_bytes=size or None,
+                                     requested_quality=quality))
 
 
 def _path_too_long(error: BaseException) -> bool:
@@ -121,14 +128,17 @@ def _verify_artifact(path: Path, reservation: ArtifactRecord) -> tuple[int, str]
     return size, digest
 
 
-def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation: ArtifactRecord, language: str | None) -> DownloadResult:
+def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation: ArtifactRecord, language: str | None, *, allow_format_change: bool = False) -> DownloadResult:
     size, digest = _verify_artifact(target, reservation)
     extension = reservation.extension if reservation.extension.startswith(".") else "." + reservation.extension
-    expected = "." + candidate.format.lstrip(".").lower()
-    if extension.lower() != expected or reservation.candidate_id != candidate.item_id:
+    expected = target.suffix.lower()
+    if (extension.lower() != expected or reservation.candidate_id != candidate.item_id or
+            (not allow_format_change and extension.lower() != "." + str(candidate.format or "").lstrip(".").lower())):
         raise MediaError("artifact_uncertain")
+    # The bytes on disk are the answer, so a replay names the container it really
+    # holds rather than reporting less than the fresh download that wrote it.
     return DownloadResult(target.relative_to(root), digest, size, reservation.media_type, extension,
-                          normalize_language(language))
+                          normalize_language(language), actual_quality=extension.lstrip(".").lower() or None)
 
 
 def _fsync_path(path: Path) -> None:
@@ -191,6 +201,7 @@ async def _resume_reservation(
     fence: int | None,
     ttl: int,
     language: str | None,
+    quality: str | None = None,
 ) -> DownloadResult | None:
     temporary, target = _safe_artifact_paths(root, reservation)
     if reservation.candidate_id != candidate.item_id:
@@ -198,7 +209,7 @@ async def _resume_reservation(
     if reservation.state == "uncertain":
         raise MediaError("artifact_uncertain")
     if reservation.state == "published":
-        return _replayed_result(root, target, candidate, reservation, language)
+        return _replayed_result(root, target, candidate, reservation, language, allow_format_change=quality is not None)
     if reservation.state == "prepared":
         if temporary.exists() or temporary.is_symlink() or target.exists() or target.is_symlink():
             raise MediaError("artifact_uncertain")
@@ -218,8 +229,19 @@ async def _resume_reservation(
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
-        return _replayed_result(root, target, candidate, reservation, language)
+        return _replayed_result(root, target, candidate, reservation, language, allow_format_change=quality is not None)
     raise MediaError("artifact_uncertain")
+
+
+async def source_download(source: DownloadSource, candidate: Candidate, *,
+                          quality: str | None = None) -> DownloadMetadata:
+    """Omit the optional keyword for old resolvers without masking their errors."""
+    parameters = inspect.signature(source.download).parameters
+    supports_quality = "quality" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    if quality is not None and supports_quality:
+        return await source.download(candidate, quality=quality)
+    return await source.download(candidate)
 
 
 async def download_candidate(
@@ -228,6 +250,9 @@ async def download_candidate(
     media_root: str | Path,
     *,
     request_id: str,
+    quality: str | None = None,
+    resolved_metadata: DownloadMetadata | None = None,
+    prepare: Callable[[str, str], Awaitable[ArtifactRecord | None]] | None = None,
     reservation: ArtifactRecord | None = None,
     artifact_store: ArtifactStore | None = None,
     owner: str | None = None,
@@ -242,15 +267,20 @@ async def download_candidate(
     cleanup_event_emitted = False
     size = 0
     digest = hashlib.sha256()
-    metadata: DownloadMetadata | None = None
+    metadata: DownloadMetadata | None = resolved_metadata
     primary_error: BaseException | None = None
     try:
+        if resolved_metadata is not None and has_expired(resolved_metadata.expires_at):
+            # A held descriptor is only reused while its URL is still alive.
+            # Refusing here makes the caller resolve again instead of streaming
+            # a URL the source has already retired.
+            raise MediaError("media_url_expired")
         root = Path(media_root).resolve(strict=False)
         root.mkdir(parents=True, exist_ok=True)
         if reservation is not None:
             replayed = await _resume_reservation(root, candidate, reservation, artifact_store,
                                                  owner=owner, fence=fence, ttl=0,
-                                                 language=language)
+                                                 language=language, quality=quality)
             if replayed is not None:
                 return replayed
             temp_path, target = _safe_artifact_paths(root, reservation)
@@ -260,7 +290,7 @@ async def download_candidate(
                 flags |= os.O_BINARY
             fd = os.open(os.fspath(temp_path), flags, 0o600)
             try:
-                metadata = await source.download(candidate)
+                metadata = metadata or await source_download(source, candidate, quality=quality)
             except BaseException:
                 # Close the reserved staging file before the failure unwinds, otherwise the
                 # cleanup unlink cannot remove it and a later retry of the job is refused as
@@ -271,7 +301,7 @@ async def download_candidate(
                     pass
                 raise
         else:
-            metadata = await source.download(candidate)
+            metadata = metadata or await source_download(source, candidate, quality=quality)
             fd, temp_name = tempfile.mkstemp(prefix=".musicdl-", suffix=".part", dir=root)
             temp_path = Path(temp_name)
         header = bytearray()
@@ -318,7 +348,19 @@ async def download_candidate(
             raise MediaError("empty_download")
         if metadata.declared_size is not None and metadata.declared_size != size:
             raise MediaError("size_mismatch")
-        extension, media_type = validate_media(bytes(header), metadata, candidate.format)
+        extension, media_type = validate_media(bytes(header), metadata,
+                                                None if quality is not None else candidate.format)
+
+        if reservation is None and prepare is not None:
+            reservation = await prepare(extension, media_type)
+            if reservation is not None:
+                staging, target = _safe_artifact_paths(root, reservation)
+                staging.parent.mkdir(parents=True, exist_ok=True)
+                if staging.exists() or staging.is_symlink():
+                    raise MediaError("artifact_uncertain")
+                os.link(temp_path, staging)
+                temp_path.unlink()
+                temp_path = staging
 
         if reservation is not None:
             try:
@@ -380,27 +422,35 @@ async def download_candidate(
                     pass
             temp_path = None
             relative = target.relative_to(root)
+        # The bytes on disk prove their own container, so an answer that named no
+        # tier still reports one and the report is never emptier than the verified
+        # file.  ``quality`` keeps its separate meaning -- the tier the source
+        # stated, empty when it stated none -- because the downgrade verdict is
+        # derived from stated tiers only; a container is not a downgrade proof.
+        actual_quality = served_quality(metadata.quality, extension)
         event = DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                               "download", "success", size_bytes=size, sha256=digest.hexdigest(),
-                              relative_path=relative.as_posix())
+                              relative_path=relative.as_posix(),
+                              requested_quality=quality, actual_quality=actual_quality)
         emit_event(record, event)
         return DownloadResult(relative, digest.hexdigest(), size, media_type, extension,
-                              normalize_language(language))
+                              normalize_language(language), quality=metadata.quality,
+                              requested_quality=quality, actual_quality=actual_quality)
     except asyncio.CancelledError as exc:
         primary_error = exc
-        _record_failure(record, candidate, request_id, size, "download_cancelled")
+        _record_failure(record, candidate, request_id, size, "download_cancelled", quality=quality)
         raise
     except MediaError as exc:
         primary_error = exc
         code = exc.code if exc.code in _DOWNLOAD_CODES else "download_failed"
-        _record_failure(record, candidate, request_id, size, code)
+        _record_failure(record, candidate, request_id, size, code, quality=quality)
         if code == exc.code:
             raise
         raise MediaError(code) from None
     except Exception as exc:
         primary_error = exc
         code = "path_too_long" if _path_too_long(exc) else "download_failed"
-        _record_failure(record, candidate, request_id, size, code)
+        _record_failure(record, candidate, request_id, size, code, quality=quality)
         raise MediaError(code) from None
     finally:
         if metadata is not None:
@@ -411,7 +461,7 @@ async def download_candidate(
                     raise
             except BaseException:
                 if primary_error is None:
-                    _record_failure(record, candidate, request_id, size, "download_failed")
+                    _record_failure(record, candidate, request_id, size, "download_failed", quality=quality)
                     raise MediaError("download_failed") from None
         if temp_path is not None:
             try:

@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
-from musicdl.contracts.plugin import ResolvedMedia
+from musicdl.contracts.plugin import ResolvedMedia, has_expired
 from musicdl.plugins.broker import (
     ActionDenied, EgressPolicy, EgressTarget, PluginManifest, _parse_action_url,
     _resolve_global_addresses, coerce_egress_policy,
@@ -291,7 +291,8 @@ class SecureMediaTransport:
         return value
 
     async def _fetch_hop(self, url: str, egress: EgressPolicy, deadline: float, *,
-                         method: str = "GET", range_probe: bool = False) -> _Hop:
+                         method: str = "GET", range_probe: bool = False,
+                         guard: Callable[[], None] | None = None) -> _Hop:
         """Open one hop and read nothing past its status line and headers.
 
         The caller owns the returned handles on success; every failure path
@@ -357,6 +358,16 @@ class SecureMediaTransport:
                            "Accept-Encoding: identity\r\n"
                            + ("Range: bytes=0-0\r\n" if range_probe else "")
                            + "Connection: close\r\n\r\n").encode("ascii")
+                if guard is not None:
+                    # The descriptor's stated instant is asked inside the
+                    # function that writes, as the last step before the wire:
+                    # DNS and the handshake can outlast the door check, and
+                    # this work is handed to a worker thread, so a check made
+                    # on the event loop before the hand-off can pass while the
+                    # URL is retired before that thread runs.  Only a check on
+                    # the same side of that queue as the write is the last word
+                    # on whether a withdrawn link reaches the socket.
+                    guard()
                 wrapped.sendall(request)
 
             await run(send_request, deadline)
@@ -397,6 +408,25 @@ class SecureMediaTransport:
             timeout_ms = self.default_timeout_ms
         if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
             raise MediaTransportError("media_timeout")
+        # A descriptor's stated lifetime is part of the descriptor: the URL is
+        # retired the moment it passes, so the last step before the socket
+        # refuses it instead of opening a link the source has withdrawn.  The
+        # caller that held the answer re-resolves on this code; a caller that
+        # ignored the instant until now gets the same honest refusal.
+        def refuse_expired() -> None:
+            """Refuse wherever the transfer could still act on the URL.
+
+            The door is not the only place the instant matters: DNS and the TCP
+            handshake happen after it, a CDN answers a hop later still, and a
+            body can outlast the deadline by minutes.  Every step that can still
+            start or extend a transfer asks again, so a URL that dies in flight
+            stops being streamed and the caller re-resolves it rather than this
+            process finishing work on a link the source has withdrawn.
+            """
+            if has_expired(media.expires_at):
+                raise MediaTransportError("media_url_expired")
+
+        refuse_expired()
         deadline = self.clock() + timeout_ms / 1000
         egress = coerce_egress_policy(policy)
 
@@ -411,7 +441,8 @@ class SecureMediaTransport:
             # ``media_redirect_denied`` refusal.
             url = media.url
             for redirects in range(self.max_redirects + 1):
-                hop = await self._fetch_hop(url, egress, deadline)
+                refuse_expired()
+                hop = await self._fetch_hop(url, egress, deadline, guard=refuse_expired)
                 response, wrapped, raw = hop.response, hop.wrapped, hop.raw
                 if not 300 <= hop.status < 400:
                     break
@@ -423,6 +454,10 @@ class SecureMediaTransport:
                 raw = wrapped = response = None
             if not 200 <= hop.status < 300:
                 raise MediaTransportError("media_response_invalid")
+            # The head can arrive after the instant the source named, exactly as
+            # DNS and the handshake can outlast it, so no body byte is read
+            # until the URL is still live.
+            refuse_expired()
             # Neither the answer's extension nor its Content-Type label is the
             # verdict; both are written by whichever CDN answered, and the same
             # link shape has been measured carrying two different containers
@@ -488,8 +523,14 @@ class SecureMediaTransport:
                             raise MediaError("file_too_large")
                         if exact_size is not None and observed > exact_size:
                             raise MediaError("size_mismatch")
+                        refuse_expired()
                         yield prefix
                     while True:
+                        # A body can outlast the URL's stated lifetime by
+                        # minutes, so the read that would extend the transfer
+                        # asks again before it does.
+                        refuse_expired()
+
                         def read_chunk() -> bytes:
                             remaining = _remaining(self.clock, deadline)
                             setter = getattr(wrapped, "settimeout", None)
@@ -506,6 +547,11 @@ class SecureMediaTransport:
                             raise
                         except (OSError, http.client.HTTPException, ValueError) as exc:
                             raise MediaTransportError("media_response_invalid") from exc
+                        # Even the last read can begin while the URL is live
+                        # and return after the instant has passed, so the
+                        # bytes it produced are neither yielded nor answered
+                        # as a finished transfer.
+                        refuse_expired()
                         if not chunk:
                             break
                         observed += len(chunk)
@@ -534,7 +580,8 @@ class SecureMediaTransport:
 
             return DownloadMetadata(chunks=chunks(), extension=extension,
                                     media_type=media_type, declared_size=reported_size,
-                                    _close_once=close_once)
+                                    _close_once=close_once, quality=media.quality,
+                                    expires_at=media.expires_at)
         except asyncio.CancelledError:
             if close_once is not None:
                 try:

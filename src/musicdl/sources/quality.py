@@ -130,3 +130,68 @@ def format_bytes(value: Any) -> str:
         index += 1
     precision = 1 if scaled >= 10 else 2
     return f"{scaled:.{precision}f} {units[index]}"
+
+
+def requested_quality(candidate: Any, *, policy: str = "lossless_first",
+                      preference: str | None = None) -> str | None:
+    """Choose only from declared tiers; an unsupported preference is advisory."""
+    declared = tuple(candidate.qualities)
+    preferred = _token(preference)
+    if preferred in declared:
+        return preferred
+    if policy == "best_available" and preferred is None:
+        return None
+    lossless = [value for value in declared if is_lossless(value)]
+    if lossless:
+        return max(lossless, key=quality_rank)
+    if declared:
+        return max(declared, key=quality_rank)
+    return candidate.format if is_lossless(candidate.format) else None
+
+
+def proven_lossy(value: Any) -> bool:
+    """Unknown and ambiguous codec labels never prove a downgrade."""
+    return _token(value) in {"128k", "192k", "320k", "mp3", "aac", "ogg", "opus"}
+
+
+def served_quality(stated: Any, container: Any) -> str | None:
+    """Reconcile the tier a source stated with the container the bytes prove.
+
+    The file on disk is the only evidence of what was served, so a label the
+    bytes contradict is dropped in favour of the container.  That covers both
+    shapes a contradiction comes in.  A label that names a container the bytes
+    are not -- measured 2026-09-28, a link whose path ended in ``.flac``
+    answered MP3 frames, and repeating the path would have named a file that is
+    not on disk.  And a bitrate tier, which names a codec without naming a
+    container -- measured the same day, a source that answered ``320k`` handed
+    over real FLAC, so keeping the tier would name a codec the file is not and
+    mark a lossless answer as the downgrade it never was.  A label the container
+    can carry keeps its detail (``flac24bit`` on ``flac``, ``320k`` on ``mp3``),
+    which is what the success message and the admin report print, and a label
+    naming neither (``master``, ``atmos_plus``) claims no codec at all, so
+    nothing contradicts it and it stands.
+    """
+    label = _token(stated)
+    verified = _token(container)
+    if verified is not None:
+        verified = verified.lstrip(".") or None
+    if label is None:
+        return verified
+    named = _CONTAINERS.get(label)
+    if named is not None and verified is not None and named != verified:
+        return verified
+    if named is None and verified is not None and is_lossless(verified) and proven_lossy(label):
+        # Naming the tier here would name a codec the file is not, and would
+        # mark a lossless answer as the downgrade it never was.
+        return verified
+    return label
+
+
+# The revision of the actual-quality verification this product stands behind:
+# ``proven_lossy`` above, the answer reconciliation in ``lx_shim.js``, and the
+# downmix verdict a download record stores.  A record keeps the revision that
+# judged it, so a later, stricter verifier can recognise the old record and
+# re-check it instead of trusting a verdict it no longer stands behind.
+# MusicBot-Go calls the same pair ``QualityVerified``/``QualityRevision``; bump
+# this whenever the rules above change meaning.
+QUALITY_REVISION = 1

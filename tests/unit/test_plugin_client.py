@@ -574,3 +574,21 @@ def test_health_failures_are_stable_and_redacted(tmp_path, kind):
             await http.aclose()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('quality', [None, 'flac', '320k'])
+def test_resolve_only_sends_explicit_quality(tmp_path, monkeypatch, quality):
+    seen = []
+    candidate = Candidate(source_id='demo', source_version='1', item_id='song', title='Song', artist='Artist')
+    async def scenario():
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as http:
+            client = PluginClient('http://runner:8080', http_client=http)
+            async def invoke(stored, request):
+                seen.append(request.payload)
+                return PluginResponse(protocol='musicdl.plugin/v1', request_id=request.request_id,
+                    operation='resolve', ok=True, result={'candidate_id': 'song', 'url': 'https://example.com/song.mp3',
+                    'extension': 'mp3', 'media_type': 'audio/mpeg'})
+            monkeypatch.setattr(client, 'invoke', invoke)
+            await client.resolve(stored(tmp_path, operations=('resolve',)), candidate, quality=quality)
+    asyncio.run(scenario())
+    assert seen == [{'candidate': candidate.public_representation, **({'quality': quality} if quality else {})}]
