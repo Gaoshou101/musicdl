@@ -9,6 +9,12 @@ from typing import Any
 
 LOSSLESS_CONTAINERS = frozenset({"flac", "alac", "ape", "wav", "aiff"})
 
+# The tier ``lossless_first`` asks a source for when it declared no tiers at
+# all.  It is a request intent, not an assertion about the source: the answer
+# decides what was really served, so this name is never written back onto a
+# candidate.
+LOSSLESS_REQUEST = "flac"
+
 # Stable panel/search ordering. These are source quality names, not proof of a
 # specific codec or byte count; only explicit lossless names below imply one.
 QUALITY_RANKS = {
@@ -134,19 +140,38 @@ def format_bytes(value: Any) -> str:
 
 def requested_quality(candidate: Any, *, policy: str = "lossless_first",
                       preference: str | None = None) -> str | None:
-    """Choose only from declared tiers; an unsupported preference is advisory."""
+    """Choose the tier to ask a source for, as intent rather than evidence.
+
+    A source that declared tiers is read exactly the way v1.0.5 read it: a
+    declared preference first, then a declared lossless tier, then the highest
+    declared one.  A source that declared none is where the request becomes
+    intent instead of a filter -- a recognised ``preference`` is asked for even
+    though nothing declared it, and ``lossless_first`` falls back to
+    ``LOSSLESS_REQUEST``.  The request is not a promise about the source: what
+    was served is judged from the answer, so ``candidate.qualities`` is never
+    rewritten to make the ask look supported.  ``best_available`` is the
+    deliberate exception: it stays byte-identical to v1.0.5 in every case --
+    with or without a preference, with or without declared tiers -- and only
+    ever asks for a container the candidate itself already claimed.
+    """
     declared = tuple(candidate.qualities)
     preferred = _token(preference)
     if preferred in declared:
         return preferred
     if policy == "best_available" and preferred is None:
         return None
-    lossless = [value for value in declared if is_lossless(value)]
-    if lossless:
-        return max(lossless, key=quality_rank)
     if declared:
+        lossless = [value for value in declared if is_lossless(value)]
+        if lossless:
+            return max(lossless, key=quality_rank)
         return max(declared, key=quality_rank)
-    return candidate.format if is_lossless(candidate.format) else None
+    if policy == "best_available":
+        # v1.0.5 tail, preserved verbatim: with nothing declared it only ever
+        # asked for a container the candidate itself already claimed.
+        return candidate.format if is_lossless(candidate.format) else None
+    if preferred is not None and preferred in QUALITY_RANKS:
+        return preferred
+    return LOSSLESS_REQUEST
 
 
 def proven_lossy(value: Any) -> bool:

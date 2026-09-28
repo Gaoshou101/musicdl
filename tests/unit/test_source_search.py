@@ -378,3 +378,106 @@ def test_a_request_that_names_nothing_exactly_still_falls_back_to_the_quality_so
     result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "路过"))
 
     assert [c.item_id for c in result.candidates] == ["lossless", "lossy"]
+# -- a measured lossless channel, and the order it is allowed to change ------
+#
+# A probe measures whether a channel can serve lossless; that measurement is a
+# tie-break input, never a candidate field.  It leads the ordering key under
+# ``lossless_first`` only, so a channel nobody measured -- or one measured only
+# in a form that no longer stands -- leaves the v1.0.5 order exactly alone, and
+# ``best_available`` never sees it at all.
+
+
+def _two_channels_one_recording():
+    """One recording offered by a preferred channel and a capable one."""
+    async def alpha(query):
+        return [Candidate(source_id="alpha", source_version="1", item_id="a", title="Song",
+                          artist="Artist", format="mp3", bitrate=128, size=1000)]
+    async def beta(query):
+        return [Candidate(source_id="beta", source_version="1", item_id="b", title="Song",
+                          artist="Artist", format="mp3", bitrate=128, size=1000)]
+    # A smaller priority number is the stronger declared preference, so alpha
+    # wins the v1.0.5 order and only a measurement can move beta ahead of it.
+    return SourceRegistry([SourceEntry("alpha", "1", alpha, priority=1),
+                           SourceEntry("beta", "1", beta, priority=5)])
+
+
+def test_a_measured_lossless_channel_leads_the_order_under_lossless_first():
+    registry = _two_channels_one_recording()
+    baseline = asyncio.run(search_sources(registry, "song"))
+    measured = asyncio.run(search_sources(registry, "song", lossless_capability={"beta": True}))
+
+    assert [c.source_id for c in baseline.candidates] == ["alpha"]
+    assert baseline.offers == (("alpha", "beta"),)
+    assert [c.source_id for c in measured.candidates] == ["beta"]
+    assert measured.offers == (("beta", "alpha"),)
+
+
+def test_the_pick_and_the_offer_order_read_the_measurement_the_same_way():
+    result = asyncio.run(search_sources(_two_channels_one_recording(), "song",
+                                        lossless_capability={"beta": True}))
+
+    assert [(c.source_id, offers[0]) for c, offers in zip(result.candidates, result.offers)] == [
+        ("beta", "beta")]
+    assert result.offers == (("beta", "alpha"),)
+
+
+def test_unknown_capability_leaves_the_v105_order_untouched():
+    registry = _two_channels_one_recording()
+    baseline = asyncio.run(search_sources(registry, "song"))
+    unknown = asyncio.run(search_sources(registry, "song",
+                                         lossless_capability={"alpha": None, "beta": False}))
+
+    assert unknown.candidates == baseline.candidates
+    assert unknown.offers == baseline.offers
+    assert unknown.version == baseline.version
+
+
+def test_best_available_is_byte_identical_with_and_without_capability():
+    registry = _two_channels_one_recording()
+    plain = asyncio.run(search_sources(registry, "song", quality_policy="best_available"))
+    measured = asyncio.run(search_sources(registry, "song", quality_policy="best_available",
+                                          lossless_capability={"beta": True}))
+
+    assert [c.source_id for c in plain.candidates] == ["alpha"]
+    assert measured.candidates == plain.candidates
+    assert measured.offers == plain.offers and measured.version == plain.version
+
+
+def test_a_capability_callable_is_asked_about_every_channel():
+    asked = []
+
+    def lookup(source_id):
+        asked.append(source_id)
+        return source_id == "beta"
+
+    result = asyncio.run(search_sources(_two_channels_one_recording(), "song",
+                                        lossless_capability=lookup))
+
+    assert [c.source_id for c in result.candidates] == ["beta"]
+    assert {"alpha", "beta"} <= set(asked)
+
+
+def test_a_capability_lookup_that_raises_is_simply_no_opinion():
+    registry = _two_channels_one_recording()
+
+    def broken(source_id):
+        raise RuntimeError("probe store unavailable")
+
+    baseline = asyncio.run(search_sources(registry, "song"))
+    result = asyncio.run(search_sources(registry, "song", lossless_capability=broken))
+
+    assert [c.source_id for c in result.candidates] == ["alpha"]
+    assert result.offers == baseline.offers
+
+
+def test_a_capability_verdict_is_never_written_onto_a_candidate():
+    async def source(query):
+        return [Candidate(source_id="a", source_version="1", item_id="x", title="Song",
+                          artist="Artist", format="mp3", qualities=())]
+    registry = SourceRegistry([SourceEntry("a", "1", source)])
+
+    result = asyncio.run(search_sources(registry, "song", lossless_capability={"a": True}))
+
+    assert result.candidates[0].qualities == ()
+    assert result.candidates[0].format == "mp3"
+

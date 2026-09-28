@@ -18,6 +18,7 @@ from .plugins import PluginClient, PluginSource, PluginStore
 from .plugins.broker import HttpsActionBroker
 from .media.transport import SecureMediaTransport
 from .sources import SourceEntry, SourceRegistry, search_sources
+from .sources.lossless_probe import PROBE_QUALITY, LosslessProbe
 from .sources.lx.analyzer import lx_shaped_file
 from .sources.platform_search import LxSearchAdapter, PlatformSearch
 from .worker.workers import MessageWorker, JobWorker
@@ -41,6 +42,11 @@ except ImportError:  # pragma: no cover
 
 
 logger = logging.getLogger("musicdl.app")
+
+# The one request a capability self-check asks a channel for.  It is a
+# representative track, not a promise: the answer decides the verdict, and a
+# channel that cannot answer it is left ``unknown``.
+_PROBE_QUERY = "\u5468\u6770\u4f26 \u6674\u5929"
 
 
 async def _maybe_close(value: Any) -> None:
@@ -198,7 +204,8 @@ def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
 class _Runtime:
     def __init__(self, *, redis, state, service, wecom, plugin_client, transport, registry,
                  message_worker, job_worker, telegram=None, plugin_registry=None, telegram_sources=0,
-                 resolvers=None, refresh=None, preference=None, language_advisor=None):
+                 resolvers=None, refresh=None, preference=None, language_advisor=None,
+                 lossless_capability=None, lossless_probe=None):
         self.redis, self.state, self.service = redis, state, service
         self.wecom, self.plugin_client, self.registry = wecom, plugin_client, registry
         self.transport = transport
@@ -212,6 +219,10 @@ class _Runtime:
         # without them serves the panel exactly as it did before.
         self.refresh, self.preference = refresh, preference
         self.language_advisor = language_advisor
+        # The capability lookup a search reads, and the probe that fills it.
+        # Both are optional: a runtime assembled without a health roll-up has
+        # neither, and searches keep the order they had before.
+        self.lossless_capability, self.lossless_probe = lossless_capability, lossless_probe
         self.telegram, self.telegram_sources = telegram, telegram_sources
         # Only plugin sources are published to the portal. A Telegram bot is
         # configured as a bot, so a second copy under "sources" would be a
@@ -290,7 +301,7 @@ def _search_adapter(stored, source: PluginSource, platform_search: PlatformSearc
 
 
 def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
-                   telegram_client_factory=None, preference=None):
+                   telegram_client_factory=None, preference=None, source_health=None):
     """Build one runtime.
 
     ``bots`` and ``sources`` are the definitions the portal owns.  A stored
@@ -357,6 +368,38 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
         telegram_sources = len(definitions)
     registry = SourceRegistry(entries)
 
+    # A capability check is a measurement, not metadata: it asks one channel to
+    # resolve one representative track and judges the container the answer
+    # declared.  The lookup a search reads is versioned, so a record measured
+    # against an older script reads as unknown instead of a standing claim, and
+    # it is built here because this is where each channel's manifest version is
+    # known.
+    versions = {entry.source_id: entry.version for entry in entries}
+    lossless_capability = None
+    lossless_probe = None
+    if source_health is not None:
+        def lossless_capability(source_id):
+            return source_health.lossless_capability(source_id, source_version=versions.get(source_id))
+
+        async def probe(source_id):
+            """Resolve one representative track for a channel, as a FLAC request.
+
+            A check has to ask a real question, so it searches the channel for
+            one representative track and resolves the first row it answers
+            with.  A channel that cannot be asked -- no resolver, no search, an
+            empty answer, a failed resolve -- raises, and the probe records
+            ``unknown`` rather than calling the channel incapable.
+            """
+            source = resolvers.get(source_id)
+            if source is None:
+                raise RuntimeError("no_probe_source")
+            rows = await source.search(_PROBE_QUERY)
+            if not rows:
+                raise RuntimeError("no_probe_candidate")
+            return await source.client.resolve(source.stored, rows[0], quality=PROBE_QUALITY)
+
+        lossless_probe = LosslessProbe(probe, source_health)
+
     async def ranker(result, query):
         return await advise_ranking(result, query, settings.ai, client=ai_client)
 
@@ -375,16 +418,22 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
         that has been answering, not whichever one sorts first.
         """
         excluded = set(failed_source_ids or ())
+        options = dict(timeout=search_timeout, preference=preference,
+                       quality_policy=worker_settings.quality_policy,
+                       quality_preference=worker_settings.quality_preference)
+        if lossless_capability is not None:
+            # Only a runtime with a health roll-up has a capability opinion;
+            # without one the search keeps the exact signature it always had.
+            options["lossless_capability"] = lossless_capability
         return await search_sources(SourceRegistry(e for e in entries if e.source_id not in excluded),
-                                     query, timeout=search_timeout, preference=preference,
-                                     quality_policy=worker_settings.quality_policy,
-                                     quality_preference=worker_settings.quality_preference)
+                                     query, **options)
 
     message_worker = job_worker = None
     if settings.wecom.enabled:
         message_worker = MessageWorker(redis, registry, wecom, state=state, ai_ranker=ranker,
                                        quality_policy=worker_settings.quality_policy,
                                        quality_preference=worker_settings.quality_preference,
+                                       lossless_capability=lossless_capability,
                                        search_timeout=search_timeout,
                                        selection_ttl=settings.wecom.selection_ttl)
         job_worker = JobWorker(redis, wecom, sources=resolvers, media_root=settings.media.root, state=state,
@@ -406,7 +455,8 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                     message_worker=message_worker, job_worker=job_worker,
                     telegram=telegram, plugin_registry=plugin_registry,
                     telegram_sources=telegram_sources, resolvers=resolvers,
-                    refresh=refresh, preference=preference, language_advisor=language_advisor)
+                    refresh=refresh, preference=preference, language_advisor=language_advisor,
+                    lossless_capability=lossless_capability, lossless_probe=lossless_probe)
 
 
 def _panel_root(settings: AppSettings) -> str | None:
@@ -473,10 +523,11 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             # observed about each channel; the workers search through the same
             # registry, so they inherit the same ordering.
             preference = None if admin is None else admin.source_health.preference
+            source_health = None if admin is None else admin.source_health
             factory = runtime_factory or (
                 lambda current: _build_runtime(current, clock, bots=definitions,
                                                sources=source_definitions,
-                                               preference=preference))
+                                               preference=preference, source_health=source_health))
             built = factory(settings)
             if inspect.isawaitable(built):
                 built = await built

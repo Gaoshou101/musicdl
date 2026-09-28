@@ -4,6 +4,7 @@ from test_wecom_state import ID3, ScriptRedis, Source, playable_metadata
 from musicdl.media.models import FallbackResult, DownloadResult
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
+from musicdl.sources.quality import proven_lossy
 from musicdl.wecom.state import RedisStateStore
 from musicdl.worker.workers import (FALLBACK_NOTICE, REFUSAL_TEXT, TERMINAL_FAILURE_TEXT, JobDeferred,
                                     JobWorker)
@@ -371,7 +372,8 @@ def test_job_claims_the_download_effect_and_reserves_before_the_source_call(monk
         seen.update({name:kwargs.get(name) for name in ("reservation","artifact_store","owner","fence")})
         return ok_download()
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
-    worker=JobWorker(Redis(),WeCom(),{},str(tmp_path),state=st,refresh=lambda *a:None)
+    worker=JobWorker(Redis(),WeCom(),{},str(tmp_path),state=st,refresh=lambda *a:None,
+                     quality_policy="best_available")
     result=run(worker.handle_job(job_payload(),job_id="1-0"))
     assert result.download.relative_path=="Song.mp3"
     assert seen["stage"]=="external_started" and seen["artifact"]["state"]=="prepared"
@@ -427,7 +429,9 @@ def test_published_artifact_is_replayed_without_a_second_source_call(monkeypatch
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
     worker=JobWorker(Redis(),wc,{"src":src},"/tmp",state=st,refresh=lambda *a:None)
     result=run(worker.handle_job(job_payload(),job_id="1-0"))
-    assert result.download.relative_path=="Song.mp3" and wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB）")]
+    assert result.download.relative_path=="Song.mp3"
+    assert wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB · 未取到无损）")]
+    assert result.download.actual_quality=="mp3" and result.download.quality_downgraded is True
     assert seen["reservation"].state=="published" and seen["reservation"].sha256=="a"*64
     assert seen["reservation"].size_bytes==10 and seen["artifact_store"] is st and seen["fence"]==1
     assert src.calls==0
@@ -511,7 +515,14 @@ def test_partial_reservation_is_terminal_without_a_second_source_call(monkeypatc
         "temporary_relative_path":".musicdl-staging/a.2.part","target_relative_path":"未知/Artist/Song.mp3",
         "allocation_slot":"1","extension":".mp3","media_type":"audio/mpeg","owner":"earlier",
         "fence":"2","state":"external_started"}
-    async def download(*_a,**_k): calls.append(1); return ok_download()
+    async def download(*_a,**kwargs):
+        reservation=kwargs.get("reservation")
+        if reservation is not None and reservation.state=="external_started":
+            # Mirrors the engine: a reservation caught mid-external-call is refused
+            # as a returned uncertainty, never resumed and never streamed again.
+            return FallbackResult(download=None,download_error="artifact_uncertain")
+        calls.append(1)
+        return ok_download()
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
     redis=job_message(); wc=WeCom()
     worker=JobWorker(redis,wc,{},"/tmp",state=st,refresh=lambda *a:None,max_attempts=1)
@@ -544,7 +555,10 @@ def test_hanging_notice_is_bounded_and_never_resent(monkeypatch):
     class SlowWeCom:
         def __init__(self): self.calls=0
         async def send_text(self,user,text): self.calls+=1; await asyncio.sleep(30)
-    async def download(candidate,sources,root,**kwargs): return ok_download()
+    async def download(candidate,sources,root,**kwargs):
+        if kwargs.get("prepare") is not None:
+            await kwargs["prepare"]("mp3","audio/mpeg")
+        return ok_download()
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
     wc=SlowWeCom()
     worker=JobWorker(Redis(),wc,{},"/tmp",state=st,refresh=lambda *a:None,
@@ -588,7 +602,12 @@ def reserved_download(monkeypatch,tmp_path,*,advisor=None,payload=None,state=Non
     """Run one job and report the reserved path and the language the engine saw."""
     st=state if state is not None else State(); seen={}
     async def download(candidate,sources,root,**kwargs):
-        seen["target"]=dict(st.script.hashes.get("{tenant}:artifact:1-0") or {}).get("target_relative_path")
+        prepare=kwargs.get("prepare")
+        if prepare is not None:
+            record=await prepare("mp3","audio/mpeg")
+            seen["target"]=record.target_relative_path
+        else:
+            seen["target"]=dict(st.script.hashes.get("{tenant}:artifact:1-0") or {}).get("target_relative_path")
         seen["language"]=kwargs.get("language")
         return ok_download()
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
@@ -698,3 +717,31 @@ def test_replay_repeats_the_quality_verdict_the_record_holds(monkeypatch):
     result = run(worker.handle_job(job_payload(), job_id="1-0"))
     assert (result.download.requested_quality, result.download.actual_quality) == ("flac", "320k")
     assert result.download.quality_revision == 7
+def test_the_lossless_first_default_asks_for_the_tier_and_reports_a_downgrade(monkeypatch,tmp_path):
+    """Under the default policy a tier is always requested, so the deferred path is the one
+    taken and the answer -- not the request -- decides the verdict: a source that hands over
+    an mp3 when flac was asked for is reported as the downgrade it is, in the notice and in
+    the durable record both."""
+    st=State(); seen={}
+    async def download(candidate,sources,root,**kwargs):
+        seen["quality"]=kwargs.get("quality")
+        seen["prepare"]=kwargs.get("prepare")
+        if kwargs.get("prepare") is not None:
+            await kwargs["prepare"]("mp3","audio/mpeg")
+        return FallbackResult(download=DownloadResult(
+            "Song.mp3","a"*64,1024,"audio/mpeg","mp3","未知",quality="mp3",
+            requested_quality=kwargs.get("quality"),actual_quality="mp3",
+            quality_downgraded=proven_lossy("mp3")))
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
+    wc=WeCom()
+    worker=JobWorker(Redis(),wc,{},str(tmp_path),state=st,refresh=lambda *a:None)
+    result=run(worker.handle_job(job_payload(),job_id="1-0"))
+    assert seen["quality"]=="flac" and seen["prepare"] is not None
+    assert result.download.requested_quality=="flac"
+    assert result.download.actual_quality=="mp3"
+    assert result.download.quality_downgraded is True
+    record=effect_result(st,"1-0","download")
+    assert record["requested_quality"]=="flac" and record["actual_quality"]=="mp3"
+    assert record["quality_downgraded"] is True
+    assert wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB · 未取到无损）")]
+

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import math
+import time
 from collections import deque
+from collections.abc import Awaitable, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 from musicdl.secrets import redact_secrets
-from collections.abc import Awaitable, Callable
 from musicdl.media.models import DownloadEvent
 
 
@@ -57,6 +59,32 @@ SEARCH_OK = "ok"
 # temporary file, not the channel misbehaving, so it is deliberately absent.
 _ATTEMPT_STAGES = {"download": "downloads", "refresh": "refreshes"}
 
+# How long one measured lossless answer stays trustworthy.  A channel's answer
+# is about the script it is running and the catalogue it is fronting, and both
+# change slowly, so a week is long enough to stop a healthy deployment from
+# re-probing on every search and short enough that a source which gained or lost
+# FLAC is noticed without an operator having to do anything.  Expiry is what
+# makes an old answer ``unknown`` again rather than a standing claim.
+LOSSLESS_TTL = 7 * 24 * 3600
+
+
+def _seconds(value) -> float | None:
+    """A finite second count, or ``None`` when the value is not one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _timestamp(value) -> float:
+    """A caller-supplied instant, or this process's clock when none was given."""
+    return _seconds(value) if value is not None else time.time()
+
+
+def _version(value) -> str | None:
+    """A source version worth keying a record on; anything else is ``None``."""
+    return value if isinstance(value, str) and value else None
+
 
 class SourceHealthStore:
     """What each source did last, rolled up for the panel's channel view.
@@ -80,14 +108,31 @@ class SourceHealthStore:
     WINDOW = 20
     LIMIT = 200
 
-    def __init__(self, window: int = WINDOW, limit: int = LIMIT) -> None:
+    # The lossless roll-up is bounded and expiring like everything else here:
+    # the two limits are separate so a deployment that churns through source
+    # ids cannot evict the attempt roll-up, and vice versa.
+    LOSSLESS_TTL = LOSSLESS_TTL
+    LOSSLESS_LIMIT = LIMIT
+
+    def __init__(self, window: int = WINDOW, limit: int = LIMIT, *,
+                 lossless_ttl: float = LOSSLESS_TTL,
+                 lossless_limit: int | None = None) -> None:
         if isinstance(window, bool) or not isinstance(window, int) or not 1 <= window <= 200:
             raise ValueError("invalid window")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise ValueError("invalid limit")
+        ttl = _seconds(lossless_ttl)
+        if ttl is None or ttl <= 0:
+            raise ValueError("invalid lossless ttl")
+        cap = limit if lossless_limit is None else lossless_limit
+        if isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap <= 1000:
+            raise ValueError("invalid lossless limit")
         self.window = window
         self.limit = limit
+        self.lossless_ttl = ttl
+        self.lossless_limit = cap
         self._records: dict[str, dict] = {}
+        self._lossless: dict[str, dict] = {}
 
     # -- recording -------------------------------------------------------
     def observe_search(self, source_id: str, status: str, *, count: int = 0) -> None:
@@ -146,6 +191,109 @@ class SourceHealthStore:
                   "outcomes": deque(maxlen=self.window)}
         self._records[source_id] = record
         return record
+
+    # -- the lossless capability cache -----------------------------------
+    def observe_lossless(self, source_id: str, *, capable: bool | None, evidence=None,
+                         source_version: str | None = None, checked_at=None) -> None:
+        """Record what one probe measured about a channel's lossless support.
+
+        ``capable`` is a verdict, not a guess.  ``True`` and ``False`` are the
+        two answers a probe can reach, and ``None`` records an ``unknown`` --
+        a timeout, an error, or an answer with no container to judge.  An
+        unknown is deliberately not ``False``: it is the absence of an answer,
+        so it never biases a search and never says a channel cannot serve FLAC.
+
+        The cache is bounded and keyed by source id, and the oldest record is
+        dropped when the cap is reached, so a deployment that churns through
+        ids cannot grow it without limit.
+        """
+        if not isinstance(source_id, str) or not source_id:
+            return
+        if capable is not None and not isinstance(capable, bool):
+            return
+        when = _seconds(checked_at) if checked_at is not None else time.time()
+        if when is None:
+            return
+        record = self._lossless.get(source_id)
+        if record is None:
+            if len(self._lossless) >= self.lossless_limit:
+                self._lossless.pop(next(iter(self._lossless)), None)
+            record = {}
+            self._lossless[source_id] = record
+        record["capable"] = capable
+        record["evidence"] = dict(evidence) if isinstance(evidence, Mapping) else {}
+        record["source_version"] = _version(source_version)
+        record["checked_at"] = when
+
+    def lossless_status(self, source_id: str, *, now=None) -> dict:
+        """The panel's view of one channel's measured capability.
+
+        ``status`` is the verdict, ``stale`` says whether the TTL has passed,
+        and ``checked_at`` is when the probe ran.  A channel that was never
+        probed reads as ``unknown`` with no timestamp, which is a different
+        thing from a probed channel whose answer is old -- the timestamp tells
+        them apart.
+        """
+        current = _timestamp(now)
+        record = self._lossless.get(source_id) if isinstance(source_id, str) else None
+        if record is None:
+            return {"status": "unknown", "stale": True, "checked_at": None, "age": None,
+                    "evidence": {}, "source_version": None, "ttl": self.lossless_ttl}
+        capable = record["capable"]
+        age = max(0.0, current - record["checked_at"])
+        return {"status": "unknown" if capable is None else ("lossless" if capable else "lossy"),
+                "stale": age > self.lossless_ttl, "checked_at": record["checked_at"],
+                "age": age, "evidence": dict(record["evidence"]),
+                "source_version": record["source_version"], "ttl": self.lossless_ttl}
+
+    def lossless_capability(self, source_id: str, *, source_version: str | None = None,
+                            now=None) -> bool | None:
+        """The recorded verdict, only while it is fresh and still about this version.
+
+        ``None`` is the answer for every shape of "no usable answer": nothing
+        was measured, the record is older than the TTL, the channel is running
+        a different script than the one that was checked, or the recorded
+        verdict was ``unknown``.  ``None`` on either side of the version
+        comparison only matches when both are ``None``, so a versionless record
+        is never applied to a versioned channel.
+
+        A lookup is a tie-break input, so it must never be the reason a search
+        or a download fails; an unreadable record simply has no opinion.
+        """
+        try:
+            return self._lossless_capability(source_id, source_version=source_version, now=now)
+        except Exception:
+            return None
+
+    def _lossless_capability(self, source_id: str, *, source_version: str | None = None,
+                             now=None) -> bool | None:
+        if not isinstance(source_id, str) or not source_id:
+            return None
+        record = self._lossless.get(source_id)
+        if record is None:
+            return None
+        capable = record["capable"]
+        if not isinstance(capable, bool):
+            return None
+        if record["source_version"] != _version(source_version):
+            return None
+        if _timestamp(now) - record["checked_at"] > self.lossless_ttl:
+            return None
+        return capable
+
+    def _lossless_fields(self, source_id: str) -> dict:
+        """The capability columns the channel view carries beside the rate.
+
+        The verdict is read back against the version that was actually
+        measured, because the panel is reporting the record, not asking
+        whether some other script may use it.
+        """
+        status = self.lossless_status(source_id)
+        return {"lossless": self.lossless_capability(source_id, source_version=status["source_version"]),
+                "lossless_status": status["status"],
+                "lossless_stale": status["stale"],
+                "lossless_checked_at": status["checked_at"],
+                "lossless_evidence": status["evidence"]}
 
     # -- reading ---------------------------------------------------------
     def snapshot(self, sources: list[dict] | None = None) -> dict:
@@ -220,7 +368,8 @@ class SourceHealthStore:
             return dict(common, status="unknown", attempts=0, successes=0, failures=0, success_rate=None,
                         searches=0, downloads=0, refreshes=0, last_search=None, last_download=None,
                         last_refresh=None, last_count=0, last_error=None, last_error_stage=None,
-                        last_health=None, last_health_status=None)
+                        last_health=None, last_health_status=None,
+                        **self._lossless_fields(source_id))
         outcomes = list(record["outcomes"])
         successes = sum(1 for ok in outcomes if ok)
         failures = len(outcomes) - successes
@@ -238,7 +387,8 @@ class SourceHealthStore:
                     last_search=record["last_search"], last_download=record["last_download"],
                     last_refresh=record["last_refresh"], last_count=record["last_count"],
                     last_error=record["last_error"], last_error_stage=record["last_error_stage"],
-                    last_health=record["last_health"], last_health_status=record["last_health_status"])
+                    last_health=record["last_health"], last_health_status=record["last_health_status"],
+                    **self._lossless_fields(source_id))
 
 
 def _redact_urls(value):

@@ -96,6 +96,49 @@ def test_failure_refreshes_once_excludes_source_and_checks_health(tmp_path):
     ]
 
 
+def test_an_unexpected_resolver_failure_is_a_failed_channel_not_an_uncertain_effect(tmp_path):
+    """A bare resolver error must reach the refresh path, not the uncertain one.
+
+    Measured 2026-09-28: the plugin client answers a resolve it could not complete with
+    a plain ``RuntimeError``.  A lossless ask resolves in ``download_with_fallback``
+    rather than inside ``download_candidate``, which is where that shape used to be
+    normalised, so without the same normalisation here the job would be recorded as
+    uncertain and retried to a dead letter instead of re-prompting the operator with
+    another channel.
+    """
+    class Broken(Source):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def download(self, item, *, quality=None):
+            self.calls += 1
+            assert quality == "flac"
+            raise RuntimeError("plugin_resolve_failed")
+
+    source = Broken()
+    events = []
+    calls = []
+    replacement = candidate("b")
+
+    async def refresh(query, excluded):
+        calls.append((query, excluded))
+        return result((replacement,))
+
+    outcome = asyncio.run(download_with_fallback(candidate(), {"a": source}, tmp_path,
+        request_id="r", query="Song", quality="flac", refresh=refresh, record=events.append))
+
+    assert outcome.download is None and outcome.download_error == "download_failed"
+    assert source.calls == 1
+    assert outcome.refreshed is not None and outcome.refreshed.candidates == (replacement,)
+    assert calls == [("Song", frozenset({"a"}))]
+    assert [(event.stage, event.status, event.error_code) for event in events] == [
+        ("download", "failed", "download_failed"),
+        ("refresh", "success", None),
+        ("health", "success", None),
+    ]
+
+
 def test_refresh_failure_still_checks_health_and_redacts_exception(tmp_path):
     source = Source(fail=True)
     events = []

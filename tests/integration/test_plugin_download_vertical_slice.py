@@ -549,7 +549,10 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
     resolves = [item["request"] for item in runner.requests
                 if item["request"]["operation"] == "resolve"]
     assert len(resolves) == 1
-    assert resolves[0]["payload"] == {"candidate": bound["candidates"]["1"]}
+    # The default policy asks even a candidate that declared no tier for FLAC,
+    # so the tier travels beside the descriptor rather than being written onto it.
+    assert resolves[0]["payload"] == {"candidate": bound["candidates"]["1"],
+                                      "quality": "flac"}
 
     # The main process owned DNS, connect, TLS SNI, and the fixed request line.
     assert seen["resolve"] == (MEDIA_HOST, 443)
@@ -565,9 +568,11 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
     assert (artifact.size_bytes, artifact.target_relative_path) == (
         DECLARED_SIZE, EXPECTED_RELATIVE.as_posix())
     assert artifact.sha256 == hashlib.sha256(MEDIA_BYTES).hexdigest()
+    # The ask was FLAC and the answer was an mp3 URL, so the record keeps both
+    # tiers and calls the gap what it is, rather than reporting nothing.
     assert effect.status == "done" and effect.result == {
-        "ok": True, "requested_quality": None, "actual_quality": "mp3",
-        "quality_revision": QUALITY_REVISION, "quality_downgraded": False}
+        "ok": True, "requested_quality": "flac", "actual_quality": "mp3",
+        "quality_revision": QUALITY_REVISION, "quality_downgraded": True}
     assert not list(slice_.media_root.rglob("*.part"))
 
     # WeCom saw the selection prompt and then the recorded success notice.
@@ -579,7 +584,7 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
     relative_path, separator, metadata = notice.removeprefix("下载成功：").rpartition("（")
     assert separator == "（"
     assert Path(relative_path) == EXPECTED_RELATIVE
-    assert metadata == "MP3 · 13 B）"
+    assert metadata == "MP3 · 13 B · 未取到无损）"
 
     # Both stream messages were acknowledged only after their effects were recorded.
     assert slice_.redis.acks == [(slice_.state.message_stream, slice_.message_worker.group, "1-0"),
@@ -622,7 +627,10 @@ def test_vertical_slice_failure_reprompts_without_downloading_a_replacement(tmp_
     assert rebound["generation"] == 1 and rebound["version"] != bound["version"]
     assert rebound["candidates"]["1"]["source_id"] == "backup"
     assert rebound["candidates"]["1"]["item_id"] == "backup-1"
-    assert artifact.state == "prepared"
+    # The job asked for a tier the candidate never declared, so the artifact is
+    # reserved from the container the transport measures rather than up front: a
+    # download that never measured one reserved nothing at all.
+    assert artifact is None
     assert not list(slice_.media_root.rglob("*.mp3"))
     assert not list(slice_.media_root.rglob("*.part"))
 

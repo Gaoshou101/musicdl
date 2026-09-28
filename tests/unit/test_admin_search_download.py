@@ -38,14 +38,20 @@ class Source:
         self.source_id, self.version, self.quality = source_id, version, quality
         self.queries: list[str] = []
         self.downloaded: list[str] = []
+        # The tier the panel asks for arrives here as a keyword, and this is the
+        # only place a test can see it: ``source_download`` omits the keyword
+        # outright for a source that cannot take one, so recording the whole
+        # kwargs dict tells "asked for flac" apart from "asked for nothing".
+        self.download_kwargs: list[dict] = []
 
     async def search(self, query: str):
         self.queries.append(query)
         return [Candidate(source_id=self.source_id, source_version=self.version, item_id="1",
                           title="稻香", artist="周杰伦", album="魔杰座", format="mp3")]
 
-    async def download(self, candidate: Candidate):
+    async def download(self, candidate: Candidate, **kwargs):
         self.downloaded.append(candidate.item_id)
+        self.download_kwargs.append(kwargs)
 
         async def chunks():
             yield AUDIO
@@ -59,15 +65,18 @@ class Source:
 
 
 class Runtime:
-    def __init__(self, registry, resolvers, *, language_advisor=None) -> None:
+    def __init__(self, registry, resolvers, *, language_advisor=None, lossless_capability=None) -> None:
         self.registry, self.resolvers = registry, resolvers
-        # Deliberately leave this absent for the no-advisor fixtures.  The
-        # portal must tolerate the lightweight runtime used by existing tests.
+        # Deliberately leave these absent for the fixtures that do not need
+        # them.  The portal must tolerate the lightweight runtime used by
+        # existing tests, so each one is only set when a test pins it.
         if language_advisor is not None:
             self.language_advisor = language_advisor
+        if lossless_capability is not None:
+            self.lossless_capability = lossless_capability
 
 
-def build(tmp_path, *, wired: bool = True, language_advisor=None, quality=None):
+def build(tmp_path, *, wired: bool = True, language_advisor=None, quality=None, worker=None):
     source = Source(quality=quality)
     auth, events = AdminAuth(), EventLogStore()
     auth.change_credentials("admin", "operator", "new-password")
@@ -76,7 +85,7 @@ def build(tmp_path, *, wired: bool = True, language_advisor=None, quality=None):
                        language_advisor=language_advisor)
                if wired else None)
     app.include_router(create_admin_router(auth=auth, events=events, runtime=lambda: service,
-                                           media_root=tmp_path, worker=WorkerSettings()))
+                                           media_root=tmp_path, worker=worker or WorkerSettings()))
     app.add_middleware(CSRFMiddleware, auth=auth)
     return app, source, events
 
@@ -187,16 +196,19 @@ def test_download_report_separates_the_tier_asked_for_from_the_tier_delivered(tm
                                      headers={"x-csrf-token": token})
 
     payload = run(scenario()).json()
-    # The panel asks for whatever the channel itself prefers, so the request
-    # is empty; the answer is the tier the bytes really are, never an echo.
-    assert payload["requested_quality"] is None
+    # The candidate declared no tiers, so ``lossless_first`` asks for FLAC
+    # anyway; the source answered 320k.  The request is reported as the intent
+    # it was, and the answer is the tier the bytes really are, never an echo.
+    assert payload["requested_quality"] == "flac"
     assert payload["actual_quality"] == "320k"
 
 
 def test_download_report_names_the_container_when_no_tier_is_stated(tmp_path):
     """A source that names no tier still produces a report as full as the file."""
     async def scenario():
-        app, source, _ = build(tmp_path)
+        # ``best_available`` is the pinned 1.0.5 behaviour: with no tier asked
+        # for, the container is the only tier the report can carry.
+        app, source, _ = build(tmp_path, worker=WorkerSettings(quality_policy="best_available"))
         async with client_for(app) as client:
             token = await signed_in(client)
             candidate = await first_candidate(client)
@@ -309,8 +321,9 @@ class BrokenSource(Source):
         super().__init__(source_id)
         self.code = code
 
-    async def download(self, candidate: Candidate):
+    async def download(self, candidate: Candidate, **kwargs):
         self.downloaded.append(candidate.item_id)
+        self.download_kwargs.append(kwargs)
         raise MediaError(self.code)
 
 
@@ -332,7 +345,7 @@ def copy_of(source: Source, *, duration: int = 210) -> Candidate:
                      title="稻香", artist="周杰伦", album="魔杰座", duration=duration, format="mp3")
 
 
-def fallback_app(tmp_path, sources, refreshed, *, language_advisor=None):
+def fallback_app(tmp_path, sources, refreshed, *, language_advisor=None, worker=None):
     """Mount the panel over a runtime whose download can fall back."""
     registry = SourceRegistry([SourceEntry(s.source_id, s.version, s) for s in sources])
     service = FallbackRuntime(registry, {s.source_id: s for s in sources}, refreshed,
@@ -341,7 +354,7 @@ def fallback_app(tmp_path, sources, refreshed, *, language_advisor=None):
     auth.change_credentials("admin", "operator", "new-password")
     app = FastAPI()
     app.include_router(create_admin_router(auth=auth, events=EventLogStore(), runtime=lambda: service,
-                                           media_root=tmp_path, worker=WorkerSettings()))
+                                           media_root=tmp_path, worker=worker or WorkerSettings()))
     app.add_middleware(CSRFMiddleware, auth=auth)
     return app, service
 
@@ -378,9 +391,13 @@ def test_fallback_reuses_one_advised_language_for_every_attempt(tmp_path, monkey
         return "日韩"
 
     broken, backup = BrokenSource(), Source("backup")
+    # ``best_available`` keeps both attempts on the plain path, which is where
+    # each one goes through the downloader; the ``lossless_first`` tier
+    # forwarding has its own tests below.
     app, service = fallback_app(tmp_path, [broken, backup],
                                 SearchResult((copy_of(backup),), (), "v"),
-                                language_advisor=advisor)
+                                language_advisor=advisor,
+                                worker=WorkerSettings(quality_policy="best_available"))
 
     # Both the fallback helper's first attempt and the portal's replacement
     # attempt must receive the same already-resolved value.
@@ -487,22 +504,27 @@ class SlowSource(Source):
         self.stream_budget_seconds = budget
         self.served = False
 
-    async def download(self, candidate: Candidate):
+    async def download(self, candidate: Candidate, **kwargs):
         await asyncio.sleep(0.3)
         self.served = True
-        return await super().download(candidate)
+        return await super().download(candidate, **kwargs)
 
 
-def app_with(tmp_path, source):
+def app_for(tmp_path, service, *, worker=None):
+    """Mount the panel over one assembled runtime."""
     auth, events = AdminAuth(), EventLogStore()
     auth.change_credentials("admin", "operator", "new-password")
     app = FastAPI()
-    service = Runtime(SourceRegistry([SourceEntry(source.source_id, "1.0.0", source)]),
-                      {source.source_id: source})
     app.include_router(create_admin_router(auth=auth, events=events, runtime=lambda: service,
-                                           media_root=tmp_path, worker=WorkerSettings()))
+                                           media_root=tmp_path, worker=worker or WorkerSettings()))
     app.add_middleware(CSRFMiddleware, auth=auth)
     return app
+
+
+def app_with(tmp_path, source):
+    service = Runtime(SourceRegistry([SourceEntry(source.source_id, "1.0.0", source)]),
+                      {source.source_id: source})
+    return app_for(tmp_path, service)
 
 
 def test_the_panel_gives_a_slow_channel_the_budget_it_asks_for(tmp_path):
@@ -523,3 +545,215 @@ def test_the_panel_gives_a_slow_channel_the_budget_it_asks_for(tmp_path):
     assert cut_off.status_code == 504 and cut_off.json()["detail"] == "media_timeout"
     assert ignored.served is False
     assert served.status_code == 200 and slow.served is True
+
+
+# -- the tier the panel asks for -------------------------------------------
+#
+# ``lossless_first`` is the deployment's default, but the panel's download used
+# to leave the tier to the shim's own default.  In this deployment every
+# candidate has ``qualities == ()`` -- the main process answers the search --
+# so the panel downloaded 320k mp3 even under ``lossless_first``.  The panel
+# now computes the tier exactly the way the worker does, from the same settings
+# object, and forwards it to every channel it asks.
+
+
+def test_lossless_first_asks_the_direct_channel_for_flac(tmp_path):
+    """This deployment's real shape: no declared tiers still means "ask for FLAC"."""
+    async def scenario():
+        app, source, _ = build(tmp_path)
+        async with client_for(app) as client:
+            token = await signed_in(client)
+            candidate = await first_candidate(client)
+            response = await client.post("/admin/download", json={"candidate": candidate},
+                                         headers={"x-csrf-token": token})
+        return response, source
+
+    response, source = run(scenario())
+    assert response.status_code == 200
+    assert response.json()["requested_quality"] == "flac"
+    assert source.download_kwargs == [{"quality": "flac"}]
+
+
+def test_lossless_first_asks_the_fallback_and_the_replacement_for_flac(tmp_path):
+    """The retry helper and the replacement each carry the tier they were asked for."""
+    broken, backup = BrokenSource(), Source("backup")
+    app, _ = fallback_app(tmp_path, [broken, backup], SearchResult((copy_of(backup),), (), "v"))
+
+    response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["source_id"] == "backup" and payload["fallback_from"] == "primary"
+    assert payload["requested_quality"] == "flac"
+    # The fallback helper's own first attempt, and the portal's replacement --
+    # which recomputes the tier from its own candidate -- both asked for FLAC.
+    assert broken.download_kwargs == [{"quality": "flac"}]
+    assert backup.download_kwargs == [{"quality": "flac"}]
+
+
+def test_best_available_asks_the_direct_channel_for_no_tier(tmp_path):
+    """The pinned 1.0.5 behaviour: nothing asked for, nothing forwarded."""
+    async def scenario():
+        app, source, _ = build(tmp_path, worker=WorkerSettings(quality_policy="best_available"))
+        async with client_for(app) as client:
+            token = await signed_in(client)
+            candidate = await first_candidate(client)
+            response = await client.post("/admin/download", json={"candidate": candidate},
+                                         headers={"x-csrf-token": token})
+        return response, source
+
+    response, source = run(scenario())
+    assert response.status_code == 200
+    assert response.json()["requested_quality"] is None
+    # ``source_download`` omits the keyword outright for a source that cannot
+    # take one, so "no tier" is an empty forward, not ``quality=None``.
+    assert source.download_kwargs == [{}]
+
+
+def test_best_available_asks_the_fallback_and_the_replacement_for_no_tier(tmp_path):
+    broken, backup = BrokenSource(), Source("backup")
+    app, _ = fallback_app(tmp_path, [broken, backup], SearchResult((copy_of(backup),), (), "v"),
+                          worker=WorkerSettings(quality_policy="best_available"))
+
+    response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
+
+    assert response.status_code == 200 and response.json()["requested_quality"] is None
+    assert broken.download_kwargs == [{}] and backup.download_kwargs == [{}]
+
+
+def test_a_flac_request_answered_with_mp3_is_reported_as_a_downgrade(tmp_path):
+    """The report carries the tier asked for beside the tier the bytes turned out to be."""
+    async def scenario():
+        app, source, _ = build(tmp_path)
+        async with client_for(app) as client:
+            token = await signed_in(client)
+            candidate = await first_candidate(client)
+            return await client.post("/admin/download", json={"candidate": candidate},
+                                     headers={"x-csrf-token": token})
+
+    payload = run(scenario()).json()
+    assert payload["requested_quality"] == "flac"
+    assert payload["actual_quality"] == "mp3"
+
+
+def test_the_panel_search_passes_the_measured_capability(tmp_path, monkeypatch):
+    """The panel's own search reads the same capability the probe recorded."""
+    from musicdl.admin import portal
+
+    def capability(source_id: str) -> bool:
+        return source_id == "primary"
+
+    captured: dict = {}
+    real = portal.search_sources
+
+    async def capture(registry, query, **kwargs):
+        captured.update(kwargs)
+        return await real(registry, query, **kwargs)
+
+    monkeypatch.setattr(portal, "search_sources", capture)
+    source = Source()
+    measured = Runtime(SourceRegistry([SourceEntry("primary", "1.0.0", source)]),
+                       {"primary": source}, lossless_capability=capability)
+
+    async def scenario(app):
+        async with client_for(app) as client:
+            await signed_in(client)
+            return await client.get("/admin/search", params={"q": "稻香"})
+
+    assert run(scenario(app_for(tmp_path, measured))).status_code == 200
+    assert captured["lossless_capability"] is capability
+    # The capability is only one half of the ordering bias; the policy it is
+    # applied under has to come from the worker too, or a best_available
+    # deployment would still run its panel search lossless-first.
+    assert captured["quality_policy"] == "lossless_first"
+    assert captured["quality_preference"] is None
+
+    # A runtime assembled without a roll-up passes nothing rather than
+    # inventing a verdict, and the search keeps the order it always had.
+    captured.clear()
+    plain = Runtime(SourceRegistry([SourceEntry("primary", "1.0.0", source)]), {"primary": source})
+    assert run(scenario(app_for(tmp_path, plain))).status_code == 200
+    assert captured["lossless_capability"] is None
+    assert captured["quality_policy"] == "lossless_first"
+    assert captured["quality_preference"] is None
+
+
+def test_the_panel_search_forwards_the_workers_quality_settings(tmp_path, monkeypatch):
+    """The panel's search runs under the worker's policy and preference."""
+    from musicdl.admin import portal
+
+    captured: dict = {}
+    real = portal.search_sources
+
+    async def capture(registry, query, **kwargs):
+        captured.update(kwargs)
+        return await real(registry, query, **kwargs)
+
+    monkeypatch.setattr(portal, "search_sources", capture)
+    source = Source()
+    service = Runtime(SourceRegistry([SourceEntry("primary", "1.0.0", source)]), {"primary": source})
+    worker = WorkerSettings(quality_policy="best_available", quality_preference="flac")
+
+    async def scenario():
+        async with client_for(app_for(tmp_path, service, worker=worker)) as client:
+            await signed_in(client)
+            return await client.get("/admin/search", params={"q": "稻香"})
+
+    assert run(scenario()).status_code == 200
+    assert captured["quality_policy"] == "best_available"
+    assert captured["quality_preference"] == "flac"
+    assert captured["lossless_capability"] is None
+
+
+def test_best_available_keeps_the_channel_order_v105_left_it(tmp_path, monkeypatch):
+    """Under ``best_available`` the panel's search must not bias by capability.
+
+    Two channels list the same recording and were never ranked apart, so the
+    stable order picks ``alpha``.  ``beta`` was measured lossless-capable: under
+    ``lossless_first`` that promotes it, and under ``best_available`` the bias
+    must not apply, leaving the row exactly where v1.0.5 would have put it.
+    """
+    from musicdl.admin import portal
+
+    def capability(source_id: str) -> bool:
+        return source_id == "beta"
+
+    forwarded: list[dict] = []
+    real = portal.search_sources
+
+    async def capture(registry, query, **kwargs):
+        forwarded.append(kwargs)
+        return await real(registry, query, **kwargs)
+
+    monkeypatch.setattr(portal, "search_sources", capture)
+
+    def panel(worker):
+        alpha, beta = Source("alpha"), Source("beta")
+        registry = SourceRegistry([SourceEntry("alpha", "1.0.0", alpha),
+                                   SourceEntry("beta", "1.0.0", beta)])
+        service = Runtime(registry, {"alpha": alpha, "beta": beta}, lossless_capability=capability)
+        auth, events = AdminAuth(), EventLogStore()
+        auth.change_credentials("admin", "operator", "new-password")
+        app = FastAPI()
+        app.include_router(create_admin_router(auth=auth, events=events, runtime=lambda: service,
+                                               media_root=tmp_path, worker=worker))
+        app.add_middleware(CSRFMiddleware, auth=auth)
+        return app
+
+    async def listed(app):
+        async with client_for(app) as client:
+            await signed_in(client)
+            return (await client.get("/admin/search", params={"q": "稻香 周杰伦"})).json()
+
+    v105 = run(listed(panel(WorkerSettings(quality_policy="best_available"))))
+    assert forwarded[-1]["quality_policy"] == "best_available"
+    assert forwarded[-1]["lossless_capability"] is capability
+    assert v105["count"] == 1
+    assert v105["candidates"][0]["source_id"] == "alpha"
+    assert v105["offers"] == [["alpha", "beta"]]
+
+    promoted = run(listed(panel(WorkerSettings())))
+    assert forwarded[-1]["quality_policy"] == "lossless_first"
+    assert promoted["count"] == 1
+    assert promoted["candidates"][0]["source_id"] == "beta"
+    assert promoted["offers"] == [["beta", "alpha"]]
