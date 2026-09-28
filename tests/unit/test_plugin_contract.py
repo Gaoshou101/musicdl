@@ -434,17 +434,28 @@ def test_a_stated_instant_is_never_read_as_earlier_than_it_was_written():
     assert parse_instant("2026-09-28T12:00:00.1234560Z") == exact
     assert _resolved_media(expires_at="2026-09-28T12:00:00.1234560Z").expires_at == (
         "2026-09-28T12:00:00.123456Z")
-    # The offset can carry a fraction of its own, and Python truncates that one
-    # too: the source's instant is 100 ns later than the second it reads as.
-    stated = datetime(2026, 9, 28, 12, 0, 0, 100000, tzinfo=timezone.utc)
-    offset = _resolved_media(expires_at="2026-09-28T12:00.1-00:00.0000001").expires_at
-    parsed_offset = parse_instant(offset)
-    assert parsed_offset is not None and parsed_offset > stated
-    assert parsed_offset - stated <= timedelta(microseconds=2)
+    # A fraction on the offset is precision this process cannot read, and the
+    # error it would make has no safe direction: Python reads
+    # ``12:00:00-00:00:00.9`` as a zero offset, naming an instant a whole 0.9 s
+    # earlier than the source wrote, while ``+00:00:00.9`` is read 0.9 s late.
+    # An instant stated that way states no lifetime this process can read, so
+    # no URL is refused on a reading it cannot stand behind -- while a stated
+    # expiry it cannot read at all is refused outright rather than dropped.
+    assert parse_instant("2026-09-28T12:00.1-00:00.0000001") is None
+    assert parse_instant("2026-09-28T12:00:00-00:00:00.9") is None
+    assert not has_expired("2026-09-28T12:00:00-00:00:00.9",
+                           now=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    with pytest.raises(ValidationError):
+        _resolved_media(expires_at="2026-09-28T12:00:00-00:00:00.9")
     # The latest instant a datetime can name has no later one to round up to,
     # and rounding into it must not raise out of a contract validator.
     assert parse_instant("9999-12-31T23:59:59.9999991Z") == datetime.max.replace(
         tzinfo=timezone.utc)
+    # Neither may naming a UTC instant this type cannot hold: the reading is
+    # unavailable, not fatal.
+    assert parse_instant("9999-12-31T23:59:59.999999-01:00") is None
+    assert not has_expired("9999-12-31T23:59:59.999999-01:00",
+                           now=datetime(9999, 1, 1, tzinfo=timezone.utc))
 
 
 @pytest.mark.parametrize("quality", ["", "bad value", "quality!", "q" * 17])

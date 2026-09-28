@@ -146,9 +146,10 @@ class PluginResponse(BaseModel):
         return self
 
 
-# Every fraction a source writes, down to the last digit it wrote: an ISO
-# instant may state more precision than a datetime can hold, and the offset
-# can carry a fraction of its own.
+# The seconds field's fraction, down to the last digit a source wrote: an ISO
+# instant may state more precision than a datetime can hold.  An offset's own
+# fraction is refused before this is consulted, so what is left in the text is
+# the seconds field.
 _INSTANT_FRACTION = re.compile(r"[.,](\d+)")
 
 
@@ -164,31 +165,52 @@ def parse_instant(value: Any) -> datetime | None:
     text = value.strip()
     if not text or len(text) > 32:
         return None
+    # A fraction in the UTC offset is precision this process cannot read.
+    # Python reads an offset's fraction faithfully for some shapes and not
+    # others, and the direction of the error depends on the offset's sign --
+    # measured, it reads ``12:00:00-00:00:00.9`` as a zero offset, naming an
+    # instant a whole 0.9 s earlier than the source wrote.  An instant stated
+    # that way is not read at all: ``None`` is the reading that refuses
+    # nothing, so no URL is refused on a reading this process cannot stand
+    # behind.  The offset starts at the first sign after the date; the date's
+    # own dashes sit before it.
+    signs = [at for at in (text.find("+", 10), text.find("-", 10)) if at != -1]
+    if signs and ("." in text[min(signs):] or "," in text[min(signs):]):
+        return None
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
+    # The reading is taken in UTC first, so the round-up below happens on the
+    # instant that is returned rather than on a wall clock that a later
+    # conversion could move past the ceiling again.
+    try:
+        parsed = parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        # The instant names a UTC value this type cannot hold --
+        # ``9999-12-31T23:59:59.999999-01:00`` does -- so no readable lifetime
+        # is stated, and none is enforced.
+        return None
     # A datetime holds microseconds and nothing finer, and dropping the extra
     # digits of a finer fraction reads the instant as *earlier* than the source
     # wrote it: a URL whose source said it dies at ``12:00:00.0000001Z`` would
     # be refused from ``12:00:00`` on, losing its last 100 ns of life.  The
-    # stated instant is a lower bound on the lifetime, so every unrepresentable
-    # tail rounds up by the microsecond that covers it.  An ISO instant carries
-    # at most two fractions -- the seconds field and the offset -- so the
-    # instant is never read as earlier than it was written and never as more
-    # than two microseconds later than it was.  At the representable ceiling
-    # the truncated value stands: no later instant can be named, and the
-    # refusal it could cause is confined to the last microsecond of year 9999.
+    # stated instant is a lower bound on the lifetime, so a nonzero tail rounds
+    # up by the smallest step a datetime has: with the offset's own fraction
+    # refused above, at most one fraction reaches here, so the instant is never
+    # read as earlier than it was written and never as more than a microsecond
+    # later than it was.  A fraction of zeros is not precision and does not
+    # round.  At the representable ceiling there is no later instant to name, so
+    # the truncated value stands and the refusal it could cause is confined to
+    # the last microsecond of year 9999 in UTC.
     tails = sum(1 for fraction in _INSTANT_FRACTION.finditer(text)
                 if fraction.group(1)[6:].strip("0"))
-    if tails:
-        try:
-            parsed += timedelta(microseconds=tails)
-        except OverflowError:
-            pass
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed + timedelta(microseconds=tails)
+    except OverflowError:
+        return parsed
 
 
 def format_instant(value: datetime) -> str:
