@@ -462,6 +462,30 @@ def test_a_replay_of_a_published_artifact_is_not_refused_even_under_strict(tmp_p
     assert [event.error_code for event in events if event.error_code] == ["duration_unverified"]
 
 
+class _Unused:
+    """A source a replay must never reach."""
+
+    async def download(self, _candidate, quality=None):
+        raise AssertionError("a replay must not call the source")
+
+    async def health(self):
+        return True
+
+
+def test_a_replay_reports_the_tier_that_was_asked_for_and_the_container_it_holds(tmp_path):
+    # A replay answers the same question a fresh download does, so it names the
+    # tier the job asked for next to the container the bytes prove.  The record
+    # and the success notice read both, and neither is inferred from the other.
+    data = mp3_bytes(200)
+    reservation = _published(tmp_path, data)
+    result = asyncio.run(download_candidate(
+        candidate("mp3"), _Unused(), tmp_path, request_id="r", reservation=reservation,
+        quality="320k"))
+    assert (result.requested_quality, result.actual_quality) == ("320k", "mp3")
+    assert result.size_bytes == len(data)
+    assert result.relative_path.as_posix() == "Song.mp3"
+
+
 def _staged(tmp_path, data: bytes) -> ArtifactRecord:
     """An artifact this job streamed to its staging path but never published."""
     staged = tmp_path / ".staging" / "t.part"

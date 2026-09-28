@@ -201,7 +201,8 @@ def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation
                      allow_format_change: bool = False,
                      measured: float | None | object = _UNSET,
                      checked: tuple[int, str, str] | None = None,
-                     enforce_duration: bool = True) -> DownloadResult:
+                     enforce_duration: bool = True,
+                     requested_quality: str | None = None) -> DownloadResult:
     size, digest, extension = (
         _replay_checks(candidate, reservation, target, allow_format_change=allow_format_change)
         if checked is None else checked)
@@ -214,9 +215,13 @@ def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation
     if measured is _UNSET:
         measured = _verified_duration(candidate, target, verify_duration, request_id, record,
                                       enforce=enforce_duration)
+    # A replay answers the same question a fresh download does, so it names the
+    # tier the job asked for as well as the container the bytes prove; the two
+    # fields are what the record and the success notice report.
     return DownloadResult(target.relative_to(root), digest, size, reservation.media_type, extension,
                           normalize_language(language), duration_seconds=measured,
                           bitrate_kbps=None if measured is None else bitrate_kbps(size, measured),
+                          requested_quality=requested_quality,
                           actual_quality=extension.lstrip(".").lower() or None)
 
 
@@ -323,7 +328,7 @@ async def _resume_reservation(
         return _replayed_result(root, target, candidate, reservation, language,
                                 verify_duration=verify_duration, request_id=request_id, record=record,
                                 allow_format_change=quality is not None,
-                                enforce_duration=False)
+                                enforce_duration=False, requested_quality=quality)
     if reservation.state == "prepared":
         if temporary.exists() or temporary.is_symlink() or target.exists() or target.is_symlink():
             raise MediaError("artifact_uncertain")
@@ -362,7 +367,7 @@ async def _resume_reservation(
             return _replayed_result(root, target, candidate, reservation, language,
                                     verify_duration=verify_duration, request_id=request_id, record=record,
                                     allow_format_change=quality is not None,
-                                    measured=measured, checked=checked)
+                                    measured=measured, checked=checked, requested_quality=quality)
         except MediaError as exc:
             if exc.code == "incomplete_audio":
                 # This artifact never reached ``published``, so nothing refers
