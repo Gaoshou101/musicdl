@@ -1,6 +1,6 @@
 ---
 name: sol-luna
-description: Run the repository's Astra-planned and Astra-dispatched, session-model-executed, Sol-reviewed workflow for implementation, investigation, testing, and review tasks that benefit from explicit delegation and evidence-based acceptance.
+description: Run the repository's Astra-planned and Astra-dispatched, deepseek-v4.1-flash-executed, Sol-reviewed workflow for implementation, investigation, testing, and review tasks that benefit from explicit delegation and evidence-based acceptance.
 ---
 
 # Astra-Sol-Luna workflow
@@ -14,15 +14,15 @@ Use generic agents that permit explicit model and reasoning overrides. When full
 | Stage | Model | Reasoning |
 | --- | --- | --- |
 | Plan and dispatch | `gpt-6-astra` | Automatically selected; `medium` by default |
-| Concrete work | The current session's main model (default) | Inherited from that session's setting |
+| Concrete work | `deepseek-v4.1-flash` (default) | Fixed at `high` |
 | Concrete-work fallback | `gpt-6-luna` | Fixed at `max`, with the fast service tier |
 | Independent review | `gpt-6-sol` | Automatically selected; `medium` by default |
 
 Rules:
 
-- Codex resolves each subagent setting from an explicit spawn value, then the corresponding `[agents]` default, then the parent session's value. This project pins no `[agents]` model default, so an unpinned spawn inherits the session's main model and reasoning.
+- Codex resolves each subagent setting from an explicit spawn value, then the corresponding `[agents]` default, then the parent session's value. This project pins `default_subagent_model = "deepseek-v4.1-flash"` and `default_subagent_reasoning_effort = "high"` in `.codex/config.toml`, so an unpinned concrete-work spawn resolves to that pair.
 - Astra and Sol each start at `medium` and raise their reasoning automatically with the complexity actually present in their stage.
-- Concrete-work subagents run on the same model as the current session's main model and inherit that session's reasoning setting. Spawn them without a model or reasoning override so Codex resolves both from the parent session; `gpt-6-luna` at `max` is only the fallback, not the default. If the subagent tool cannot create a subagent on the session model, fall back to `gpt-6-luna` with reasoning fixed at `max` and request the fast service tier; record the fallback and its reason.
+- Concrete-work subagents run on `deepseek-v4.1-flash` with reasoning fixed at `high`. Spawn them without a model or reasoning override so Codex resolves both from the `[agents]` default; add an explicit override only when it is required, and record it. `gpt-6-luna` at `max` with the fast service tier is only the fallback, not the default. If the subagent tool cannot create a subagent on `deepseek-v4.1-flash` at `high`, fall back to `gpt-6-luna` with reasoning fixed at `max` and request the fast service tier; record the fallback and its reason.
 - Do not use fixed-model or fixed-effort roles when they cannot satisfy these settings.
 - Record requested settings separately from observable runtime settings, and never claim a model, reasoning level, provider mode, or service tier that the tool did not expose or confirm.
 
@@ -65,7 +65,7 @@ If the runtime exposes a distinct provider `fast` or service-tier control, reque
 
 ## Capability preflight
 
-Before dispatch, verify that the subagent tool actually supports the required configuration — an inherited session model and reasoning by default, or an explicit `gpt-6-luna` at `max` as the fallback — the required reasoning levels, and enough concurrency for the planned wave. A model shown elsewhere in the app does not prove subagent availability.
+Before dispatch, verify that the subagent tool actually supports the required configuration — `deepseek-v4.1-flash` at `high` as the default, or an explicit `gpt-6-luna` at `max` as the fallback — the required reasoning levels, and enough concurrency for the planned wave. A model shown elsewhere in the app does not prove subagent availability.
 
 If a required model or reasoning control is unavailable, finish safe preparation and report the exact blocker. Do not silently substitute a model or reasoning level. If the fan-out decision cannot be honored within the observed limits, keep only the useful slices that do fit, hold shared-file or dependent work serial, and report the capability shortfall and actual topology.
 
