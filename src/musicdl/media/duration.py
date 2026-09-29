@@ -1,10 +1,9 @@
-"""Read the real playing time out of a finished audio file.
+"""Measure a finished audio file and conservatively verify supported streams.
 
-Only container headers are parsed, so this stays plain Python: no ffmpeg, no
-ffprobe, no native decoder, and no new dependency.  A file this module cannot
-understand answers ``None`` instead of raising, because bytes nobody here
-recognises are not evidence of anything -- the caller decides what an unknown
-duration means for the download it is holding.
+The parsers stay plain Python: no ffmpeg, no ffprobe, no native decoder, and
+no new dependency. A file this module cannot understand answers ``None`` for
+duration and ``unverified`` for stream integrity, because bytes nobody here
+recognises are not evidence of anything -- the caller decides what that means.
 
 What is measured is what the file really holds, not what its headers claim:
 a 30-second preview or a stream cut off mid-way measures short, which is the
@@ -14,7 +13,10 @@ whole point of asking.
 from __future__ import annotations
 
 import io
+import mmap
 import os
+import time
+from dataclasses import dataclass
 from typing import Final
 
 # Enough for a FLAC ``STREAMINFO`` block and for an MP3's first frame plus its
@@ -38,6 +40,8 @@ MAX_MP3_FRAMES: Final[int] = 4_000_000
 # the piece before the tag.  Both bounds keep a corrupt file's scan finite.
 MAX_MP3_RESYNCS: Final[int] = 32
 RESYNC_SCAN_BYTES: Final[int] = 512 * 1024
+STREAM_SCAN_TIMEOUT_SECONDS: Final[float] = 5.0
+MAX_FLAC_METADATA_BYTES: Final[int] = 64 * 1024 * 1024
 
 _MPEG1_SAMPLE_RATES: Final[tuple[int, ...]] = (44100, 48000, 32000)
 _MPEG2_SAMPLE_RATES: Final[tuple[int, ...]] = (22050, 24000, 16000)
@@ -51,13 +55,544 @@ _LAYER3_BITRATES: Final[dict[float, tuple[int, ...]]] = {
 _LAYER3_SAMPLES: Final[dict[float, int]] = {1.0: 1152, 2.0: 576}
 
 
+@dataclass(frozen=True)
+class StreamIntegrity:
+    """A conservative answer about whether a container holds its declared media."""
+
+    format: str | None
+    status: str
+
+
+def verify_stream_integrity(
+    path: str | os.PathLike[str],
+    *,
+    expected_duration: float | None = None,
+    timeout_seconds: float = STREAM_SCAN_TIMEOUT_SECONDS,
+) -> StreamIntegrity:
+    """Check FLAC frames or MP4 sample sizes against bytes actually in the file.
+
+    ``complete`` and ``incomplete`` are returned only when the relevant
+    container declarations and the entire required scan are trustworthy.
+    Unsupported shapes, timeouts, and damaged metadata return ``unverified``.
+    MP3 stays on its existing frame-chain path in :func:`duration_seconds`.
+    """
+    file_format: str | None = None
+    try:
+        with open(os.fspath(path), "rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size <= 0:
+                return StreamIntegrity(None, "unverified")
+            head = handle.read(min(HEAD_BYTES, size))
+            if _has_flac_magic(head):
+                file_format = "flac"
+            elif head[:3] == b"ID3" and len(head) >= 10:
+                start = _id3_size(head[:10])
+                if start is not None:
+                    handle.seek(start)
+                    if handle.read(4) == b"fLaC":
+                        file_format = "flac"
+                    else:
+                        file_format = "mp4" if _is_mp4(head) else None
+            elif _is_mp4(head):
+                file_format = "mp4"
+            else:
+                return StreamIntegrity(None, "unverified")
+            if file_format is None:
+                return StreamIntegrity(None, "unverified")
+            deadline = time.monotonic() + max(0.0, timeout_seconds)
+            if time.monotonic() >= deadline:
+                return StreamIntegrity(file_format, "unverified")
+            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                if file_format == "flac":
+                    status = _verify_flac_integrity(data, deadline)
+                else:
+                    status = _verify_mp4_integrity(data, deadline, expected_duration)
+            return StreamIntegrity(file_format, status)
+    except Exception:  # noqa: BLE001 - an uncertain parser or I/O result fails open
+        return StreamIntegrity(file_format, "unverified")
+
+
+def _has_flac_magic(data) -> bool:
+    if data[:4] == b"fLaC":
+        return True
+    if data[:3] != b"ID3" or len(data) < 10:
+        return False
+    start = _id3_size(data[:10])
+    return start is not None and data[start:start + 4] == b"fLaC"
+
+
+def _verify_flac_integrity(data, deadline: float) -> str:
+    start = 0
+    if data[:3] == b"ID3":
+        start = _id3_size(data[:10])
+        if start is None:
+            return "unverified"
+    if data[start:start + 4] != b"fLaC":
+        return "unverified"
+
+    offset = start + 4
+    streaminfo: tuple[int, int, int, int, int, int] | None = None
+    metadata_start = offset
+    metadata_blocks = 0
+    while offset + 4 <= len(data):
+        if time.monotonic() >= deadline:
+            return "unverified"
+        block_header = data[offset]
+        last = bool(block_header & 0x80)
+        kind = block_header & 0x7F
+        length = int.from_bytes(data[offset + 1:offset + 4], "big")
+        body = offset + 4
+        block_end = body + length
+        if block_end > len(data) or block_end - metadata_start > MAX_FLAC_METADATA_BYTES:
+            return "unverified"
+        if metadata_blocks == 0 and (kind != 0 or length != 34):
+            return "unverified"
+        if kind == 0:
+            if length != 34 or streaminfo is not None:
+                return "unverified"
+            packed = int.from_bytes(data[body + 10:body + 18], "big")
+            sample_rate = packed >> 44
+            channels = ((packed >> 41) & 0x07) + 1
+            bits_per_sample = ((packed >> 36) & 0x1F) + 1
+            total_samples = packed & ((1 << 36) - 1)
+            min_block = int.from_bytes(data[body:body + 2], "big")
+            max_block = int.from_bytes(data[body + 2:body + 4], "big")
+            if min_block <= 0 or max_block < min_block:
+                return "unverified"
+            streaminfo = sample_rate, total_samples, channels, bits_per_sample, min_block, max_block
+        metadata_blocks += 1
+        offset = block_end
+        if last:
+            break
+    else:
+        return "unverified"
+
+    if streaminfo is None or streaminfo[0] <= 0 or streaminfo[1] <= 0:
+        return "unverified"
+    sample_rate, total_samples, channels, bits_per_sample, min_block, max_block = streaminfo
+    frame_start = offset
+    accepted = 0
+    actual_samples = 0
+    blocking_strategy: int | None = None
+    previous_number: int | None = None
+    previous_block_samples: int | None = None
+    final_frame_start: int | None = None
+    final_frame_payload_start: int | None = None
+    position = frame_start
+    candidates = 0
+    while position + 1 < len(data):
+        if time.monotonic() >= deadline:
+            return "unverified"
+        scan_end = min(len(data), position + SCAN_CHUNK_BYTES)
+        candidate = data.find(b"\xff", position, scan_end)
+        if candidate < 0:
+            position = scan_end
+            continue
+        position = candidate + 1
+        if data[candidate + 1] not in (0xF8, 0xF9):
+            continue
+        candidates += 1
+        if candidates % 256 == 0 and time.monotonic() >= deadline:
+            return "unverified"
+        parsed = _flac_frame_header(data, candidate, sample_rate, channels, bits_per_sample)
+        if parsed is None:
+            continue
+        strategy, number, block_samples, crc_valid, payload_start = parsed
+        if accepted == 0:
+            if number != 0:
+                continue
+            blocking_strategy = strategy
+        else:
+            if strategy != blocking_strategy:
+                return "unverified"
+            expected_number = (previous_number + 1 if strategy == 0
+                               else previous_number + previous_block_samples)
+            if number != expected_number:
+                if number > expected_number:
+                    # A trusted but non-contiguous frame means the parser did
+                    # not account for every frame, so a short count is not proof.
+                    return "unverified"
+                continue
+            if previous_block_samples is not None and previous_block_samples < min_block:
+                return "unverified"
+        if not crc_valid:
+            return "unverified"
+        if block_samples > max_block:
+            return "unverified"
+        accepted += 1
+        actual_samples += block_samples
+        previous_number, previous_block_samples = number, block_samples
+        final_frame_start = candidate
+        final_frame_payload_start = payload_start
+
+    if time.monotonic() >= deadline or accepted == 0:
+        return "unverified"
+    claimed_duration = total_samples / sample_rate
+    short_tolerance, _ = duration_tolerance(claimed_duration)
+    missing_samples = total_samples - actual_samples
+    if missing_samples < 0:
+        return "unverified"
+    if missing_samples > short_tolerance * sample_rate:
+        return "incomplete"
+    # Header CRC-8 only proves that the frame's declaration is intact. It says
+    # nothing about the subframes or the trailing frame CRC-16. Treat EOF as
+    # the terminal boundary and require a non-empty payload plus its checksum
+    # to match before its declared samples can count as present.
+    if (final_frame_start is None or final_frame_payload_start is None
+            or not _flac_terminal_frame_crc_valid(
+                data, final_frame_start, final_frame_payload_start, len(data), deadline)):
+        return "unverified"
+    return "complete"
+
+
+def _flac_frame_header(data, offset: int, stream_rate: int, stream_channels: int,
+                       stream_bits: int) -> tuple[int, int, int, bool, int] | None:
+    """Parse a FLAC frame header and verify its CRC-8 at its variable offset."""
+    if offset + 6 > len(data) or data[offset] != 0xFF or data[offset + 1] not in (0xF8, 0xF9):
+        return None
+    strategy = data[offset + 1] & 0x01
+    block_code, rate_code = data[offset + 2] >> 4, data[offset + 2] & 0x0F
+    channel_assignment, sample_size_code, reserved = data[offset + 3] >> 4, (data[offset + 3] >> 1) & 0x07, data[offset + 3] & 1
+    if (block_code == 0 or rate_code == 15
+            or channel_assignment > 10 or sample_size_code == 3 or reserved):
+        return None
+    frame_channels = channel_assignment + 1 if channel_assignment <= 7 else 2
+    frame_bits = {0: stream_bits, 1: 8, 2: 12, 4: 16, 5: 20, 6: 24, 7: 32}[sample_size_code]
+    if frame_channels != stream_channels or frame_bits != stream_bits:
+        return None
+    number = _flac_utf8_number_at(data, offset + 4)
+    if number is None:
+        return None
+    frame_number, number_length = number
+    cursor = offset + 4 + number_length
+    if block_code in (6, 7):
+        extra = 1 if block_code == 6 else 2
+        if cursor + extra > len(data):
+            return None
+        block_samples = int.from_bytes(data[cursor:cursor + extra], "big") + 1
+        cursor += extra
+    elif block_code == 1:
+        block_samples = 192
+    elif block_code <= 5:
+        block_samples = 576 << (block_code - 2)
+    else:
+        block_samples = 256 << (block_code - 8)
+    if rate_code == 0:
+        frame_rate = stream_rate
+    elif 1 <= rate_code <= 11:
+        frame_rate = (88200, 176400, 192000, 8000, 16000, 22050,
+                      24000, 32000, 44100, 48000, 96000)[rate_code - 1]
+    elif rate_code == 12:
+        if cursor >= len(data):
+            return None
+        frame_rate = data[cursor] * 1000
+        cursor += 1
+    elif rate_code in (13, 14):
+        if cursor + 2 > len(data):
+            return None
+        frame_rate = int.from_bytes(data[cursor:cursor + 2], "big")
+        if rate_code == 14:
+            frame_rate *= 10
+        cursor += 2
+    else:
+        return None
+    if frame_rate != stream_rate:
+        return None
+    if cursor >= len(data):
+        return None
+    header_crc = data[cursor]
+    return strategy, frame_number, block_samples, _flac_crc8(data[offset:cursor]) == header_crc, cursor + 1
+
+
+def _flac_terminal_frame_crc_valid(data, frame_start: int, payload_start: int,
+                                   frame_end: int, deadline: float) -> bool:
+    """Validate the last frame's payload and CRC-16 at the physical EOF."""
+    checksum_start = frame_end - 2
+    if payload_start >= checksum_start:
+        return False
+    crc = 0
+    for index in range(frame_start, checksum_start):
+        if (index - frame_start) % 8192 == 0 and time.monotonic() >= deadline:
+            return False
+        crc = ((crc << 8) & 0xFFFF) ^ _FLAC_CRC16_TABLE[((crc >> 8) ^ data[index]) & 0xFF]
+    return crc == int.from_bytes(data[checksum_start:frame_end], "big")
+
+
+def _flac_crc16_table() -> tuple[int, ...]:
+    table = []
+    for byte in range(256):
+        crc = byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x8005) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+        table.append(crc)
+    return tuple(table)
+
+
+_FLAC_CRC16_TABLE: Final[tuple[int, ...]] = _flac_crc16_table()
+
+
+def _flac_utf8_number_at(data, offset: int) -> tuple[int, int] | None:
+    if offset >= len(data):
+        return None
+    first = data[offset]
+    if first < 0x80:
+        return first, 1
+    mask, length = 0x80, 0
+    while first & mask:
+        length += 1
+        mask >>= 1
+    if length < 2 or length > 7 or offset + length > len(data):
+        return None
+    value = first & ((1 << (7 - length)) - 1)
+    for index in range(1, length):
+        byte = data[offset + index]
+        if byte & 0xC0 != 0x80:
+            return None
+        value = (value << 6) | (byte & 0x3F)
+    minimum = (0x80, 0x800, 0x10000, 0x200000, 0x4000000, 0x80000000)[length - 2]
+    if value < minimum:
+        return None
+    return value, length
+
+
+def _flac_crc8(data) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def _verify_mp4_integrity(data, deadline: float, expected_duration: float | None) -> str:
+    offset, mdat_bytes, moov = 0, 0, None
+    truncated_mdat = False
+    while offset < len(data):
+        if time.monotonic() >= deadline or offset + 8 > len(data):
+            return "unverified"
+        box = _mp4_box_at(data, offset, len(data))
+        if box is None:
+            return "unverified"
+        kind, body, end, declared_end = box
+        if kind == b"moof":
+            return "unverified"
+        if kind == b"moov":
+            if end - offset > MAX_MOOV_BYTES or declared_end > len(data):
+                return "unverified"
+            moov = (body, end)
+        elif kind == b"mdat":
+            mdat_bytes += max(0, end - body)
+            if declared_end > len(data):
+                # The final mdat header itself proves that the physical file
+                # ended before its declared payload did.
+                truncated_mdat = True
+                offset = len(data)
+                break
+        offset = end
+    if offset != len(data) or moov is None or mdat_bytes <= 0:
+        return "unverified"
+    # A declared mdat that runs beyond physical EOF makes the box chain
+    # incomplete even when its available bytes happen to cover the sample
+    # table. Do not call that complete based on byte counts alone.
+    if truncated_mdat:
+        return "unverified"
+    parsed = _mp4_audio_sample_bytes(data, *moov, deadline)
+    if parsed is None:
+        return "unverified"
+    sample_bytes = parsed
+    if sample_bytes <= 0:
+        return "unverified"
+    if mdat_bytes >= sample_bytes:
+        return "complete"
+    duration = expected_duration
+    if duration is None or duration <= 0:
+        duration = _mp4_movie_duration(data, *moov, deadline)
+    if duration is None or duration <= 0:
+        return "unverified"
+    short_tolerance, _ = duration_tolerance(duration)
+    allowed_missing = sample_bytes * short_tolerance / duration
+    if sample_bytes - mdat_bytes > allowed_missing:
+        return "incomplete"
+    return "complete"
+
+
+def _mp4_movie_duration(data, start: int, end: int, deadline: float) -> float | None:
+    """Read mvhd duration from an already bounded, complete moov box."""
+    children = _mp4_children(data, start, end, deadline)
+    if children is None:
+        return None
+    mvhd = next(((body, child_end) for kind, body, child_end in children if kind == b"mvhd"), None)
+    if mvhd is None:
+        return None
+    return _read_mvhd(data[mvhd[0]:mvhd[1]])
+
+
+def _mp4_box_at(data, offset: int, parent_end: int):
+    if offset + 8 > parent_end:
+        return None
+    size = int.from_bytes(data[offset:offset + 4], "big")
+    kind = data[offset + 4:offset + 8]
+    body = offset + 8
+    if size == 1:
+        if body + 8 > parent_end:
+            return None
+        size = int.from_bytes(data[body:body + 8], "big")
+        body += 8
+    elif size == 0:
+        size = parent_end - offset
+    declared_end = offset + size
+    if size < body - offset:
+        return None
+    return kind, body, min(declared_end, parent_end), declared_end
+
+
+def _mp4_children(data, start: int, end: int, deadline: float):
+    children = []
+    offset = start
+    while offset < end:
+        if time.monotonic() >= deadline:
+            return None
+        box = _mp4_box_at(data, offset, end)
+        if box is None or box[3] > end:
+            return None
+        kind, body, child_end, _ = box
+        children.append((kind, body, child_end))
+        offset = child_end
+    return children if offset == end else None
+
+
+def _mp4_audio_sample_bytes(data, start: int, end: int, deadline: float):
+    children = _mp4_children(data, start, end, deadline)
+    if children is None:
+        return None
+    total_sample_bytes = 0
+    audio_tracks = 0
+    for kind, body, child_end in children:
+        if kind == b"trak":
+            track = _mp4_track_sample_bytes(data, body, child_end, deadline)
+            if track is None:
+                return None
+            is_audio, sample_bytes = track
+            if is_audio:
+                total_sample_bytes += sample_bytes
+                audio_tracks += 1
+    if audio_tracks == 0:
+        return None
+    return total_sample_bytes
+
+
+def _mp4_track_sample_bytes(data, start: int, end: int, deadline: float):
+    track_boxes = _mp4_children(data, start, end, deadline)
+    if track_boxes is None:
+        return None
+    mdia = next(((body, child_end) for kind, body, child_end in track_boxes if kind == b"mdia"), None)
+    if mdia is None:
+        return False, 0
+    mdia_boxes = _mp4_children(data, *mdia, deadline)
+    if mdia_boxes is None:
+        return None
+    handler = next((data[body + 8:body + 12] for kind, body, child_end in mdia_boxes
+                    if kind == b"hdlr" and child_end - body >= 12), None)
+    if handler is None:
+        return None
+    if handler != b"soun":
+        return False, 0
+    minf = next(((body, child_end) for kind, body, child_end in mdia_boxes if kind == b"minf"), None)
+    if minf is None:
+        return None
+    minf_boxes = _mp4_children(data, *minf, deadline)
+    if minf_boxes is None:
+        return None
+    stbl = next(((body, child_end) for kind, body, child_end in minf_boxes if kind == b"stbl"), None)
+    if stbl is None:
+        return None
+    stbl_boxes = _mp4_children(data, *stbl, deadline)
+    if stbl_boxes is None:
+        return None
+    tables = [(kind, body, child_end) for kind, body, child_end in stbl_boxes
+              if kind in (b"stsz", b"stz2")]
+    if len(tables) != 1:
+        return None
+    return True, _mp4_sample_table_sum(data, *tables[0], deadline)
+
+
+def _mp4_sample_table_sum(data, kind: bytes, start: int, end: int, deadline: float) -> int | None:
+    payload_length = end - start
+    if kind == b"stsz":
+        if payload_length < 12 or data[start:start + 4] != bytes(4):
+            return None
+        sample_size = int.from_bytes(data[start + 4:start + 8], "big")
+        sample_count = int.from_bytes(data[start + 8:start + 12], "big")
+        if sample_count <= 0:
+            return None
+        if sample_size:
+            if payload_length != 12:
+                return None
+            return sample_size * sample_count
+        table_start = start + 12
+        if table_start + sample_count * 4 != end:
+            return None
+        total = 0
+        for index in range(sample_count):
+            if index % 8192 == 0 and time.monotonic() >= deadline:
+                return None
+            at = table_start + index * 4
+            total += int.from_bytes(data[at:at + 4], "big")
+        return total
+    if payload_length < 12 or data[start:start + 4] != bytes(4) or data[start + 4:start + 7] != bytes(3):
+        return None
+    field_size = data[start + 7]
+    sample_count = int.from_bytes(data[start + 8:start + 12], "big")
+    table_start = start + 12
+    if sample_count <= 0:
+        return None
+    if field_size == 4:
+        byte_count = (sample_count + 1) // 2
+        if table_start + byte_count != end:
+            return None
+        total = 0
+        for index in range(byte_count):
+            if index % 16384 == 0 and time.monotonic() >= deadline:
+                return None
+            packed = data[table_start + index]
+            total += packed >> 4
+            if index * 2 + 1 < sample_count:
+                total += packed & 0x0F
+        return total
+    if field_size not in (8, 16):
+        return None
+    width = field_size // 8
+    if table_start + sample_count * width != end:
+        return None
+    total = 0
+    for index in range(sample_count):
+        if index % 8192 == 0 and time.monotonic() >= deadline:
+            return None
+        at = table_start + index * width
+        total += int.from_bytes(data[at:at + width], "big")
+    return total
+
+
 def duration_seconds(path: str | os.PathLike[str]) -> float | None:
     """The playing time one file really holds, or ``None`` when it is unknown."""
     try:
         with open(os.fspath(path), "rb") as handle:
             head = handle.read(HEAD_BYTES)
-            if head.startswith(b"fLaC"):
-                return _flac_duration(head)
+            flac_start = _flac_start(head)
+            if flac_start is None and head[:3] == b"ID3" and len(head) >= 10:
+                possible_start = _id3_size(head[:10])
+                if possible_start is not None:
+                    handle.seek(possible_start)
+                    if handle.read(4) == b"fLaC":
+                        handle.seek(possible_start)
+                        head = handle.read(HEAD_BYTES)
+                        flac_start = 0
+            if flac_start is not None:
+                if flac_start >= len(head):
+                    handle.seek(flac_start)
+                    head = handle.read(HEAD_BYTES)
+                    flac_start = 0
+                return _flac_duration(head[flac_start:])
             if _is_mp4(head):
                 return _mp4_file_duration(handle, os.fstat(handle.fileno()).st_size)
             if _is_mp3(head):
@@ -71,8 +606,9 @@ def duration_seconds(path: str | os.PathLike[str]) -> float | None:
 def container_duration(data: bytes) -> float | None:
     """The same answer for bytes already in hand, and the shape the tests use."""
     try:
-        if data.startswith(b"fLaC"):
-            return _flac_duration(data)
+        flac_start = _flac_start(data)
+        if flac_start is not None:
+            return _flac_duration(data[flac_start:])
         if _is_mp4(data):
             return _mp4_duration(data)
         if _is_mp3(data):
@@ -114,6 +650,16 @@ def bitrate_kbps(size_bytes: int, duration: float) -> int | None:
 
 def _is_mp4(head: bytes) -> bool:
     return len(head) >= 12 and head[4:8] == b"ftyp"
+
+
+def _flac_start(data: bytes) -> int | None:
+    if data[:4] == b"fLaC":
+        return 0
+    if data[:3] == b"ID3" and len(data) >= 10:
+        start = _id3_size(data[:10])
+        if start is not None and data[start:start + 4] == b"fLaC":
+            return start
+    return None
 
 
 def _is_mp3(head: bytes) -> bool:

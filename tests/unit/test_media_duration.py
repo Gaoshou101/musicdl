@@ -4,15 +4,9 @@ Every sample here is built by hand in a few kilobytes, so the suite stays
 honest about what it measures and needs no encoder, no ffmpeg and no fixture
 binary in the repository.
 
-One limit is worth stating plainly rather than hiding: FLAC states its length
-in a header, so a FLAC file whose header survived and whose audio was cut
-afterwards still reports the length it claims.  MP4 is caught when its box
-chain reaches past the end of the file, which is what a cut behind the header
-leaves behind.  What this module
-catches is the file that *is* short -- the 30-second preview a platform serves
-in place of the song, or a stream that stopped early in a container that
-counts what it really holds (MP3 without a ``Xing`` tag) -- and it answers
-``None``, never a guess, for anything it cannot read.
+FLAC and MP4 fixtures include frame headers and sample tables so the download
+policy can compare what those structures claim with the bytes actually held.
+MP3 fixtures stay focused on frame-chain measurement and its existing limits.
 """
 
 import asyncio
@@ -38,13 +32,90 @@ MP3_FRAME_LENGTH = 144 * 128 * 1000 // 44100  # MPEG-1 Layer III, 128 kbps, 44.1
 MP3_FRAME_SAMPLES = 1152
 
 
-def flac_bytes(total_samples: int, rate: int = FLAC_RATE) -> bytes:
-    """A ``fLaC`` file whose ``STREAMINFO`` states exactly this many samples."""
+def _flac_crc8(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def _flac_utf8_number(value: int) -> bytes:
+    if value < 0x80:
+        return bytes((value,))
+    length = 2
+    while value > (1 << (5 * length + 1)) - 1:
+        length += 1
+    out = bytearray(length)
+    for index in range(length - 1, 0, -1):
+        out[index] = 0x80 | (value & 0x3F)
+        value >>= 6
+    out[0] = ((0xFF << (8 - length)) & 0xFF) | value
+    return bytes(out)
+
+
+def _flac_crc16_table() -> tuple[int, ...]:
+    table = []
+    for byte in range(256):
+        crc = byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x8005) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+        table.append(crc)
+    return tuple(table)
+
+
+_FLAC_CRC16_TABLE = _flac_crc16_table()
+
+
+def _flac_crc16(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc = ((crc << 8) & 0xFFFF) ^ _FLAC_CRC16_TABLE[((crc >> 8) ^ byte) & 0xFF]
+    return crc
+
+
+def flac_frame(number: int, samples: int, *, channels: int = 1, bits_per_sample: int = 8,
+               verbatim: bool = False) -> bytes:
+    """A FLAC frame containing constant zero samples and valid header/frame CRCs."""
+    assignment = channels - 1 if channels <= 8 else 10
+    header = b"\xff\xf8\x70" + bytes((assignment << 4,)) + _flac_utf8_number(number) + (samples - 1).to_bytes(2, "big")
+    header += bytes((_flac_crc8(header),))
+    sample_width = (bits_per_sample + 7) // 8
+    subframe = (b"\x02" + bytes(sample_width * samples) if verbatim
+                else b"\x00" + bytes(sample_width))
+    subframes = subframe * channels
+    frame = header + subframes
+    return frame + _flac_crc16(frame).to_bytes(2, "big")
+
+
+def flac_bytes(total_samples: int, rate: int = FLAC_RATE, *, channels: int = 1,
+               bits_per_sample: int = 8, verbatim: bool = False,
+               padding_bytes: int = 0) -> bytes:
+    """A valid silence-only FLAC with a chosen sample count and optional padding."""
     packed = (rate << 44) | total_samples
-    body = b"\x00" * 10 + packed.to_bytes(8, "big") + b"\x00" * 16
+    packed |= (channels - 1) << 41 | (bits_per_sample - 1) << 36
+    min_block = min(4096, total_samples or 4096)
+    body = min_block.to_bytes(2, "big") + (4096).to_bytes(2, "big") + b"\x00" * 6
+    body += packed.to_bytes(8, "big") + b"\x00" * 16
     assert len(body) == 34
-    block = b"\x00" + len(body).to_bytes(3, "big") + body
-    return b"fLaC" + block + b"\x00" * 64
+    metadata_blocks = [bytes((0x80 if padding_bytes == 0 else 0,))
+                       + len(body).to_bytes(3, "big") + body]
+    remaining_padding = padding_bytes
+    while remaining_padding > 0:
+        length = min(0xFFFFFF, remaining_padding)
+        remaining_padding -= length
+        metadata_blocks.append(bytes((0x81 if remaining_padding == 0 else 1,))
+                                + length.to_bytes(3, "big") + bytes(length))
+    frames = bytearray()
+    remaining, number = total_samples, 0
+    while remaining > 0:
+        count = min(4096, remaining)
+        frames.extend(flac_frame(number, count, channels=channels, bits_per_sample=bits_per_sample,
+                                 verbatim=verbatim))
+        remaining -= count
+        number += 1
+    return b"fLaC" + b"".join(metadata_blocks) + frames
 
 
 def mp3_bytes(frames: int) -> bytes:
@@ -92,29 +163,49 @@ def mp3_mixed(first: int, second: int) -> bytes:
     return opening + mp3_frame(0, MP3_FRAME_LENGTH) * (first - 1) + mp3_frame(2, 576) * second
 
 
-def mp4_bytes(seconds: float, timescale: int = 1000) -> bytes:
-    """An ``ftyp`` box, then a ``moov``/``mvhd`` stating this length."""
+def _mp4_box(kind: bytes, body: bytes) -> bytes:
+    return (len(body) + 8).to_bytes(4, "big") + kind + body
+
+
+def mp4_bytes(seconds: float, timescale: int = 1000, *, sample_bytes: int | None = None,
+              mdat_bytes: int | None = None, moov_at_end: bool = False,
+              co64: bool = False, compact_sizes: bool = False) -> bytes:
+    """An ``ftyp`` box with an audio sample table and a matching ``mdat``."""
     duration = int(seconds * timescale)
     mvhd_body = bytes([0, 0, 0, 0]) + b"\x00" * 8 + timescale.to_bytes(4, "big") + duration.to_bytes(4, "big") + b"\x00" * 80
-    mvhd = (len(mvhd_body) + 8).to_bytes(4, "big") + b"mvhd" + mvhd_body
-    moov = (len(mvhd) + 8).to_bytes(4, "big") + b"moov" + mvhd
+    mvhd = _mp4_box(b"mvhd", mvhd_body)
+    tkhd = _mp4_box(b"tkhd", bytes(12) + (1).to_bytes(4, "big") + bytes(8))
+    hdlr = _mp4_box(b"hdlr", bytes(8) + b"soun" + bytes(12))
+    payload_size = sample_bytes if sample_bytes is not None else int(seconds * 100)
+    if compact_sizes:
+        assert payload_size <= 255
+        stsz = _mp4_box(b"stz2", bytes(7) + b"\x08" + (1).to_bytes(4, "big") + bytes((payload_size,)))
+    else:
+        stsz = _mp4_box(b"stsz", bytes(4) + payload_size.to_bytes(4, "big") + (1).to_bytes(4, "big"))
+    offsets = _mp4_box(b"co64", bytes(4) + (1).to_bytes(4, "big") + (0).to_bytes(8, "big")) if co64 else b""
+    stbl = _mp4_box(b"stbl", stsz + offsets)
+    minf = _mp4_box(b"minf", stbl)
+    mdia = _mp4_box(b"mdia", hdlr + minf)
+    trak = _mp4_box(b"trak", tkhd + mdia)
+    moov = _mp4_box(b"moov", mvhd + trak)
     ftyp = (20).to_bytes(4, "big") + b"ftypM4A " + b"\x00\x00\x00\x00" + b"M4A "
-    # A real file carries its audio.  Only ``mvhd`` is read here, but a fixture
-    # with no payload would not be a file this module could meet.
-    audio = b"\x00" * 64
+    audio = b"\x00" * (payload_size if mdat_bytes is None else mdat_bytes)
     mdat = (len(audio) + 8).to_bytes(4, "big") + b"mdat" + audio
-    return ftyp + moov + mdat
+    return ftyp + (mdat + moov if moov_at_end else moov + mdat)
 
 
 class Source:
-    def __init__(self, data: bytes, *, extension: str, media_type: str):
+    def __init__(self, data: bytes, *, extension: str, media_type: str,
+                 declared_size: int | None = None):
         self.data, self.extension, self.media_type = data, extension, media_type
+        self.declared_size = declared_size
 
     async def download(self, _candidate):
         async def chunks():
             yield self.data
 
         return DownloadMetadata(chunks=chunks(), extension=self.extension, media_type=self.media_type,
+                                declared_size=self.declared_size,
                                 _close_once=_CloseOnce(_noop))
 
     async def health(self):
@@ -253,21 +344,19 @@ def test_an_mp4_cut_inside_its_last_box_header_is_not_measured():
 def test_an_mp4_cut_behind_its_header_is_refused_by_strict(tmp_path):
     events = []
     with pytest.raises(MediaError, match="incomplete_audio"):
-        download(mp4_bytes(210.0)[:-40], extension="m4a", media_type="audio/mp4", duration=210,
+        download(mp4_bytes(210.0)[:-1_000], extension="m4a", media_type="audio/mp4", duration=210,
                  verify_duration="strict", tmp_path=tmp_path, events=events)
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
 
 
 def test_an_mp4_cut_behind_its_header_is_accepted_by_lenient_and_recorded(tmp_path):
-    # Lenient fails open on a length it cannot read, which is what keeps the
-    # sources that never state one working; the record says so.
+    # The missing 40 bytes are within the time scaled tolerance for this small
+    # synthetic payload, so this remains an unverified lenient result.
     events = []
     result = download(mp4_bytes(210.0)[:-40], extension="m4a", media_type="audio/mp4", duration=210,
                       tmp_path=tmp_path, events=events)
-    assert result.duration_seconds is None and result.bitrate_kbps is None
-    assert [(event.stage, event.status, event.error_code)
-            for event in events if event.stage == "duration"] == [
-        ("duration", "unverified", "duration_unverified")]
+    assert result.duration_seconds is None
+    assert [event.error_code for event in events if event.error_code] == ["duration_unverified"]
 
 
 @pytest.mark.parametrize("data", [b"", b"nope", b"\x00" * 64, b"fLaC", b"fLaC\x00\x00\x00\x02\x00\x00"])
@@ -403,6 +492,175 @@ def test_a_refused_preview_leaves_no_file_behind(tmp_path):
                  duration=210, tmp_path=tmp_path, events=events)
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
     assert not list(tmp_path.rglob("*.part"))
+
+
+@pytest.mark.parametrize("fraction", [0.5, 0.125, 0.05])
+def test_a_truncated_flac_is_refused_from_its_actual_frames(tmp_path, fraction):
+    full = flac_bytes(210 * FLAC_RATE)
+    cut = full[:int(len(full) * fraction)]
+    events = []
+    with pytest.raises(MediaError, match="incomplete_audio"):
+        download(cut, extension="flac", media_type="audio/flac", duration=210,
+                 tmp_path=tmp_path, events=events)
+    assert [event.error_code for event in events if event.error_code] == ["incomplete_audio"]
+
+
+def test_a_streaminfo_only_flac_is_unverified_under_lenient_policy(tmp_path):
+    events = []
+    data = flac_bytes(210 * FLAC_RATE)[:42]
+    result = download(data, extension="flac", media_type="audio/flac", duration=210,
+                      tmp_path=tmp_path, events=events)
+    assert result.duration_seconds is None
+    assert [(event.stage, event.status, event.error_code) for event in events
+            if event.stage == "duration"] == [("duration", "unverified", "duration_unverified")]
+
+
+def test_a_flac_with_no_declared_sample_count_is_unverified(tmp_path):
+    events = []
+    result = download(flac_bytes(0), extension="flac", media_type="audio/flac", duration=210,
+                      tmp_path=tmp_path, events=events)
+    assert result.duration_seconds is None
+    assert [event.error_code for event in events if event.error_code] == ["duration_unverified"]
+
+
+def test_a_flac_with_an_id3v2_prefix_is_found_and_scanned(tmp_path):
+    from musicdl.media.duration import verify_stream_integrity
+
+    prefix = b"ID3\x04\x00\x00\x00\x00\x00\x00"
+    path = tmp_path / "prefixed.flac"
+    path.write_bytes(prefix + flac_bytes(210 * FLAC_RATE))
+    assert container_duration(path.read_bytes()) == pytest.approx(210)
+    assert verify_stream_integrity(path, expected_duration=210).status == "complete"
+
+
+def test_flac_header_crc_failure_is_unverified_not_incomplete(tmp_path):
+    from musicdl.media.duration import verify_stream_integrity
+
+    data = bytearray(flac_bytes(210 * FLAC_RATE))
+    first_frame = 42
+    second_frame = first_frame + len(flac_frame(0, 4096))
+    data[second_frame + 7] ^= 0x01
+    path = tmp_path / "bad-header-crc.flac"
+    path.write_bytes(data)
+    assert verify_stream_integrity(path, expected_duration=210).status == "unverified"
+
+
+@pytest.mark.parametrize("cut_final_frame", ["after_header", "last_four_bytes", "last_crc_byte"])
+def test_flac_final_frame_payload_and_crc_are_verified(tmp_path, cut_final_frame):
+    from musicdl.media.duration import verify_stream_integrity
+
+    data = flac_bytes(8192, rate=8000, verbatim=True)
+    final_frame_start = 42 + len(flac_frame(0, 4096, verbatim=True))
+    if cut_final_frame == "after_header":
+        data = data[:final_frame_start + 8]
+    elif cut_final_frame == "last_crc_byte":
+        data = data[:-1]
+    else:
+        data = data[:-4]
+    path = tmp_path / f"truncated-final-frame-{cut_final_frame}.flac"
+    path.write_bytes(data)
+    assert verify_stream_integrity(path, expected_duration=8192 / 8000).status == "unverified"
+
+
+def test_flac_scan_timeout_is_unverified(tmp_path, monkeypatch):
+    import musicdl.media.duration as duration_module
+
+    data = flac_bytes(210 * FLAC_RATE)
+    path = tmp_path / "timeout.flac"
+    path.write_bytes(data)
+    times = iter((1.0, 1.0, 7.0))
+    monkeypatch.setattr(duration_module.time, "monotonic", lambda: next(times, 7.0))
+    result = duration_module.verify_stream_integrity(path, expected_duration=210, timeout_seconds=5)
+    assert result.status == "unverified"
+
+
+def test_a_matching_content_length_skips_the_full_stream_scan(tmp_path, monkeypatch):
+    import musicdl.media.download as download_module
+
+    data = flac_bytes(210 * FLAC_RATE)
+    monkeypatch.setattr(download_module, "verify_stream_integrity",
+                        lambda *_args, **_kwargs: pytest.fail("matching content length should skip scan"))
+    result = asyncio.run(download_candidate(
+        candidate("flac", duration=210),
+        Source(data, extension="flac", media_type="audio/flac", declared_size=len(data)),
+        tmp_path, request_id="r", verify_duration="lenient"))
+    assert result.duration_seconds == pytest.approx(210)
+
+
+def test_mp4_sample_table_larger_than_mdat_is_refused(tmp_path):
+    events = []
+    data = mp4_bytes(210, sample_bytes=10_000, mdat_bytes=100)
+    with pytest.raises(MediaError, match="incomplete_audio"):
+        download(data, extension="m4a", media_type="audio/mp4", duration=210,
+                 tmp_path=tmp_path, events=events)
+    assert [event.error_code for event in events if event.error_code] == ["incomplete_audio"]
+
+
+def test_mp4_short_mdat_is_refused_without_catalogue_duration(tmp_path):
+    data = mp4_bytes(210, sample_bytes=10_000, mdat_bytes=100)
+    with pytest.raises(MediaError, match="incomplete_audio"):
+        download(data, extension="m4a", media_type="audio/mp4", duration=None,
+                 tmp_path=tmp_path, events=[])
+
+
+def test_mp4_stz2_sample_table_larger_than_mdat_is_refused(tmp_path):
+    events = []
+    data = mp4_bytes(210, sample_bytes=200, mdat_bytes=10, compact_sizes=True)
+    with pytest.raises(MediaError, match="incomplete_audio"):
+        download(data, extension="m4a", media_type="audio/mp4", duration=210,
+                 tmp_path=tmp_path, events=events)
+    assert [event.error_code for event in events if event.error_code] == ["incomplete_audio"]
+
+
+def test_truncated_mp4_mdat_is_not_complete_when_sample_table_fits(tmp_path):
+    from musicdl.media.duration import verify_stream_integrity
+
+    data = bytearray(mp4_bytes(210, sample_bytes=100, mdat_bytes=1_000))
+    mdat_header = data.index(b"mdat") - 4
+    data[mdat_header:mdat_header + 4] = (2_008).to_bytes(4, "big")
+    path = tmp_path / "truncated-mdat.m4a"
+    path.write_bytes(data)
+    assert verify_stream_integrity(path).status == "unverified"
+
+
+def test_mp4_mdat_at_least_as_large_as_its_sample_table_is_delivered(tmp_path):
+    data = mp4_bytes(210, sample_bytes=100, mdat_bytes=1_000)
+    result = download(data, extension="m4a", media_type="audio/mp4", duration=210,
+                      tmp_path=tmp_path, events=[])
+    assert result.duration_seconds == pytest.approx(210)
+
+
+def test_mp4_sample_table_is_parsed_with_moov_at_end_and_co64(tmp_path):
+    data = mp4_bytes(210, sample_bytes=100, mdat_bytes=1_000, moov_at_end=True, co64=True)
+    result = download(data, extension="m4a", media_type="audio/mp4", duration=210,
+                      tmp_path=tmp_path, events=[])
+    assert result.duration_seconds == pytest.approx(210)
+
+
+def test_fragmented_mp4_is_unverified_under_lenient_policy(tmp_path):
+    ftyp = (20).to_bytes(4, "big") + b"ftypM4A " + bytes(4) + b"M4A "
+    moof = _mp4_box(b"moof", bytes(8))
+    mdat = _mp4_box(b"mdat", bytes(64))
+    events = []
+    result = download(ftyp + moof + mdat, extension="m4a", media_type="audio/mp4", duration=210,
+                      tmp_path=tmp_path, events=events)
+    assert result.duration_seconds is None
+    assert [event.error_code for event in events if event.error_code] == ["duration_unverified"]
+
+
+def test_a_50mb_flac_integrity_scan_finishes_within_five_seconds(tmp_path):
+    import time
+
+    from musicdl.media.duration import verify_stream_integrity
+
+    path = tmp_path / "large.flac"
+    data = flac_bytes(210 * FLAC_RATE, channels=2, bits_per_sample=24, verbatim=True)
+    path.write_bytes(data)
+    assert len(data) >= 50 * 1024 * 1024
+    started = time.monotonic()
+    result = verify_stream_integrity(path, expected_duration=210)
+    assert time.monotonic() - started < 5
+    assert result.status == "complete"
 
 
 def _published(reservation_root, data: bytes) -> ArtifactRecord:

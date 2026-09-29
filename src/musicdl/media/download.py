@@ -26,7 +26,7 @@ from .models import (
     emit_event,
     _DOWNLOAD_CODES,
 )
-from .duration import bitrate_kbps, duration_matches, duration_seconds
+from .duration import bitrate_kbps, duration_matches, duration_seconds, verify_stream_integrity
 from .validation import normalize_language, validate_media, validated_destination
 
 # ``lenient`` accepts what it cannot measure and says so; ``strict`` fails
@@ -137,7 +137,8 @@ def _verify_artifact(path: Path, reservation: ArtifactRecord) -> tuple[int, str]
 
 
 def _verified_duration(candidate: Candidate, path: Path, verify_duration: str, request_id: str,
-                       record: Callable[[DownloadEvent], None] | None, *, enforce: bool = True) -> float | None:
+                       record: Callable[[DownloadEvent], None] | None, *, enforce: bool = True,
+                       content_length_matches: bool = False) -> float | None:
     """The real playing time of a finished file, or a refusal to deliver it.
 
     ``None`` means the container could not be read.  The event says so, and
@@ -159,10 +160,24 @@ def _verified_duration(candidate: Candidate, path: Path, verify_duration: str, r
     so it does not fire where ``enforce`` is false.
     """
     measured = duration_seconds(path)
+    expected = float(candidate.duration) if candidate.duration and candidate.duration > 0 else None
+    stream_integrity = None
+    if enforce and not content_length_matches:
+        stream_integrity = verify_stream_integrity(path, expected_duration=expected)
+        if stream_integrity.format in {"flac", "mp4"} and stream_integrity.status == "incomplete":
+            if enforce:
+                raise MediaError("incomplete_audio")
+        elif stream_integrity.format in {"flac", "mp4"} and stream_integrity.status == "unverified":
+            measured = None
+            emit_event(record, DownloadEvent(
+                request_id, candidate.item_id, candidate.source_id, candidate.source_version,
+                "duration", "unverified", error_code="duration_unverified"))
+            if verify_duration == "strict" and enforce:
+                raise MediaError("incomplete_audio")
+            return measured
     # A catalogue that states ``0`` has stated nothing: Telegram reports an
     # unknown length that way, and reading it as a real expectation would
     # refuse a complete recording for a number the channel never claimed.
-    expected = float(candidate.duration) if candidate.duration and candidate.duration > 0 else None
     if expected is not None and measured is not None:
         if enforce and not duration_matches(expected, measured):
             raise MediaError("incomplete_audio")
@@ -507,7 +522,9 @@ async def download_candidate(
                                                 None if quality is not None else candidate.format)
         # The bytes are on disk and hashed by now, so this measures the file
         # that would be delivered rather than what any channel said about it.
-        measured = _verified_duration(candidate, temp_path, verify_duration, request_id, record)
+        measured = _verified_duration(
+            candidate, temp_path, verify_duration, request_id, record,
+            content_length_matches=(metadata.declared_size is not None and metadata.declared_size == size))
         bitrate = None if measured is None else bitrate_kbps(size, measured)
 
         if reservation is None and prepare is not None:
