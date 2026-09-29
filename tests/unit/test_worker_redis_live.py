@@ -140,10 +140,14 @@ async def _test_live_redis_search_selection_job_download_path(monkeypatch):
             {"command": "select", "value": 1},
         )
         assert await job_worker.run_selection_once() == 1
-        assert await client.xlen(state.job_stream) == 1
+        jobs = await client.xrange(state.job_stream)
+        assert len(jobs) == 1
+        assert json.loads(jobs[0][1][b"candidate"])["qualities"] == []
         assert await job_worker.run_once() == 1
         assert wecom.sent[0][0] == "user-live"
-        assert wecom.sent[0][1].startswith("1. Live Song")
+        assert wecom.sent[0][1].startswith("「live query」找到 1")
+        assert "1. Live Song" in wecom.sent[0][1]
+        assert "回复序号下载" in wecom.sent[0][1]
         assert wecom.sent[-1] == ("user-live", "下载成功：Live Song.mp3")
         job_pending = await client.xpending(state.job_stream, job_worker.group)
         assert job_pending["pending"] == 0

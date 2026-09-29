@@ -100,6 +100,11 @@ if d.corp_id~=ARGV[1] or d.from_user~=ARGV[2] or d.request_id~=ARGV[3] or d.vers
 local candidate=d.candidates[ARGV[6]];
 if not candidate then return {2,''} end;
 local frozen=cjson.encode(candidate);
+-- Redis Lua cjson cannot distinguish an empty JSON array from an empty object.
+-- Candidates are validated in Python, so this empty qualities object was [] there.
+if type(candidate.qualities)=='table' and next(candidate.qualities)==nil then
+  frozen=string.gsub(frozen, '"qualities":{}', '"qualities":[]', 1);
+end;
 local job=redis.call('XADD',KEYS[3],'*','candidate',frozen,'corp_id',ARGV[1],'from_user',ARGV[2],'query',ARGV[7],'request_id',ARGV[3],'version',ARGV[4],'generation',ARGV[5],'index',ARGV[6]);
 local record=cjson.encode({corp_id=ARGV[1],from_user=ARGV[2],request_id=ARGV[3],version=ARGV[4],generation=tonumber(ARGV[5]),index=ARGV[6],job_id=job,candidate=frozen});
 redis.call('SET',KEYS[4]..job,record,'EX',ARGV[8]);
