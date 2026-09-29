@@ -11,6 +11,7 @@ from musicdl.sources.models import Candidate
 from musicdl.wecom.state import (
     ARTIFACT_TRANSITION_SCRIPT,
     CLAIM_ARTIFACT_SCRIPT,
+    CONSUME_SCRIPT,
     EFFECT_BEGIN_SCRIPT,
     EFFECT_COMPLETE_SCRIPT,
     EFFECT_EXTERNAL_SCRIPT,
@@ -162,6 +163,14 @@ def test_consume_sends_every_job_field_and_the_job_record_prefix():
     for field in ("'candidate',frozen", "'corp_id',ARGV[1]", "'query',ARGV[7]", "'generation',ARGV[5]",
                   "KEYS[4]..job"):
         assert field in script
+
+
+def test_consume_script_preserves_empty_qualities_as_an_array():
+    # Redis Lua cjson decodes [] as an empty table and encodes it back as {}.
+    # Candidate validation intentionally rejects that malformed object.
+    assert "local frozen=cjson.encode(candidate);" in CONSUME_SCRIPT
+    assert "if type(candidate.qualities)=='table' and next(candidate.qualities)==nil then" in CONSUME_SCRIPT
+    assert "string.gsub(frozen, '\"qualities\":{}', '\"qualities\":[]', 1)" in CONSUME_SCRIPT
 
 
 def test_consume_rejects_stale_generation_from_redis():
