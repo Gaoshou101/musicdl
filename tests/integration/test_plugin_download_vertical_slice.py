@@ -463,7 +463,7 @@ def fixture_plugin(name, operations=("search", "resolve", "health")):
     return StoredPlugin(manifest, path, True)
 
 
-def build_slice(tmp_path, *, runner, transport, names=("primary", "backup")):
+def build_slice(tmp_path, *, runner, transport, names=("primary", "backup"), max_attempts=3):
     """Wire the real client, adapter, transport, ledger, and workers over the fake boundaries."""
     redis = SliceRedis()
     state = RedisStateStore(redis)
@@ -491,7 +491,7 @@ def build_slice(tmp_path, *, runner, transport, names=("primary", "backup")):
     job_worker = JobWorker(redis, wecom, sources=source_map, media_root=str(media_root), state=state,
                            refresh=refresh, job_timeout=30.0, resolve_stream_timeout=15.0,
                            refresh_timeout=5.0, health_timeout=5.0, pending_idle_ms=32000,
-                           job_ttl=172800, retry_window_seconds=86400, max_attempts=3,
+                           job_ttl=172800, retry_window_seconds=86400, max_attempts=max_attempts,
                            selection_ttl=600)
     return Slice(redis, state, client, http, message_worker, job_worker, wecom, refresh_calls,
                  media_root)
@@ -584,7 +584,7 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
     relative_path, separator, metadata = notice.removeprefix("下载成功：").rpartition("（")
     assert separator == "（"
     assert Path(relative_path) == EXPECTED_RELATIVE
-    assert metadata == "MP3 · 13 B · 未取到无损）"
+    assert metadata == "MP3 · 13 B · 未取到无损 · 音质 FLAC→MP3）"
 
     # Both stream messages were acknowledged only after their effects were recorded.
     assert slice_.redis.acks == [(slice_.state.message_stream, slice_.message_worker.group, "1-0"),
@@ -597,33 +597,47 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
     ("resolve", "download_failed"),
     ("stream", "media_response_invalid"),
 ])
-def test_vertical_slice_failure_reprompts_without_downloading_a_replacement(tmp_path, mode, expected_error):
+def test_vertical_slice_failure_reprompts_and_only_content_failures_try_fallback(tmp_path, mode, expected_error):
     async def scenario():
         runner = FixtureRunner(fail_resolve={"primary"} if mode == "resolve" else ())
-        transport, _sock, _seen = (media_transport(status="404 Not Found", body=b"denied")
-                                   if mode == "stream" else media_transport())
-        slice_ = build_slice(tmp_path, runner=runner, transport=transport)
+        transport, sock, _seen = (media_transport(status="404 Not Found", body=b"denied")
+                                  if mode == "stream" else media_transport())
+        # max_attempts also bounds proactive quality switches. Disable those here
+        # to ensure the 404 exercises the separate content-failure fallback path.
+        slice_ = build_slice(tmp_path, runner=runner, transport=transport,
+                             max_attempts=1 if mode == "stream" else 3)
         try:
             bound = await search_once(slice_)
             job = await select_and_run(slice_, bound)
-            return (slice_, runner, bound, job,
+            return (slice_, runner, sock, bound, job,
                     await slice_.state.get_artifact(job.job_id),
                     await slice_.state.get_job_effect(job.job_id, "download"),
                     await get_selection_for_request(slice_.redis, REQUEST_ID))
         finally:
             await slice_.http.aclose()
 
-    slice_, runner, bound, job, artifact, effect, rebound = asyncio.run(scenario())
+    slice_, runner, sock, bound, job, artifact, effect, rebound = asyncio.run(scenario())
 
-    # Exactly one failed resolve, one excluded-source refresh, and one health check, and no
-    # operation ever asked a plugin for media bytes.
-    assert Counter(runner.calls) == Counter({("primary", "search"): 1, ("backup", "search"): 2,
-                                             ("primary", "resolve"): 1, ("primary", "health"): 1})
+    # The plugin search advertises no tiers, so backup lossless capability is
+    # unknown and remains eligible. A streaming content failure gets one
+    # bounded replacement resolve; the same mocked 404 makes it fail too.
+    expected_calls = Counter({("primary", "search"): 1, ("backup", "search"): 2,
+                              ("primary", "resolve"): 1, ("primary", "health"): 1})
+    if mode == "stream":
+        expected_calls[("backup", "resolve")] = 1
+        assert sock.sent.count(b"GET /song.mp3 HTTP/1.1\r\n") == 2
+    assert Counter(runner.calls) == expected_calls
+    if mode == "stream":
+        replacement = next(item["request"] for item in runner.requests
+                           if item["request"]["operation"] == "resolve"
+                           and item["manifest"]["plugin_id"] == "backup")
+        assert replacement["payload"]["quality"] == "flac"
     assert slice_.refresh_calls == [(QUERY, frozenset({"primary"}))]
     assert effect.status == "done" and effect.result == {"ok": False, "code": expected_error}
 
-    # The refresh replaced the failed source under a new generation and version, and the
-    # replacement was never resolved, streamed, or published.
+    # The refresh replaced the failed source under a new generation and version.
+    # The fallback response is retained for the next selection even though its
+    # own stream also failed, and no incomplete artifact was published.
     assert rebound["generation"] == 1 and rebound["version"] != bound["version"]
     assert rebound["candidates"]["1"]["source_id"] == "backup"
     assert rebound["candidates"]["1"]["item_id"] == "backup-1"
