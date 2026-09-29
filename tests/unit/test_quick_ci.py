@@ -19,7 +19,7 @@ def test_ci_smokes_the_published_quick_install_stack_in_an_isolated_project():
     assert smoke["env"] == {"MUSICDL_PORT": "3998"}
     assert 'project="musicdl-quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in run
     assert 'docker compose --project-name "$project" --file compose.quick.yaml "$@"' in run
-    assert "export MUSICDL_IMAGE_TAG=1.0.5" in run
+    assert "export MUSICDL_IMAGE_TAG=1.0.6" in run
     assert "compose pull" in run
     assert "compose up --detach --wait --wait-timeout 120" in run
     assert "compose down --volumes --remove-orphans --timeout 20" in run
@@ -41,5 +41,5 @@ def test_ci_smokes_the_published_quick_install_stack_in_an_isolated_project():
 
     quick_compose = yaml.safe_load(QUICK_COMPOSE.read_text(encoding="utf-8"))
     services = quick_compose["services"]
-    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.6}"
-    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.6}"
+    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.0.7}"
+    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.0.7}"
