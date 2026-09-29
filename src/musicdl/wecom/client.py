@@ -18,6 +18,25 @@ class WeComClient:
         self.cache_key = f"{namespace}:wecom:access_token"
         self.transport, self.timeout = transport, timeout
         self._token_lock = asyncio.Lock()
+        self._http: httpx.AsyncClient | None = None
+        self._closed = False
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._closed:
+            raise RuntimeError("WeCom client closed")
+        if self._http is None:
+            self._http = httpx.AsyncClient(
+                transport=self.transport, timeout=self.timeout,
+                follow_redirects=False, trust_env=False,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+        return self._http
+
+    async def aclose(self) -> None:
+        self._closed = True
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     async def _cached_token(self) -> str | None:
         try:
@@ -34,9 +53,8 @@ class WeComClient:
 
     async def _request_data(self, method: str, url: str, error: str, **kwargs: Any) -> dict[str, Any]:
         try:
-            async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout, follow_redirects=False, trust_env=False) as client:
-                response = await client.request(method, url, **kwargs)
-                response.raise_for_status()
+            response = await self._client().request(method, url, **kwargs)
+            response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("response must be an object")

@@ -205,10 +205,11 @@ class _Runtime:
     def __init__(self, *, redis, state, service, wecom, plugin_client, transport, registry,
                  message_worker, job_worker, telegram=None, plugin_registry=None, telegram_sources=0,
                  resolvers=None, refresh=None, preference=None, language_advisor=None,
-                 lossless_capability=None, lossless_probe=None):
+                 lossless_capability=None, lossless_probe=None, platform_search=None):
         self.redis, self.state, self.service = redis, state, service
         self.wecom, self.plugin_client, self.registry = wecom, plugin_client, registry
         self.transport = transport
+        self.platform_search = platform_search
         self.message_worker, self.job_worker = message_worker, job_worker
         # Search and resolve are separate capabilities: an lx source resolves
         # media but never searches, so the two maps are not the same one.
@@ -230,11 +231,25 @@ class _Runtime:
         self.plugin_registry = plugin_registry if plugin_registry is not None else registry
 
     async def aclose(self) -> None:
+        # Attempt every close even if one dependency fails during shutdown.
+        failures = []
+        for resource in (self.lossless_probe, self.platform_search):
+            try:
+                await _maybe_close(resource)
+            except Exception as exc:
+                failures.append(exc)
         if self.telegram is not None:
-            await self.telegram.disconnect()
-        await _maybe_close(self.transport)
-        await _maybe_close(self.plugin_client)
-        await _maybe_close(self.redis)
+            try:
+                await self.telegram.disconnect()
+            except Exception as exc:
+                failures.append(exc)
+        for resource in (self.transport, self.plugin_client, self.wecom, self.redis):
+            try:
+                await _maybe_close(resource)
+            except Exception as exc:
+                failures.append(exc)
+        if failures:
+            raise ExceptionGroup("runtime cleanup failed", failures)
 
 
 def _telegram_sources(telegram_settings, bots, *, known_ids=frozenset(), factory=None):
@@ -435,6 +450,9 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                                        quality_preference=worker_settings.quality_preference,
                                        lossless_capability=lossless_capability,
                                        search_timeout=search_timeout,
+                                       pending_idle_ms=worker_settings.pending_idle_ms,
+                                       max_attempts=worker_settings.max_attempts,
+                                       retry_window_seconds=worker_settings.retry_window_seconds,
                                        selection_ttl=settings.wecom.selection_ttl)
         job_worker = JobWorker(redis, wecom, sources=resolvers, media_root=settings.media.root, state=state,
                                refresh=refresh, job_timeout=worker_settings.job_timeout,
@@ -462,7 +480,8 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                     telegram=telegram, plugin_registry=plugin_registry,
                     telegram_sources=telegram_sources, resolvers=resolvers,
                     refresh=refresh, preference=preference, language_advisor=language_advisor,
-                    lossless_capability=lossless_capability, lossless_probe=lossless_probe)
+                    lossless_capability=lossless_capability, lossless_probe=lossless_probe,
+                    platform_search=platform_search)
 
 
 def _panel_root(settings: AppSettings) -> str | None:
@@ -507,7 +526,7 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             admin.logs.install()
 
         def worker_finished(task: asyncio.Task) -> None:
-            if app.state.stopping or task.cancelled():
+            if app.state.stopping or task.cancelled() or task not in live["tasks"]:
                 return
             try:
                 error = task.exception()
@@ -612,10 +631,16 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                     logger.warning("runtime reload failed: %s", error, exc_info=True)
                     return {"status": "failed", "error": str(error)}
                 await stop_workers(tasks)
+                app.state.worker_error = None
                 started = start_workers(built)
                 adopt(built, started)
+                cleanup_failed = False
                 if previous is not None:
-                    await _maybe_close(previous)
+                    try:
+                        await _maybe_close(previous)
+                    except Exception:
+                        cleanup_failed = True
+                        logger.warning("previous runtime cleanup failed after replacement")
                 app.state.runtime_error = None
                 app.state.runtime_generation += 1
                 registry = getattr(built, "registry", None)
@@ -624,7 +649,8 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                             reason, app.state.runtime_generation, sources)
                 return {"status": "reloaded", "reason": reason,
                         "generation": app.state.runtime_generation, "sources": sources,
-                        "workers": len(started)}
+                        "workers": len(started),
+                        **({"cleanup_warning": True} if cleanup_failed else {})}
 
         # Set before the first assembly, so a start-up that fails to build a
         # runtime still leaves the panel able to ask for another one.
@@ -661,13 +687,15 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             yield
         finally:
             app.state.stopping = True
-            await stop_workers(live["tasks"])
-            live["tasks"] = []
-            if live["runtime"] is not None:
-                await _maybe_close(live["runtime"])
+            try:
+                await stop_workers(live["tasks"])
+                live["tasks"] = []
+                if live["runtime"] is not None:
+                    await _maybe_close(live["runtime"])
+            finally:
                 live["runtime"] = None
-            if admin is not None:
-                admin.logs.uninstall()
+                if admin is not None:
+                    admin.logs.uninstall()
 
     app = FastAPI(title="musicdl", docs_url=None, redoc_url=None, lifespan=lifespan)
     admin = _AdminState(settings, app) if settings.admin.enabled else None
@@ -723,7 +751,9 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
         if service is None:
             return PlainTextResponse("restart required", status_code=503)
         try:
-            await service.handle_post(request)
+            # A slow body or state store must not hold the callback indefinitely.
+            async with asyncio.timeout(4.0):
+                await service.handle_post(request)
         except ValueError as exc:
             if str(exc) == "unsupported_encoding":
                 return PlainTextResponse("unsupported media", status_code=415)
@@ -732,7 +762,7 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             return PlainTextResponse("bad request", status_code=400)
         except PermissionError:
             return PlainTextResponse("forbidden", status_code=403)
-        except StateUnavailable:
+        except (StateUnavailable, TimeoutError):
             return PlainTextResponse("not ready", status_code=503)
         return Response(status_code=200)
 

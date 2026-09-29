@@ -341,13 +341,20 @@ class PlatformSearch:
 
     def __init__(self, broker: HttpsActionBroker | None = None, *, timeout: float = 8.0,
                  limit: int = DEFAULT_LIMIT, platforms: Iterable[str] = PLATFORMS,
-                 max_cached_queries: int = 4):
+                 max_cached_queries: int = 4, cache_ttl: float = 30.0,
+                 max_pending_queries: int = 64, max_concurrency: int = 8):
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("invalid_timeout")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_LIMIT:
             raise ValueError("invalid_limit")
         if isinstance(max_cached_queries, bool) or not isinstance(max_cached_queries, int) or max_cached_queries < 1:
             raise ValueError("invalid_cache_size")
+        if isinstance(cache_ttl, bool) or not isinstance(cache_ttl, (int, float)) or not math.isfinite(cache_ttl) or cache_ttl <= 0:
+            raise ValueError("invalid_cache_ttl")
+        for value in (max_pending_queries, max_concurrency):
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 256:
+                raise ValueError("invalid_search_concurrency")
+        platforms = tuple(platforms)
         unknown = [name for name in platforms if name not in _PLATFORMS]
         if unknown:
             raise ValueError("unknown_platform")
@@ -356,25 +363,62 @@ class PlatformSearch:
         self.limit = limit
         self.platforms = tuple(platforms)
         self.max_cached_queries = max_cached_queries
-        self._pending: OrderedDict[tuple[str, str], asyncio.Future] = OrderedDict()
+        self.cache_ttl = float(cache_ttl)
+        self.max_pending_queries = max_pending_queries
+        self._slots = asyncio.Semaphore(max_concurrency)
+        self._pending: dict[tuple[str, str], asyncio.Task] = {}
+        self._cache: OrderedDict[tuple[str, str], tuple[float, tuple[PlatformHit, ...]]] = OrderedDict()
+        self._closed = False
 
     async def hits(self, platform: str, query: str) -> tuple[PlatformHit, ...]:
         """One platform's hits for one query, fetched once however many ask."""
         if platform not in self.platforms:
             raise PlatformSearchError("unknown_platform")
+        if self._closed:
+            raise PlatformSearchError("search_closed")
         key = (platform, query)
+        cached = self._cache.get(key)
+        if cached is not None:
+            if time.monotonic() < cached[0]:
+                self._cache.move_to_end(key)
+                return cached[1]
+            del self._cache[key]
         pending = self._pending.get(key)
         if pending is None:
-            pending = asyncio.ensure_future(self._fetch(platform, query))
+            if len(self._pending) >= self.max_pending_queries:
+                raise PlatformSearchError("search_busy")
+            pending = asyncio.create_task(self._fetch_shared(platform, query))
             # An unawaited failure is still a failure the caller must see, and
             # a task nobody reads would report it only at garbage collection.
             pending.add_done_callback(_consume)
             self._pending[key] = pending
-            while len(self._pending) > self.max_cached_queries:
-                self._pending.popitem(last=False)
         # A cancelled caller must not cancel the fetch the others are waiting
         # for; the shared call finishes once for the whole search round.
         return await asyncio.shield(pending)
+
+    async def _fetch_shared(self, platform: str, query: str) -> tuple[PlatformHit, ...]:
+        key = (platform, query)
+        try:
+            # Thread-pool queueing belongs to the same deadline as network I/O.
+            async with asyncio.timeout(self.timeout):
+                async with self._slots:
+                    hits = await self._fetch(platform, query)
+            self._cache[key] = (time.monotonic() + self.cache_ttl, hits)
+            while len(self._cache) > self.max_cached_queries:
+                self._cache.popitem(last=False)
+            return hits
+        finally:
+            self._pending.pop(key, None)
+
+    async def aclose(self) -> None:
+        self._closed = True
+        tasks = tuple(self._pending.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._pending.clear()
+        self._cache.clear()
 
     async def _fetch(self, platform: str, query: str) -> tuple[PlatformHit, ...]:
         spec = _PLATFORMS[platform]

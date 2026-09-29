@@ -35,6 +35,12 @@ def _audit(event: str, reason: str, request_id: str = "") -> None:
 
 
 async def read_limited(request: Request) -> bytes:
+    length = request.headers.get("content-length")
+    if length is not None:
+        if not length.isascii() or not length.isdecimal():
+            raise ValueError("invalid_request")
+        if len(length) > 10 or int(length) > MAX_BODY:
+            raise ValueError("body_too_large")
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
@@ -118,6 +124,7 @@ class WeComService:
             _audit("ack", "invalid_command", request_id)
             return ""
         payload = {"command": command.kind.value, "value": command.value, "msg_type": msg.msg_type}
-        await self.state.enqueue_message(self.settings.corp_id, msg.from_user, request_id, payload, self.settings.dedup_ttl)
-        _audit("enqueue", "accepted", request_id)
+        result = await self.state.enqueue_message(self.settings.corp_id, msg.from_user, request_id, payload, self.settings.dedup_ttl)
+        duplicate = getattr(result, "duplicate", False) is True
+        _audit("ack" if duplicate else "enqueue", "duplicate" if duplicate else "accepted", request_id)
         return ""

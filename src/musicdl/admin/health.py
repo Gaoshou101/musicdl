@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import dataclasses
+import asyncio
 import math
 import time
 from collections import deque
+from itertools import islice
 from collections.abc import Awaitable, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 from musicdl.secrets import redact_secrets
@@ -11,31 +13,38 @@ from musicdl.media.models import DownloadEvent
 
 
 class HealthAggregator:
-    def __init__(self, probes: dict[str, Callable[[], Awaitable[bool | None]]]):
+    def __init__(self, probes: dict[str, Callable[[], Awaitable[bool | None]]], *, timeout: float = 5.0):
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("invalid probe timeout")
         self.probes = probes
+        self.timeout = timeout
 
     async def check(self) -> dict:
-        checks = {}
-        for name in ("readyz", "redis", "plugin_runner", "telegram"):
+        async def check_one(name):
             probe = self.probes.get(name)
-            if probe is None: checks[name] = "unavailable"; continue
+            if probe is None:
+                return "unavailable"
             try:
-                outcome = await probe()
+                async with asyncio.timeout(self.timeout):
+                    outcome = await probe()
             except Exception:
-                checks[name] = "unavailable"
-                continue
+                return "unavailable"
             # ``None`` is the probe saying this deployment has nothing for that
             # dependency to do -- Redis without WeCom, the plugin runner before
             # a source needs it.  Reporting that as a failure would keep a
             # working deployment red on the panel for its whole life.
-            checks[name] = "not_required" if outcome is None else ("ok" if outcome else "failed")
+            return "not_required" if outcome is None else ("ok" if outcome else "failed")
+        names = ("readyz", "redis", "plugin_runner", "telegram")
+        checks = dict(zip(names, await asyncio.gather(*(check_one(name) for name in names))))
         healthy = all(value in ("ok", "not_required") for value in checks.values())
         return {"status": "ok" if healthy else "degraded", "checks": checks}
 
 
 class EventLogStore:
-    def __init__(self):
-        self._events: list[dict] = []
+    def __init__(self, capacity: int = 10000):
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
+            raise ValueError("invalid log capacity")
+        self._events: deque[dict] = deque(maxlen=capacity)
 
     def append(self, event: DownloadEvent | dict) -> None:
         data = dataclasses.asdict(event) if dataclasses.is_dataclass(event) else dict(event)
@@ -43,7 +52,7 @@ class EventLogStore:
 
     def page(self, *, offset: int = 0, limit: int = 50) -> dict:
         if offset < 0 or limit < 1 or limit > 200: raise ValueError("invalid pagination")
-        return {"items": self._events[offset:offset + limit], "total": len(self._events), "offset": offset, "limit": limit}
+        return {"items": list(islice(self._events, offset, offset + limit)), "total": len(self._events), "offset": offset, "limit": limit}
 
 
 class AuditLogStore(EventLogStore):

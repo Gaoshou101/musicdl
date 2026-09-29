@@ -174,6 +174,8 @@ From the panel you can:
 4. Configure WeCom, Telegram, AI assistance, timeouts, and runtime limits.
 5. Inspect channel health, application events, audits, and service logs.
 
+In WeCom, send a song name to search and reply with a result number to queue a download. For longer lists, reply `n` for the next page or `p` for the previous page; result numbers stay the same across pages. Reply `/cancel` to clear the current selection list. Downloads already queued continue. If the list expires or a new search replaces it, send the song name again.
+
 ## Deployment
 
 The currently published image pair is:

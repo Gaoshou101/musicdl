@@ -47,6 +47,37 @@ def test_selection_invalid_or_missing_is_acked(monkeypatch):
     async def get(*a,**k): return None
     monkeypatch.setattr("musicdl.worker.workers.get_user_selection",get); redis=Redis([("1-0",{b"payload":json.dumps({"content":"bad","from_user":"u","corp_id":"c"}).encode()})]); w=JobWorker(redis,WeCom(),{},"/tmp",state=State())
     assert run(w.run_selection_once())==0 and len(redis.acks)==1
+
+
+def test_selection_poll_skips_earlier_search_without_prefetch(monkeypatch):
+    class CountRedis(Redis):
+        def __init__(self, messages):
+            super().__init__(messages)
+            self.requested = []
+
+        async def xreadgroup(self, group, consumer, streams, **kwargs):
+            self.requested.append(kwargs["count"])
+            next_message, self.messages = self.messages[:1], self.messages[1:]
+            return [(next(iter(streams)), next_message)] if next_message else []
+
+    async def get(*args, **kwargs):
+        return {"token": "tok", "corp_id": "c", "from_user": "u", "request_id": "r",
+                "version": "v", "query": "q", "generation": 0,
+                "candidates": {"1": cand().model_dump(mode="json")}}
+
+    monkeypatch.setattr("musicdl.worker.workers.get_user_selection", get)
+    def entry(message_id, command, value):
+        payload = {"corp_id": "c", "from_user": "u", "request_id": message_id,
+                   "payload": {"command": command, "value": value}}
+        return (message_id, {b"payload": json.dumps(payload).encode()})
+
+    redis = CountRedis([entry("1-0", "search", "song"), entry("2-0", "select", 1)])
+    state = State()
+    worker = JobWorker(redis, WeCom(), {}, "/tmp", state=state)
+    assert run(worker.run_selection_once()) == 1
+    assert redis.requested == [1, 1]
+    assert [message_id for _, _, message_id in redis.acks] == ["1-0", "2-0"]
+    assert state.consumed[0][2] == 1
 def test_job_route_resolves_candidate_and_downloads(monkeypatch):
     calls=[]
     async def route(*a,**k): calls.append((a,k)); return {"from_user":"u","query":"q","version":"v","generation":0,"candidates":{"2":cand().model_dump(mode="json")}}

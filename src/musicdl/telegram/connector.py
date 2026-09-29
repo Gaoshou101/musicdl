@@ -29,9 +29,9 @@ def telethon_client_factory(api_id: int, api_hash: str, proxy: Any = None) -> Ca
     setting it cannot honour has to fail loudly instead of being dropped.
     """
     def factory(session_path: Path) -> TelegramClientProtocol:
+        resolved = resolve_proxy(proxy)
         from telethon import TelegramClient
         kwargs: dict[str, Any] = {"flood_sleep_threshold": 0}
-        resolved = resolve_proxy(proxy)
         if resolved is not None:
             kwargs["proxy"] = resolved
         return TelegramClient(session_path, api_id, api_hash, **kwargs)
