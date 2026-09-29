@@ -21,7 +21,7 @@ from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, Medi
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult, search_sources
 from musicdl.wecom.commands import CommandKind, ParsedCommand, parse_command
-from musicdl.wecom.results import NO_RESULTS_TEXT, selection_message, success_message
+from musicdl.wecom.results import NO_RESULTS_TEXT, quality_summary, selection_message, success_message
 from musicdl.media.validation import validated_destination
 from musicdl.wecom.state import EffectLease, RedisStateStore, SelectionContext, SelectionRejected
 from .selection import bind_user_selection, get_user_selection, get_selection_for_user, get_selection_for_request, _get_by_token
@@ -160,7 +160,8 @@ def _success_text(download) -> str:
         label = ""
     downgrade = "未取到无损" if getattr(download, "quality_downgraded", False) else ""
     details = " · ".join(part for part in
-                         (label, format_bytes(size) if size is not None else "", downgrade) if part)
+                         (label, format_bytes(size) if size is not None else "", downgrade,
+                          quality_summary(download)) if part)
     return f"{text}（{details}）" if details else text
 
 
@@ -413,8 +414,12 @@ class JobWorker(_StreamWorker):
                  verify_duration: str = "lenient",
                  redis_overhead_seconds: float = REDIS_OVERHEAD_SECONDS,
                  wecom_notice_timeout: float = WECOM_NOTICE_TIMEOUT_SECONDS,
-                 quality_policy: str = "lossless_first", quality_preference: str | None = None):
+                 quality_policy: str = "lossless_first", quality_preference: str | None = None,
+                 preference=None, channel_health=None, lossless_capability=None, record=None):
         self.quality_policy, self.quality_preference = quality_policy, quality_preference
+        self.preference, self.channel_health = preference, channel_health
+        self.lossless_capability = lossless_capability
+        self.record = record
         self.redis, self.wecom, self.sources, self.media_root = redis, wecom, sources, media_root
         self.state, self.refresh, self.language_advisor = state or RedisStateStore(redis), refresh, language_advisor
         if not isinstance(selection_ttl, int) or isinstance(selection_ttl, bool) or not 60 <= selection_ttl <= 86400:
@@ -623,7 +628,10 @@ class JobWorker(_StreamWorker):
                 health_timeout=self.health_timeout, language=language, quality=quality,
                 quality_policy=self.quality_policy,
                 max_quality_switches=min(1, max(0, self.max_attempts - 1)),
+                preference=self.preference, channel_health=self.channel_health,
+                lossless_capability=self.lossless_capability,
                 verify_duration=self.verify_duration,
+                record=self.record,
                 prepare=prepare if quality is not None and reservation is None else None,
                 **({"artifact_store": self.state, "owner": owner, "fence": lease.fence}
                    if quality is not None and reservation is None else reserved))

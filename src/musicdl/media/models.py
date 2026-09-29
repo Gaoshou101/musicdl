@@ -262,6 +262,12 @@ class DownloadEvent:
     # lossless request is a fact about the answer, not a guess about the request.
     requested_quality: str | None = None
     actual_quality: str | None = None
+    # A bounded cross-channel transition, with enough context to explain why
+    # the selected source beat the others in this job.
+    from_source_id: str | None = None
+    to_source_id: str | None = None
+    reason: str | None = None
+    skipped_sources: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +278,9 @@ class FallbackResult:
     download_error: str | None = None
     refresh_error: str | None = None
     healthy: bool | None = None
+    channel_switches: int = 0
+    attempted_source_ids: tuple[str, ...] = ()
+    download_source_id: str | None = None
 
 
 class MediaError(ValueError):

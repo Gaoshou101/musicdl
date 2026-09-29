@@ -140,6 +140,8 @@ class SourceHealthStore:
         record = self._record(source_id)
         if record is None:
             return
+        record["observation_sequence"] += 1
+        record["last_search_sequence"] = record["observation_sequence"]
         record["searches"] += 1
         record["last_search"] = str(status)
         record["last_count"] = max(0, int(count)) if isinstance(count, int) else 0
@@ -160,6 +162,8 @@ class SourceHealthStore:
         record = self._record(source_id)
         if record is None:
             return
+        record["observation_sequence"] += 1
+        record[f"last_{stage}_sequence"] = record["observation_sequence"]
         status = str(data.get("status"))
         if stage == "health":
             # A probe answers a different question than an attempt: whether the
@@ -188,7 +192,9 @@ class SourceHealthStore:
                   "last_search": None, "last_download": None, "last_refresh": None,
                   "last_count": 0, "last_error": None, "last_error_stage": None,
                   "last_health": None, "last_health_status": None,
-                  "outcomes": deque(maxlen=self.window)}
+                  "outcomes": deque(maxlen=self.window), "observation_sequence": 0,
+                  "last_search_sequence": 0, "last_download_sequence": 0,
+                  "last_refresh_sequence": 0, "last_health_sequence": 0}
         self._records[source_id] = record
         return record
 
@@ -344,6 +350,43 @@ class SourceHealthStore:
             # fails; a roll-up that cannot be read simply has no opinion.
             return 0
 
+    def fallback_health(self, source_id: str) -> bool | None:
+        """Whether the roll-up has fresh evidence a channel is answering.
+
+        A failed explicit health check is stronger than its older attempt
+        history. Without a probe, the most recent observed attempt supplies
+        the answer; an unexercised source stays unknown.
+        """
+        try:
+            record = self._records.get(source_id) if isinstance(source_id, str) else None
+            if record is None:
+                return None
+            health_sequence = record["last_health_sequence"]
+            download_sequence = record["last_download_sequence"]
+            if health_sequence > download_sequence:
+                if record["last_health_status"] == "failed" or record["last_health"] is False:
+                    return False
+                if not download_sequence and record["last_health"] is True:
+                    return True
+            if download_sequence:
+                # A later search only proves that the catalogue answered; it
+                # nor can a positive health ping erase evidence that the
+                # download channel failed. Only another download recovers it;
+                # an explicit negative probe can still demote the source.
+                return record["last_download"] == "success"
+            refresh_sequence = record["last_refresh_sequence"]
+            search_sequence = record["last_search_sequence"]
+            if refresh_sequence > search_sequence:
+                return record["last_refresh"] == "success"
+            if search_sequence:
+                return record["last_search"] == SEARCH_OK
+            if health_sequence and record["last_health_status"] == "failed":
+                return False
+            outcomes = record["outcomes"]
+            return bool(outcomes[-1]) if outcomes else None
+        except Exception:
+            return None
+
     def _preference(self, source_id: str) -> int:
         if not isinstance(source_id, str) or not source_id:
             return 0
@@ -356,6 +399,8 @@ class SourceHealthStore:
             score += 5
         elif record["last_download"] == "failed":
             score -= 5
+        if record["last_health"] is False:
+            score -= 10
         if record["last_search"] is not None and record["last_search"] != SEARCH_OK:
             score -= 5
         return max(-20, min(20, score))

@@ -1,7 +1,7 @@
 import asyncio, json, time, pytest
 from types import SimpleNamespace
 from test_wecom_state import ID3, ScriptRedis, Source, playable_metadata
-from musicdl.media.models import FallbackResult, DownloadResult
+from musicdl.media.models import DownloadEvent, DownloadMetadata, FallbackResult, DownloadResult
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
 from musicdl.sources.quality import proven_lossy
@@ -73,6 +73,28 @@ def test_success_notice_reports_the_measured_bitrate(monkeypatch):
     run(JobWorker(Redis(), wc, {}, "/tmp", state=State(), refresh=lambda *a: None)
         .handle_job({"request_id": "r", "index": "2"}, job_id="1-0"))
     assert wc.sent == [("u", "下载成功：Song.flac（FLAC 1411kbps）")]
+
+
+def test_success_notice_shows_requested_and_actual_quality(monkeypatch):
+    async def route(*a, **k):
+        return {"from_user": "u", "query": "q", "version": "v", "generation": 0,
+                "candidates": {"2": cand().model_dump(mode="json")}}
+
+    async def download(c, *args, **kwargs):
+        return SimpleNamespace(
+            download=SimpleNamespace(relative_path="Song.mp3", extension="mp3", size_bytes=1024,
+                                     bitrate_kbps=320, quality="320k", requested_quality="flac",
+                                     actual_quality="320k", quality_downgraded=True),
+            download_error=None, refresh_error=None, refreshed=None)
+
+    monkeypatch.setattr("musicdl.worker.workers.get_selection_for_request", route)
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", download)
+    wc = WeCom()
+    run(JobWorker(Redis(), wc, {}, "/tmp", state=State(), refresh=lambda *a: None)
+        .handle_job({"request_id": "r", "index": "2"}, job_id="1-0"))
+
+    assert wc.sent == [(
+        "u", "下载成功：Song.mp3（MP3 320kbps · 1.00 KB · 未取到无损 · 音质 FLAC→320K）")]
 
 
 def test_success_notice_stays_plain_when_no_rate_was_measured(monkeypatch):
@@ -383,6 +405,98 @@ def test_job_claims_the_download_effect_and_reserves_before_the_source_call(monk
     record=effect(st,"1-0","download")
     assert (seen["owner"],seen["fence"])==(record["owner"],int(record["fence"])) and record["status"]=="done"
 
+def test_message_worker_records_channel_switches_with_the_artifact_fence(monkeypatch, tmp_path):
+    st = State()
+    seen = {}
+    events = []
+    switch = DownloadEvent("r", "id", "src", "1", "channel_switch", "selected",
+                           from_source_id="src", to_source_id="backup",
+                           reason="content_error:incomplete_audio")
+
+    async def download(candidate, sources, root, **kwargs):
+        seen.update(kwargs)
+        kwargs["record"](switch)
+        return FallbackResult(
+            download=DownloadResult("Song.mp3", "a" * 64, 1024, "audio/mpeg", "mp3", "未知"),
+            download_source_id="backup", attempted_source_ids=("backup", "src"), channel_switches=1)
+
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", download)
+    worker = JobWorker(Redis(), WeCom(), {}, str(tmp_path), state=st,
+                       refresh=lambda *args: None, quality_policy="best_available", record=events.append)
+    result = run(worker.handle_job(job_payload(), job_id="1-0"))
+
+    effect_record = effect(st, "1-0", "download")
+    assert result.download.relative_path == "Song.mp3"
+    assert result.download_source_id == "backup" and result.channel_switches == 1
+    assert events == [switch]
+    assert seen["reservation"].candidate_id == "id"
+    assert seen["artifact_store"] is st
+    assert (seen["owner"], seen["fence"]) == (effect_record["owner"], int(effect_record["fence"]))
+    artifact = st.script.hashes["{tenant}:artifact:1-0"]
+    assert artifact["owner"] == seen["owner"] and int(artifact["fence"]) == seen["fence"]
+
+
+def test_message_worker_switches_bad_flac_to_the_capable_fenced_source(tmp_path):
+    class Source:
+        def __init__(self, payload, extension, media_type, quality):
+            self.payload, self.extension = payload, extension
+            self.media_type, self.quality = media_type, quality
+            self.calls = []
+
+        async def download(self, candidate, *, quality=None):
+            self.calls.append((candidate.source_id, quality))
+
+            async def chunks():
+                yield self.payload
+
+            return DownloadMetadata(chunks(), extension=self.extension,
+                                   media_type=self.media_type, quality=self.quality)
+
+        async def health(self):
+            return True
+
+    # The source claims FLAC but the bytes carry an MP3 ID3 signature.
+    primary = Source(ID3, "flac", "audio/flac", "flac")
+    preferred_lossy = Source(ID3, "mp3", "audio/mpeg", "320k")
+    capable = Source(b"fLaC" + b"\x00" * 12, "flac", "audio/flac", "flac")
+    primary_candidate = Candidate(source_id="primary", source_version="1", item_id="primary-id",
+                                  title="Song", artist="Artist", format="mp3")
+    lossy_candidate = Candidate(source_id="preferred-lossy", source_version="1", item_id="lossy-id",
+                                title="Song", artist="Artist", format="mp3")
+    capable_candidate = Candidate(source_id="capable", source_version="1", item_id="capable-id",
+                                  title="Song", artist="Artist", format="mp3")
+    events = []
+
+    async def refresh(query, excluded):
+        assert query == "q" and excluded == frozenset({"primary"})
+        return SearchResult((lossy_candidate, capable_candidate), (), "v2")
+
+    state = State()
+    worker = JobWorker(
+        Redis(), WeCom(), {"primary": primary, "preferred-lossy": preferred_lossy, "capable": capable},
+        "/tmp", state=state, refresh=refresh,
+        preference=lambda source_id: 10 if source_id == "preferred-lossy" else 0,
+        channel_health=lambda _source_id: True,
+        lossless_capability=lambda source_id: source_id == "capable",
+        record=events.append)
+    payload = job_payload(candidate=primary_candidate.model_dump(mode="json"))
+
+    result = run(worker.handle_job(payload, job_id="1-0"))
+
+    switches = [event for event in events if event.stage == "channel_switch"]
+    failures = [event for event in events if event.stage == "download" and event.status == "failed"]
+    assert result.download is not None and result.download.extension == ".flac"
+    assert result.download_source_id == "capable" and result.channel_switches == 1
+    assert primary.calls == [("primary", "flac")]
+    assert preferred_lossy.calls == [] and capable.calls == [("capable", "flac")]
+    assert len(switches) == 1 and switches[0].to_source_id == "capable"
+    assert [(event.source_id, event.error_code) for event in failures] == [("primary", "extension_mismatch")]
+    artifact = state.script.hashes["{tenant}:artifact:1-0"]
+    job_effect = effect(state, "1-0", "download")
+    assert artifact["state"] == "published" and artifact["extension"] == ".flac"
+    assert artifact["candidate_id"] == "primary-id"
+    assert artifact["owner"] == job_effect["owner"] and artifact["fence"] == job_effect["fence"]
+
 def test_live_lease_delivery_stays_pending_without_retry_or_ack(monkeypatch):
     st=State(); calls=[]
     async def download(*_a,**_k): calls.append(1); return ok_download()
@@ -430,7 +544,7 @@ def test_published_artifact_is_replayed_without_a_second_source_call(monkeypatch
     worker=JobWorker(Redis(),wc,{"src":src},"/tmp",state=st,refresh=lambda *a:None)
     result=run(worker.handle_job(job_payload(),job_id="1-0"))
     assert result.download.relative_path=="Song.mp3"
-    assert wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB · 未取到无损）")]
+    assert wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB · 未取到无损 · 实际音质 MP3）")]
     assert result.download.actual_quality=="mp3" and result.download.quality_downgraded is True
     assert seen["reservation"].state=="published" and seen["reservation"].sha256=="a"*64
     assert seen["reservation"].size_bytes==10 and seen["artifact_store"] is st and seen["fence"]==1
@@ -743,5 +857,5 @@ def test_the_lossless_first_default_asks_for_the_tier_and_reports_a_downgrade(mo
     record=effect_result(st,"1-0","download")
     assert record["requested_quality"]=="flac" and record["actual_quality"]=="mp3"
     assert record["quality_downgraded"] is True
-    assert wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB · 未取到无损）")]
+    assert wc.sent==[("u","下载成功：Song.mp3（MP3 · 1.00 KB · 未取到无损 · 音质 FLAC→MP3）")]
 
