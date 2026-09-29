@@ -18,10 +18,10 @@ from fastapi import FastAPI
 
 from musicdl.admin.auth import AdminAuth
 from musicdl.admin.csrf import CSRFMiddleware
-from musicdl.admin.health import EventLogStore
-from musicdl.admin.portal import create_admin_router
+from musicdl.admin.health import EventLogStore, SourceHealthStore
+from musicdl.admin.portal import _replacement, create_admin_router
 from musicdl.config import WorkerSettings
-from musicdl.media.models import DownloadMetadata, MediaError, _CloseOnce
+from musicdl.media.models import DownloadEvent, DownloadMetadata, MediaError, _CloseOnce
 from musicdl.sources import SourceEntry, SourceRegistry
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
@@ -345,7 +345,7 @@ def copy_of(source: Source, *, duration: int = 210) -> Candidate:
                      title="稻香", artist="周杰伦", album="魔杰座", duration=duration, format="mp3")
 
 
-def fallback_app(tmp_path, sources, refreshed, *, language_advisor=None, worker=None):
+def fallback_app(tmp_path, sources, refreshed, *, language_advisor=None, worker=None, events=None):
     """Mount the panel over a runtime whose download can fall back."""
     registry = SourceRegistry([SourceEntry(s.source_id, s.version, s) for s in sources])
     service = FallbackRuntime(registry, {s.source_id: s for s in sources}, refreshed,
@@ -353,7 +353,7 @@ def fallback_app(tmp_path, sources, refreshed, *, language_advisor=None, worker=
     auth = AdminAuth()
     auth.change_credentials("admin", "operator", "new-password")
     app = FastAPI()
-    app.include_router(create_admin_router(auth=auth, events=EventLogStore(), runtime=lambda: service,
+    app.include_router(create_admin_router(auth=auth, events=events or EventLogStore(), runtime=lambda: service,
                                            media_root=tmp_path, worker=worker or WorkerSettings()))
     app.add_middleware(CSRFMiddleware, auth=auth)
     return app, service
@@ -381,6 +381,66 @@ def test_download_retries_on_another_channel_that_has_the_same_track(tmp_path):
     assert broken.downloaded == ["1"] and backup.downloaded == ["1"]
     assert service.queries == ["稻香 周杰伦"]
     assert (tmp_path / payload["relative_path"]).read_bytes() == AUDIO
+
+
+def test_content_failures_can_switch_through_three_channels(tmp_path):
+    primary = BrokenSource("primary", "media_response_invalid")
+    first = BrokenSource("first", "signature_mismatch")
+    second = BrokenSource("second", "incomplete_audio")
+    last = Source("last")
+    refreshed = SearchResult((copy_of(first), copy_of(second), copy_of(last)), (), "v")
+    app, _ = fallback_app(tmp_path, [primary, first, second, last], refreshed)
+
+    response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["source_id"] == "last" and payload["fallback_from"] == "primary"
+    assert primary.downloaded == ["1"]
+    assert first.downloaded == ["1"] and second.downloaded == ["1"] and last.downloaded == ["1"]
+
+
+def test_panel_retry_budget_includes_switches_already_used_by_shared_fallback(tmp_path):
+    primary = BrokenSource("primary", "media_response_invalid")
+    first = BrokenSource("first", "media_response_invalid")
+    second = BrokenSource("second", "media_response_invalid")
+    third = BrokenSource("third", "download_failed")
+    fourth = Source("fourth")
+    fifth = Source("fifth")
+    refreshed = SearchResult((copy_of(first), copy_of(second), copy_of(third),
+                              copy_of(fourth), copy_of(fifth)), (), "v")
+    app, service = fallback_app(tmp_path, [primary, first, second, third, fourth, fifth], refreshed)
+
+    response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
+
+    assert response.status_code == 502 and response.json()["detail"] == "download_failed"
+    assert service.queries == ["稻香 周杰伦"]
+    assert primary.downloaded == ["1"]
+    assert first.downloaded == ["1"] and second.downloaded == ["1"] and third.downloaded == ["1"]
+    assert fourth.downloaded == [] and fifth.downloaded == []
+
+
+def test_panel_replacement_timeout_records_one_failure_for_selected_channel(tmp_path):
+    class Slow(Source):
+        async def download(self, candidate, **kwargs):
+            await asyncio.sleep(0.5)
+            return await super().download(candidate, **kwargs)
+
+    primary = BrokenSource("primary", "download_failed")
+    backup = Slow("backup")
+    events = EventLogStore()
+    app, _ = fallback_app(
+        tmp_path, [primary, backup], SearchResult((copy_of(backup),), (), "v"), events=events,
+        worker=WorkerSettings(quality_policy="best_available", resolve_stream_timeout=0.05))
+
+    response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
+
+    failures = [item for item in events.page()["items"]
+                if item["source_id"] == "backup" and item["stage"] == "download"
+                and item["status"] == "failed"]
+    assert response.status_code == 504 and response.json()["detail"] == "media_timeout"
+    assert [(item["error_code"], item["requested_quality"])
+            for item in failures] == [("media_timeout", None)]
 
 
 def test_fallback_reuses_one_advised_language_for_every_attempt(tmp_path, monkeypatch):
@@ -619,6 +679,21 @@ def test_best_available_asks_the_fallback_and_the_replacement_for_no_tier(tmp_pa
 
     assert response.status_code == 200 and response.json()["requested_quality"] is None
     assert broken.download_kwargs == [{}] and backup.download_kwargs == [{}]
+
+
+def test_best_available_panel_replacement_keeps_duration_order_with_health_data():
+    wanted = Candidate.model_validate(PRIMARY | {"duration": 100})
+    near = Candidate.model_validate(PRIMARY | {"source_id": "near", "duration": 101})
+    far = Candidate.model_validate(PRIMARY | {"source_id": "far", "duration": 110})
+    health = SourceHealthStore()
+    health.observe_event(DownloadEvent("r", "near", "near", "1", "download", "failed",
+                                       error_code="incomplete_audio"))
+    health.observe_event(DownloadEvent("r", "far", "far", "1", "health", "success", healthy=True))
+
+    selected = _replacement(wanted, (near, far), {"near": object(), "far": object()},
+                            quality_policy="best_available", source_health=health)
+
+    assert selected is near
 
 
 def test_a_flac_request_answered_with_mp3_is_reported_as_a_downgrade(tmp_path):

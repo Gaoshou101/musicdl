@@ -161,3 +161,15 @@ def test_success_uses_final_download_metadata(extension, media_type, size, label
     from musicdl.wecom.results import success_message
     result = DownloadResult(Path("Song.flac"), "hash", size, media_type, extension, "unknown")
     assert success_message(result) == f"下载成功：Song.flac（{label}）"
+
+
+def test_success_message_displays_requested_and_actual_quality():
+    from pathlib import Path
+    from musicdl.media.models import DownloadResult
+    from musicdl.wecom.results import success_message
+    result = DownloadResult(Path("Song.mp3"), "hash", 1024, "audio/mpeg", "mp3", "未知",
+                            quality="320k", quality_downgraded=True,
+                            requested_quality="flac", actual_quality="320k")
+
+    assert success_message(result) == (
+        "下载成功：Song.mp3（MP3 320kbps · 1.00 KB · 未取到无损 · 音质 FLAC→320K）")

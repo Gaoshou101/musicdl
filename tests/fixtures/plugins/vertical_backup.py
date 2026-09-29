@@ -1,7 +1,8 @@
 """Deterministic backup plugin for the in-process download vertical slice.
 
-It serves the same recording as ``vertical_primary`` from a different source id, so an
-excluded-source refresh can offer a replacement without ever downloading it automatically.
+It serves the same recording as ``vertical_primary`` from a different source id. Its lossless
+capability is undeclared, so it can appear as a replacement and is attempted after a qualifying
+content failure when no artifact has yet been reserved.
 """
 
 

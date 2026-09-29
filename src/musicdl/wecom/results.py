@@ -55,6 +55,21 @@ def _size(candidate: Candidate) -> str:
     return format_bytes(candidate.size)
 
 
+def quality_summary(result) -> str:
+    """Show the requested tier beside the tier verified from delivered bytes."""
+    requested = getattr(result, "requested_quality", None)
+    actual = getattr(result, "actual_quality", None)
+    requested = requested.strip().upper() if isinstance(requested, str) and requested.strip() else None
+    actual = actual.strip().upper() if isinstance(actual, str) and actual.strip() else None
+    if requested and actual:
+        return f"音质 {requested}→{actual}"
+    if requested:
+        return f"请求音质 {requested}"
+    if actual:
+        return f"实际音质 {actual}"
+    return ""
+
+
 def success_message(result: DownloadResult) -> str:
     """Describe the bytes actually downloaded, using their final container."""
     label = result.extension.lstrip(".").upper() or result.media_type
@@ -62,7 +77,8 @@ def success_message(result: DownloadResult) -> str:
     if bitrate is not None:
         label += f" {bitrate}kbps"
     downgrade = "未取到无损" if getattr(result, "quality_downgraded", False) else ""
-    details = " · ".join(part for part in (label, format_bytes(result.size_bytes), downgrade) if part)
+    details = " · ".join(part for part in
+                         (label, format_bytes(result.size_bytes), downgrade, quality_summary(result)) if part)
     return f"下载成功：{result.relative_path}（{details}）"
 
 

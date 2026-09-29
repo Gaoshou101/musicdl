@@ -301,7 +301,7 @@ def _search_adapter(stored, source: PluginSource, platform_search: PlatformSearc
 
 
 def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
-                   telegram_client_factory=None, preference=None, source_health=None):
+                   telegram_client_factory=None, preference=None, source_health=None, event_log=None):
     """Build one runtime.
 
     ``bots`` and ``sources`` are the definitions the portal owns.  A stored
@@ -449,6 +449,12 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                                retry_window_seconds=worker_settings.retry_window_seconds,
                                max_attempts=worker_settings.max_attempts,
                                verify_duration=settings.media.verify_duration,
+                               preference=preference,
+                               channel_health=None if source_health is None else source_health.fallback_health,
+                               lossless_capability=lossless_capability,
+                               record=(None if event_log is None else
+                                       lambda event: (event_log.append(event), source_health.observe_event(event))
+                                       if source_health is not None else event_log.append(event)),
                                selection_ttl=settings.wecom.selection_ttl)
     return _Runtime(redis=redis, state=state, service=service, wecom=wecom,
                     plugin_client=plugin_client, transport=transport, registry=registry,
@@ -527,7 +533,8 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             factory = runtime_factory or (
                 lambda current: _build_runtime(current, clock, bots=definitions,
                                                sources=source_definitions,
-                                               preference=preference, source_health=source_health))
+                                               preference=preference, source_health=source_health,
+                                               event_log=None if admin is None else admin.events))
             built = factory(settings)
             if inspect.isawaitable(built):
                 built = await built

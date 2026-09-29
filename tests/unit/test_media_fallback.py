@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from musicdl.media import DownloadMetadata, MediaError, download_with_fallback
+from musicdl.media.fallback import replacement_candidates
 from musicdl.media.models import ArtifactRecord
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
@@ -71,6 +72,185 @@ def test_success_does_not_enter_fallback(tmp_path):
     # No playing time was stated or measurable, so lenient mode records the
     # gap and still delivers the file.
     assert [(e.stage, e.status) for e in events] == [("duration", "unverified"), ("download", "success")]
+
+
+def test_content_failure_switches_channels_and_prefers_known_lossless_source(tmp_path):
+    class Invalid(Source):
+        async def download(self, item, *, quality=None):
+            raise MediaError("media_response_invalid")
+
+    class Lossless(Source):
+        async def download(self, item, *, quality=None):
+            assert quality == "flac"
+            return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg", quality="flac")
+
+    primary = candidate("primary")
+    unhealthy = candidate("unhealthy")
+    preferred = candidate("preferred-lossy")
+    unknown = candidate("unknown")
+    capable = candidate("capable")
+    events = []
+
+    async def refresh(query, excluded):
+        assert excluded == frozenset({"primary"})
+        return result((unhealthy, preferred, unknown, capable))
+
+    class Lossy(Source):
+        async def download(self, item, *, quality=None):
+            return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg", quality="320k")
+
+    outcome = asyncio.run(download_with_fallback(
+        primary,
+        {"primary": Invalid(), "unhealthy": Invalid(), "preferred-lossy": Lossy(),
+         "unknown": Invalid(), "capable": Lossless()},
+        tmp_path, request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        refresh=refresh,
+        channel_health=lambda source_id: (False if source_id == "unhealthy" else
+                                          True if source_id in {"preferred-lossy", "capable"} else None),
+        preference=lambda source_id: 10 if source_id == "preferred-lossy" else 0,
+        lossless_capability=lambda source_id: source_id == "capable",
+        record=events.append))
+
+    assert outcome.download is not None
+    assert outcome.download.actual_quality == "mp3"
+    switches = [event for event in events if event.stage == "channel_switch"]
+    assert len(switches) == 1
+    assert switches[0].from_source_id == "primary" and switches[0].to_source_id == "capable"
+    assert switches[0].skipped_sources["unhealthy"] == "known_unavailable"
+    assert [event.source_id for event in events if event.stage == "download" and event.status == "failed"] == [
+        "primary"]
+    assert outcome.download.requested_quality == "flac"
+
+
+def test_best_available_preserves_reprompt_instead_of_content_switching(tmp_path):
+    class Invalid(Source):
+        async def download(self, item):
+            raise MediaError("signature_mismatch")
+
+    primary, backup = candidate("primary"), candidate("backup")
+    calls_to_backup = []
+
+    class Backup(Source):
+        async def download(self, item):
+            calls_to_backup.append(item.source_id)
+            return await super().download(item)
+
+    source = Backup()
+    calls = []
+    events = []
+
+    async def refresh(query, excluded):
+        calls.append(excluded)
+        return result((backup,))
+
+    outcome = asyncio.run(download_with_fallback(
+        primary, {"primary": Invalid(), "backup": source}, tmp_path,
+        request_id="r", query="Song", quality=None, quality_policy="best_available",
+        refresh=refresh, record=events.append))
+
+    assert outcome.download is None and outcome.download_error == "signature_mismatch"
+    assert outcome.refreshed is not None and outcome.refreshed.candidates == (backup,)
+    assert calls == [frozenset({"primary"})]
+    assert calls_to_backup == []
+    assert not [event for event in events if event.stage == "channel_switch"]
+
+
+def test_failed_quality_replacement_is_recorded_before_original_stream_is_kept(tmp_path):
+    class Lossy(Source):
+        async def download(self, item, *, quality=None):
+            return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg", quality="320k")
+
+    class Unavailable(Source):
+        async def download(self, item, *, quality=None):
+            raise MediaError("download_failed")
+
+    primary = candidate("primary")
+    alternate = candidate("alternate")
+    events = []
+
+    async def refresh(query, excluded):
+        return result((alternate,))
+
+    outcome = asyncio.run(download_with_fallback(
+        primary, {"primary": Lossy(), "alternate": Unavailable()}, tmp_path,
+        request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        refresh=refresh, record=events.append))
+
+    assert outcome.download is not None and outcome.download_source_id == "primary"
+    assert [(event.source_id, event.stage, event.status, event.error_code)
+            for event in events if event.stage == "download" and event.status == "failed"] == [
+                ("alternate", "download", "failed", "download_failed")]
+
+
+def test_content_switch_budget_is_bounded_and_never_retries_a_source(tmp_path):
+    class Invalid(Source):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.attempts = 0
+
+        async def download(self, item, *, quality=None):
+            self.attempts += 1
+            raise MediaError("incomplete_audio")
+
+    primary = candidate("primary")
+    alternatives = [candidate(name) for name in ("a", "b", "c", "d")]
+    sources = {name: Invalid() for name in ("primary", "a", "b", "c", "d")}
+    calls = []
+    events = []
+
+    async def refresh(query, excluded):
+        calls.append(excluded)
+        # A refresh can include a previously failed source. The job-local
+        # attempted set, rather than trusting refresh ordering, owns exclusion.
+        return result((alternatives[0], alternatives[0], *alternatives[1:]))
+
+    outcome = asyncio.run(download_with_fallback(
+        primary, sources, tmp_path, request_id="r", query="Song", quality="flac",
+        quality_policy="lossless_first", refresh=refresh, record=events.append))
+
+    assert outcome.download is None and outcome.download_error == "incomplete_audio"
+    assert calls == [frozenset({"primary"})]
+    assert [source.attempts for source in sources.values()] == [1, 1, 1, 1, 0]
+    assert len([event for event in events if event.stage == "channel_switch"]) == 3
+    assert [event.source_id for event in events if event.stage == "download" and event.status == "failed"] == [
+        "primary", "a", "b", "c"]
+
+
+def test_timed_out_content_replacement_records_one_media_timeout_failure(tmp_path):
+    class Invalid(Source):
+        async def download(self, item, *, quality=None):
+            raise MediaError("media_response_invalid")
+
+    class Slow(Source):
+        async def download(self, item, *, quality=None):
+            await asyncio.sleep(0.5)
+            return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg")
+
+    primary, backup = candidate("primary"), candidate("backup")
+    events = []
+
+    async def refresh(query, excluded):
+        return result((backup,))
+
+    outcome = asyncio.run(download_with_fallback(
+        primary, {"primary": Invalid(), "backup": Slow()}, tmp_path, request_id="r", query="Song",
+        quality="flac", quality_policy="lossless_first", refresh=refresh,
+        resolve_stream_timeout=0.05, record=events.append))
+
+    failures = [event for event in events if event.source_id == "backup"
+                and event.stage == "download" and event.status == "failed"]
+    assert outcome.download_error == "media_timeout"
+    assert [(event.error_code, event.requested_quality) for event in failures] == [("media_timeout", "flac")]
+
+
+def test_duplicate_replacement_rows_do_not_mark_a_chosen_source_skipped():
+    wanted = candidate("primary")
+    backup = candidate("backup")
+
+    ranked, skipped = replacement_candidates(wanted, (backup, backup), {"backup": Source()})
+
+    assert ranked == [backup]
+    assert "backup" not in skipped
 
 
 def test_failure_refreshes_once_excludes_source_and_checks_health(tmp_path):

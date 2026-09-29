@@ -121,6 +121,43 @@ def test_a_failed_download_names_the_channel_that_failed():
     assert primary["last_error"] == "media_timeout" and primary["last_error_stage"] == "download"
 
 
+def test_a_failed_health_probe_overrides_older_success_for_fallback_ranking():
+    store = SourceHealthStore()
+    store.observe_search("primary", "ok")
+    assert store.fallback_health("primary") is True
+
+    store.observe_event(event("primary", "health", "failed", error_code="health_failed"))
+
+    assert store.fallback_health("primary") is False
+
+
+def test_search_success_does_not_hide_download_failures_but_a_later_download_recovers():
+    store = SourceHealthStore()
+    for _ in range(3):
+        store.observe_event(event("primary", "download", "failed", error_code="incomplete_audio"))
+    store.observe_search("primary", "ok")
+
+    assert store.fallback_health("primary") is False
+
+    store.observe_event(event("primary", "download", "success"))
+    assert store.fallback_health("primary") is True
+
+
+def test_successful_health_probe_does_not_clear_failed_download_evidence():
+    store = SourceHealthStore()
+    for _ in range(3):
+        store.observe_event(event("primary", "download", "failed", error_code="incomplete_audio"))
+    store.observe_event(event("primary", "health", "success", healthy=True))
+
+    assert store.fallback_health("primary") is False
+
+    store.observe_event(event("primary", "download", "success"))
+    assert store.fallback_health("primary") is True
+
+    store.observe_event(event("primary", "health", "failed", error_code="health_failed"))
+    assert store.fallback_health("primary") is False
+
+
 def test_a_cleanup_failure_is_not_charged_to_the_channel():
     store = SourceHealthStore()
     store.observe_event(event("primary", "cleanup", "failed", error_code="cleanup_failed"))

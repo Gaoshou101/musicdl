@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import secrets
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -14,9 +15,10 @@ from typing import Any, Callable
 from musicdl.config import AppSettings, WorkerSettings
 from musicdl.ai.diagnose import probe_endpoint
 from musicdl.media import download_candidate, download_with_fallback
+from musicdl.media.fallback import CONTENT_FAILURE_CODES, MAX_CHANNEL_SWITCHES, replacement_candidates
 from musicdl.media.language import resolve_language
 from musicdl.media.probe import ProbeCache, probe_candidates
-from musicdl.media.models import MediaError
+from musicdl.media.models import DownloadEvent, MediaError, emit_event
 from musicdl.admin.source_fetch import (
     SOURCE_FETCH_CONCURRENCY,
     SOURCE_FETCH_DEADLINE,
@@ -72,25 +74,28 @@ def _same_recording(wanted: Candidate, other: Candidate) -> bool:
             and normalize_text(wanted.artist) == normalize_text(other.artist))
 
 
-def _replacement(wanted: Candidate, candidates, resolvers) -> Candidate | None:
+def _replacement(wanted: Candidate, candidates, resolvers, *, attempted_source_ids=(),
+                source_health: SourceHealthStore | None = None,
+                lossless_capability=None, quality_policy: str = "lossless_first",
+                quality: str | None = None, preference=None, with_skips: bool = False):
     """The best other channel's copy of a recording that just failed.
 
-    ``candidates`` arrives in the refresh's own ranked order -- the registry
-    already preferred one of them -- so the only preference applied here is
-    closeness in duration: a channel that listed the track at 3:31 is a better
-    guess for the 3:30 that just failed than one that listed some much longer
-    version. A channel that cannot resolve media is skipped, because it would
-    fail for a reason that has nothing to do with the one that just failed.
+    The job's attempted set is authoritative. Source roll-up health is read
+    before capability, and duration only breaks remaining ties.
     """
-    def distance(other: Candidate) -> int:
-        if wanted.duration is None or other.duration is None:
-            return 0
-        return abs(other.duration - wanted.duration)
-
-    matches = [item for item in candidates or ()
-               if item.source_id != wanted.source_id and item.source_id in resolvers
-               and _same_recording(wanted, item)]
-    return min(matches, key=distance) if matches else None
+    matches, skipped = replacement_candidates(
+        wanted, candidates, resolvers, attempted_source_ids=attempted_source_ids,
+        # ``best_available`` keeps the panel's duration-only ordering contract.
+        # Health and capability ranking are for lossless-first recovery.
+        preference=None if quality_policy == "best_available" else preference,
+        health_status=(None if quality_policy == "best_available" or source_health is None
+                       else source_health.fallback_health),
+        lossless_capability=None if quality_policy == "best_available" else lossless_capability,
+        quality_policy=quality_policy,
+        quality=quality, recording_match=_same_recording)
+    if with_skips:
+        return (matches[0] if matches else None), skipped
+    return matches[0] if matches else None
 
 
 def _shared_catalogue(registry, source_id: str) -> bool:
@@ -785,25 +790,83 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             resolve_stream_timeout=_stream_budget(resolvers.get(candidate.source_id), resolve_timeout),
             refresh_timeout=search_timeout, language=language, quality=quality,
             quality_policy=quality_policy,
+            preference=getattr(service, "preference", None),
+            channel_health=source_health.fallback_health,
+            lossless_capability=getattr(service, "lossless_capability", None),
             health_timeout=health_timeout, verify_duration=verify_duration, record=recorded)
         if attempt.download is not None:
-            return report(candidate.source_id, None, attempt.download)
+            source_id = attempt.download_source_id or candidate.source_id
+            return report(source_id, candidate.source_id if source_id != candidate.source_id else None,
+                          attempt.download)
         code = attempt.download_error or "download_failed"
-        replacement = _replacement(candidate, getattr(attempt.refreshed, "candidates", ()), resolvers)
-        if replacement is not None:
+        if (code in CONTENT_FAILURE_CODES and quality_policy != "best_available"
+                and attempt.channel_switches >= MAX_CHANNEL_SWITCHES):
+            raise failed(code)
+        attempted_sources = set(attempt.attempted_source_ids or (candidate.source_id,))
+        current_candidate = candidate
+        may_continue_after_error = True
+        switch_limit = (1 if quality_policy == "best_available"
+                        else max(0, MAX_CHANNEL_SWITCHES - attempt.channel_switches))
+        for _ in range(switch_limit):
+            if not may_continue_after_error:
+                break
+            replacement, skipped = _replacement(
+                current_candidate, getattr(attempt.refreshed, "candidates", ()), resolvers,
+                attempted_source_ids=attempted_sources, source_health=source_health,
+                preference=getattr(service, "preference", None),
+                lossless_capability=getattr(service, "lossless_capability", None),
+                quality_policy=quality_policy, quality=tier_for(current_candidate), with_skips=True)
+            if replacement is None:
+                break
+            emit_event(recorded, DownloadEvent(
+                request_id, current_candidate.item_id, current_candidate.source_id,
+                current_candidate.source_version, "channel_switch", "selected",
+                from_source_id=current_candidate.source_id, to_source_id=replacement.source_id,
+                reason=f"download_error:{code}", skipped_sources=skipped))
+            attempted_sources.add(replacement.source_id)
+            replacement_failures: list[DownloadEvent] = []
+
+            def record_replacement(event: DownloadEvent) -> None:
+                if event.stage == "download" and event.status == "failed":
+                    replacement_failures.append(event)
+                else:
+                    recorded(event)
+
+            replacement_quality = tier_for(replacement)
+
+            def finish_replacement_failure(error_code: str) -> None:
+                if replacement_failures:
+                    event = replace(replacement_failures[0], error_code=error_code,
+                                    requested_quality=(replacement_failures[0].requested_quality
+                                                       or replacement_quality))
+                else:
+                    event = DownloadEvent(
+                        request_id, replacement.item_id, replacement.source_id, replacement.source_version,
+                        "download", "failed", error_code=error_code,
+                        requested_quality=replacement_quality)
+                recorded(event)
+
             try:
                 replacement_source = resolvers[replacement.source_id]
                 async with asyncio.timeout(_stream_budget(replacement_source, resolve_timeout)):
                     result = await download_candidate(replacement, replacement_source, media_root,
                                                       request_id=request_id, language=language,
-                                                      quality=tier_for(replacement),
-                                                      verify_duration=verify_duration, record=recorded)
+                                                      quality=replacement_quality,
+                                                      verify_duration=verify_duration, record=record_replacement)
+            except asyncio.CancelledError:
+                for event in replacement_failures:
+                    recorded(event)
+                raise
             except MediaError as exc:
                 code = exc.code
+                finish_replacement_failure(code)
             except TimeoutError:
                 code = "media_timeout"
+                finish_replacement_failure(code)
             else:
                 return report(replacement.source_id, candidate.source_id, result)
+            may_continue_after_error = code in CONTENT_FAILURE_CODES
+            current_candidate = replacement
         raise failed(code)
 
     @router.get("/media/{relative_path:path}")
