@@ -16,7 +16,7 @@ Use generic agents that permit explicit model and reasoning overrides. When full
 | Plan and dispatch | `gpt-6-astra` | Automatically selected; `medium` by default |
 | Concrete work | `deepseek-v4.1-flash` (default) | Fixed at `high` |
 | Concrete-work fallback | `gpt-6-luna` | Fixed at `max`, with the fast service tier |
-| Independent review | `gpt-6-sol` | Automatically selected; `medium` by default |
+| Independent review | `gpt-6.1-sol` | Automatically selected; `medium` by default |
 
 Rules:
 
@@ -75,7 +75,7 @@ If a required model or reasoning control is unavailable, finish safe preparation
 2. Dispatch Astra with model `gpt-6-astra`. Astra inspects dependencies, risks, rollback boundaries, acceptance checks, and ordering; decides whether to fan out and how many subagents to use; defines bounded work packages with exclusive write ownership; and dispatches those subagents.
 3. Astra's subagents execute the concrete work: bounded exploration, reversible implementation, and independent tests or log analysis. Independent scopes run concurrently; shared-file or dependent work stays serial. If the runtime denies dispatch to Astra, Astra returns the complete dispatch contract and the coordinator executes it verbatim.
 4. Collect completed results, inspect the real changed-file scope, and route integration or correction work to one explicitly responsible subagent in a subsequent wave. Workers preserve user and concurrent changes.
-5. After changes settle, dispatch Sol with model `gpt-6-sol`, providing the request, Astra's plan, the actual diff, the changed-file list, and completed verification evidence. Sol independently returns `ACCEPT`, `REVISE`, or `BLOCKED` with traceable evidence.
+5. After changes settle, dispatch Sol with model `gpt-6.1-sol`, providing the request, Astra's plan, the actual diff, the changed-file list, and completed verification evidence. Sol independently returns `ACCEPT`, `REVISE`, or `BLOCKED` with traceable evidence.
 6. On `REVISE`, issue bounded correction work in a subsequent wave and obtain fresh Sol review of the updated result. On `BLOCKED`, report the missing authority, capability, or evidence without widening scope.
 7. Report only the result Sol accepted, including completed checks, skipped checks, remaining limitations, rollback, and observed model and reasoning settings.
 
