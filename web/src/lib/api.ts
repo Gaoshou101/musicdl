@@ -208,6 +208,8 @@ export type ServiceLogPage = {
   last_id: number
   /** How many lines have rolled out of the window since the process started. */
   dropped: number
+  generation?: string
+  reset?: boolean
 }
 
 export type Page<T> = { items: T[]; total: number; offset: number; limit: number }
@@ -918,6 +920,7 @@ export function readServiceLogs(
   after = 0,
   level: 'info' | 'warning' | 'error' = 'info',
   signal?: AbortSignal,
+  generation?: string,
 ): Promise<ServiceLogPage> {
-  return request<ServiceLogPage>('/logs', { query: { limit, after, level }, signal })
+  return request<ServiceLogPage>('/logs', { query: { limit, after, level, generation }, signal })
 }

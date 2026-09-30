@@ -38,9 +38,17 @@ def _key(namespace: str, token: str) -> str: return f"{namespace}:worker-selecti
 def _user_key(namespace: str, corp_id: str, user: str) -> str: return f"{namespace}:worker-user:{_hash(corp_id + ':' + user)}"
 def _request_key(namespace: str, request_id: str) -> str: return f"{namespace}:worker-request:{_hash(request_id)}"
 
-async def bind_user_selection(redis: Any, token: str, context: SelectionContext, *, query: str | None = None, candidates: dict | None = None, ttl: int = 900, namespace: str = "{musicdl}") -> None:
+async def bind_user_selection(redis: Any, token: str, context: SelectionContext, *, query: str | None = None, candidates: dict | None = None, ttl: int = 900, namespace: str = "{musicdl}", notice: str = "", page_size: int | None = None) -> None:
     """Bind one token to the durable user/request routes and the frozen candidate snapshot."""
     data = selection_payload(context)
+    if not isinstance(notice, str) or len(notice.encode("utf-8")) > 256:
+        raise ValueError("invalid selection notice")
+    if notice:
+        data["notice"] = notice
+    if page_size is not None:
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 100:
+            raise ValueError("invalid selection page size")
+        data["page_size"] = page_size
     if query is not None:
         if not isinstance(query, str) or len(query) > 512:
             raise ValueError("invalid selection context")

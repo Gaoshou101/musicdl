@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import logging
 from typing import Any, Callable
 from redis.exceptions import RedisError, ResponseError
@@ -73,32 +74,33 @@ class _StreamWorker:
         if hasattr(self.redis, "xack"):
             await self.redis.xack(stream, group, message_id)
 
-    def _retry_key(self, stream: str, message_id: Any) -> str:
-        value = f"{stream}:{_field({'id': message_id}, 'id', '')}"
+    def _retry_key(self, stream: str, group: str, message_id: Any) -> str:
+        value = json.dumps([stream, group, _field({'id': message_id}, 'id', '')], separators=(",", ":"))
         return f"{self.namespace}:worker:retry:{hashlib.sha256(value.encode()).hexdigest()}"
 
-    async def _clear_retry(self, stream: str, message_id: Any) -> None:
+    async def _clear_retry(self, stream: str, group: str, message_id: Any) -> None:
         if not hasattr(self.redis, "delete"):
             return
-        await self.redis.delete(self._retry_key(stream, message_id))
+        await self.redis.delete(self._retry_key(stream, group, message_id))
 
     async def _ack_then_clear(self, stream: str, group: str, message_id: Any) -> None:
         await self._ack(stream, group, message_id)
         try:
-            await self._clear_retry(stream, message_id)
+            await self._clear_retry(stream, group, message_id)
         except asyncio.CancelledError:
             raise
         except Exception:
             pass
 
     async def _record_failure(self, stream: str, group: str, message_id: Any, user: str = "") -> None:
-        key = self._retry_key(stream, message_id)
+        key = self._retry_key(stream, group, message_id)
         attempts = int(await self.redis.hincrby(key, "attempts", 1))
         await self.redis.expire(key, self.retry_window_seconds)
         if attempts < self.max_attempts:
             return
         fields = {
             "source_stream": str(stream)[:128],
+            "consumer_group": str(group)[:128],
             "message_id": str(_field({"id": message_id}, "id", ""))[:64],
             "consumer": str(self.consumer)[:128],
             "reason": "business_failure",

@@ -108,6 +108,22 @@ def test_the_window_refuses_parameters_it_cannot_answer():
         assert response.status_code == 422
 
 
+def test_a_previous_process_cursor_returns_a_fresh_window():
+    app, buffer = build()
+    for message in ("new first", "new second"):
+        buffer.append(logging.LogRecord("musicdl", logging.INFO, __file__, 1, message, None, None))
+
+    async def scenario():
+        async with client_for(app) as client:
+            await signed_in(client)
+            return await client.get("/admin/logs", params={"after": 1, "generation": "previous-process"})
+
+    response = run(scenario())
+    assert response.status_code == 200
+    assert response.json()["reset"] is True
+    assert [row["message"] for row in response.json()["items"]] == ["new first", "new second"]
+
+
 def test_a_rollup_without_a_configured_handler_still_answers():
     """The router builds its own buffer when the application hands it none."""
     auth = AdminAuth()

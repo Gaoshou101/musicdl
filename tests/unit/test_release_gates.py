@@ -7,7 +7,9 @@ gate reported FAIL for a callback that had answered correctly.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -68,3 +70,17 @@ def test_the_probe_refuses_a_plain_http_target() -> None:
 
 def test_the_gate_is_not_run_without_the_opt_in() -> None:
     assert gates.wecom() is False
+
+
+@pytest.mark.parametrize("gate", ["admin-auth", "plugin-security"])
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("status", ["PASS", "FAIL", "NOT_RUN"])
+def test_dry_run_never_hides_a_completed_gate_failure(monkeypatch, gate, dry_run, status):
+    monkeypatch.setitem(gates.FUN, gate, lambda: gates.report(gate, status, "controlled result"))
+    monkeypatch.setattr(sys, "argv", ["run_gates.py", "--gate", gate] + (["--dry-run"] if dry_run else []))
+    expected = 0 if status == "PASS" or (dry_run and status == "NOT_RUN") else 1
+    assert gates.main() == expected
+
+
+def test_child_suites_use_the_invoking_interpreter():
+    assert gates._python() == Path(sys.executable)

@@ -190,6 +190,7 @@ export default function LogsPage() {
   // The cursor lives in a ref as well as in state: the polling interval must
   // not be torn down and rebuilt every time one more line arrives.
   const lastIdRef = useRef(0)
+  const generationRef = useRef<string | undefined>(undefined)
 
   const serviceResetRef = useRef(true)
 
@@ -214,14 +215,15 @@ export default function LogsPage() {
     const reset = serviceResetRef.current
     const after = reset ? 0 : lastIdRef.current
     try {
-      const page = await readServiceLogs(200, after, level, signal)
+      const page = await readServiceLogs(200, after, level, signal, generationRef.current)
       if (signal.aborted) return
       serviceResetRef.current = false
       lastIdRef.current = page.last_id
+      generationRef.current = page.generation
       setLogTotal(page.total)
       setDropped(page.dropped)
       setLogs((current) => {
-        if (reset) return page.items.slice(-LOG_CAP)
+        if (reset || page.reset) return page.items.slice(-LOG_CAP)
         if (page.items.length === 0) return current
         // Keep repeated entries out of the displayed window.
         const seen = new Set(current.map((entry) => entry.id))

@@ -279,7 +279,8 @@ class MessageWorker(_StreamWorker):
         context = SelectionContext(str(payload["corp_id"]), str(payload["from_user"]), str(payload["request_id"]),
                                    result.version, snapshot, query=str(command.value), selection_generation=0)
         token = await self.state.issue_selection(context, ttl=self.selection_ttl)
-        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace)
+        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace,
+                                  page_size=self.max_results)
         await _call(self.wecom.send_text, context.from_user,
                     selection_pages(str(command.value), snapshot.values(), max_items=self.max_results)[0])
         return token
@@ -428,7 +429,8 @@ class JobWorker(_StreamWorker):
                 raise SelectionRejected()
             pages = selection_pages(context.query,
                                     (context.candidates[i] for i in sorted(context.candidates)),
-                                    max_items=self.max_results)
+                                    max_items=data.get("page_size", self.max_results),
+                                    notice=data.get("notice", ""))
             page = await move_selection_page(
                 self.redis, data["token"], context,
                 request_id=request_id,
@@ -772,17 +774,18 @@ class JobWorker(_StreamWorker):
         if refreshed is None or not user or not corp_id:
             await self._notify(job_id, "terminal_failure_notice", owner, deadline, user, self._failure_text(result))
             return
-        token = await self._rebind(job_id, payload, refreshed, owner, deadline, user, corp_id)
+        notice = self._refreshed_notice(result)
+        token = await self._rebind(job_id, payload, refreshed, owner, deadline, user, corp_id, notice=notice)
         if token is None:
             return
         await self._notify(job_id, "selection_prompt", owner, deadline, user,
                            selection_pages(str(payload.get("query") or ""),
                                            refreshed.candidates[:EFFECT_REPLAY_LIMIT],
                                            max_items=self.max_results,
-                                           notice=self._refreshed_notice(result))[0])
+                                           notice=notice)[0])
 
     async def _rebind(self, job_id: str, payload: dict[str, Any], refreshed, owner: str, deadline: float,
-                      user: str, corp_id: str) -> str | None:
+                      user: str, corp_id: str, *, notice: str = "") -> str | None:
         """Persist one refreshed selection generation and return its token."""
         guard = self._guard(job_id, "rebind", owner, deadline)
         lease, record = await guard.claim()
@@ -801,7 +804,8 @@ class JobWorker(_StreamWorker):
             selection_generation=int(payload.get("generation") or 0) + 1)
         await guard.external(lease)
         token = await self.state.issue_selection(context, ttl=self.selection_ttl)
-        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace)
+        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace,
+                                  notice=notice, page_size=self.max_results)
         await guard.complete(lease, {"ok": True, "token": token,
                                      "generation": context.selection_generation})
         return token

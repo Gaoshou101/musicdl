@@ -250,7 +250,7 @@ def test_job_success_delete_failure_is_not_recorded_as_business_failure(monkeypa
     monkeypatch.setattr("musicdl.worker.workers.download_with_fallback",download)
     raw=json.dumps({"request_id":"r","from_user":"u","candidate":cand().model_dump(mode="json")}).encode()
     redis=Broken(messages=[("1-0",{b"payload":raw})]); worker=JobWorker(redis,WeCom(),{},"/tmp",state=State(),refresh=lambda *_a:None,max_attempts=1)
-    key=worker._retry_key(worker.stream,"1-0"); redis.retries[key]=1
+    key=worker._retry_key(worker.stream,worker.group,"1-0"); redis.retries[key]=1
     run(worker.run_once())
     assert redis.acks[-1][2]=="1-0" and key in redis.retries and redis.dead_letters==[]
 
@@ -261,7 +261,7 @@ def test_job_selection_success_delete_failure_is_not_recorded(monkeypatch):
     monkeypatch.setattr("musicdl.worker.workers.get_user_selection",get)
     raw=json.dumps({"corp_id":"c","from_user":"u","request_id":"r","payload":{"command":"select","value":1}}).encode()
     redis=Broken(messages=[("1-0",{b"payload":raw})]); worker=JobWorker(redis,WeCom(),{},"/tmp",state=State(),max_attempts=1)
-    key=worker._retry_key(worker.selection_stream,"1-0"); redis.retries[key]=1
+    key=worker._retry_key(worker.selection_stream,worker.selection_group,"1-0"); redis.retries[key]=1
     run(worker.run_selection_once())
     assert redis.acks[-1][2]=="1-0" and key in redis.retries and redis.dead_letters==[]
 
@@ -373,7 +373,7 @@ def test_job_failure_uses_the_configured_retry_window(monkeypatch):
     redis=StreamRedis(messages=[("1-0",{b"payload":raw})])
     worker=JobWorker(redis,WeCom(),{},"/tmp",state=State(),refresh=lambda *_a:None,max_attempts=3,retry_window_seconds=3600)
     assert run(worker.run_once())==0 and redis.acks==[]
-    assert redis.expiries==[(worker._retry_key(worker.stream,"1-0"),3600)]
+    assert redis.expiries==[(worker._retry_key(worker.stream,worker.group,"1-0"),3600)]
 
 def test_message_worker_failure_uses_the_configured_retry_window(monkeypatch):
     from musicdl.worker.workers import MessageWorker
@@ -385,7 +385,7 @@ def test_message_worker_failure_uses_the_configured_retry_window(monkeypatch):
     worker=MessageWorker(redis,object(),WeCom(),state=state,search_timeout=1.0,pending_idle_ms=30001,
                          max_attempts=3,retry_window_seconds=7200)
     assert run(worker.run_once())==0 and redis.acks==[]
-    assert redis.expiries==[(worker._retry_key(worker.stream,"1-0"),7200)]
+    assert redis.expiries==[(worker._retry_key(worker.stream,worker.group,"1-0"),7200)]
 
 KIND="欧美/Artist/Song - Artist.mp3"
 
@@ -548,10 +548,10 @@ def test_job_dead_letters_only_after_the_configured_attempts(monkeypatch):
     redis=Replay(messages=[("1-0",{b"payload":raw})]); wc=WeCom()
     worker=JobWorker(redis,wc,{},"/tmp",state=State(),refresh=lambda *a:None,max_attempts=2)
     assert run(worker.run_once())==0
-    assert redis.dead_letters==[] and redis.acks==[] and redis.retries=={worker._retry_key(worker.stream,"1-0"):1}
+    assert redis.dead_letters==[] and redis.acks==[] and redis.retries=={worker._retry_key(worker.stream,worker.group,"1-0"):1}
     assert run(worker.run_once())==0
     assert len(redis.dead_letters)==1 and len(redis.acks)==1
-    retry_key=worker._retry_key(worker.stream,"1-0")
+    retry_key=worker._retry_key(worker.stream,worker.group,"1-0")
     assert redis.deleted==[retry_key] and retry_key not in redis.retries
     assert redis.dead_letters[0][1]["reason"]=="business_failure" and redis.dead_letters[0][1]["attempts"]=="2"
     assert wc.sent==[("u",TERMINAL_FAILURE_TEXT)]
@@ -604,6 +604,8 @@ def test_refreshed_candidates_rebind_one_generation_and_prompt_once(monkeypatch)
     assert effect(st,"1-0","rebind")["status"]=="done" and effect_result(st,"1-0","rebind")["generation"]==1
     assert len(wc.sent)==1 and wc.sent[0][0]=="u" and wc.sent[0][1].endswith("回复序号下载。")
     assert wc.sent[0][1].startswith(FALLBACK_NOTICE)
+    assert seen["bind"][3]["notice"] == FALLBACK_NOTICE
+    assert seen["bind"][3]["page_size"] == worker.max_results
     assert wc.sent[0][1].count("Song — Artist")==2
     assert effect(st,"1-0","selection_prompt")["status"]=="done"
 

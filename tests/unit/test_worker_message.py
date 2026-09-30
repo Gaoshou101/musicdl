@@ -198,7 +198,7 @@ def test_message_success_acks_before_best_effort_retry_cleanup(monkeypatch,failu
     monkeypatch.setattr("musicdl.worker.workers.search_sources",search)
     raw=json.dumps({"corp_id":"c","from_user":"u","request_id":"r","payload":{"command":"search","value":"song"}}).encode()
     message=("1-0",{b"payload":raw}); redis=Broken(messages=[message]); worker=MessageWorker(redis,object(),WeCom(),state=State(),max_attempts=1)
-    key=worker._retry_key(worker.stream,"1-0"); redis.retries[key]=1
+    key=worker._retry_key(worker.stream,worker.group,"1-0"); redis.retries[key]=1
     run(worker.run_once())
     assert key in redis.retries and redis.dead_letters==[] and calls==[1]
     assert (redis.acks==[]) if failure=="ack" else (redis.acks[-1][2]=="1-0")
@@ -207,7 +207,7 @@ def test_message_malformed_ack_failure_does_not_clear_retry():
     class Broken(StreamRedis):
         async def xack(self,*_a,**_k): raise RuntimeError("ack unavailable")
     redis=Broken(messages=[("1-0",{b"payload":b"not-json"})]); worker=MessageWorker(redis,object(),WeCom(),state=State())
-    key=worker._retry_key(worker.stream,"1-0"); redis.retries[key]=1
+    key=worker._retry_key(worker.stream,worker.group,"1-0"); redis.retries[key]=1
     run(worker.run_once())
     assert key in redis.retries and redis.deleted==[]
 

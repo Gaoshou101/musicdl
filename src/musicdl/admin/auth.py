@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import secrets
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 
@@ -109,6 +110,7 @@ class AdminAuth:
 
     def revoke_session(self, token: str) -> None:
         self._sessions.pop(token, None)
+        self._csrf.pop(token, None)
 
     def session_user(self, token: str | None) -> str | None:
         value = self._sessions.get(token or "")
@@ -133,16 +135,30 @@ class AdminAuth:
 
 
 class RateLimiter:
-    def __init__(self, *, limit: int = 5, window_seconds: float = 60, clock=time.monotonic):
+    def __init__(self, *, limit: int = 5, window_seconds: float = 60, clock=time.monotonic, max_keys: int = 4096):
+        if isinstance(max_keys, bool) or not isinstance(max_keys, int) or max_keys < 1:
+            raise ValueError("invalid rate limiter capacity")
         self.limit, self.window_seconds, self.clock = limit, window_seconds, clock
-        self._attempts: dict[str, list[float]] = {}
+        self.max_keys = max_keys
+        self._attempts: OrderedDict[str, list[float]] = OrderedDict()
 
     def allow(self, key: str) -> bool:
         now = self.clock()
+        # Last accepted attempts are ordered oldest first. Inactive clients
+        # expire without scanning every key on each login or evicting live limits.
+        while self._attempts:
+            oldest = next(iter(self._attempts))
+            stamps = self._attempts[oldest]
+            if stamps and now - stamps[-1] < self.window_seconds:
+                break
+            self._attempts.popitem(last=False)
+        if key not in self._attempts and len(self._attempts) >= self.max_keys:
+            return False
         values = [stamp for stamp in self._attempts.get(key, []) if now - stamp < self.window_seconds]
         if len(values) >= self.limit:
             self._attempts[key] = values
             return False
         values.append(now)
         self._attempts[key] = values
+        self._attempts.move_to_end(key)
         return True

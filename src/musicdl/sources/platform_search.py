@@ -366,6 +366,8 @@ class PlatformSearch:
         self.cache_ttl = float(cache_ttl)
         self.max_pending_queries = max_pending_queries
         self._slots = asyncio.Semaphore(max_concurrency)
+        self._broker_slots = asyncio.Semaphore(max_concurrency)
+        self._broker_tasks: set[asyncio.Task] = set()
         self._pending: dict[tuple[str, str], asyncio.Task] = {}
         self._cache: OrderedDict[tuple[str, str], tuple[float, tuple[PlatformHit, ...]]] = OrderedDict()
         self._closed = False
@@ -433,8 +435,7 @@ class PlatformSearch:
             remaining = deadline - time.monotonic()
             timeout = self.timeout if spec.attempts == 1 else remaining / (spec.attempts - attempt)
             try:
-                observation = await asyncio.to_thread(self.broker.fetch, action, SEARCH_HOSTS,
-                                                      timeout=timeout)
+                observation = await self._fetch_observation(action, timeout)
             except ActionDenied as exc:
                 # Running out of time on one draw is one more reason to make
                 # the next one, if there is a next one left to make.
@@ -455,6 +456,26 @@ class PlatformSearch:
             if hits or attempt + 1 == spec.attempts:
                 return hits
         return ()
+
+    async def _fetch_observation(self, action: HttpAction, timeout: float):
+        # Cancellation cannot stop a synchronous DNS lookup. Keep its slot
+        # until the actual broker finishes, even after the caller times out.
+        await self._broker_slots.acquire()
+        try:
+            task = asyncio.create_task(asyncio.to_thread(
+                self.broker.fetch, action, SEARCH_HOSTS, timeout=timeout))
+        except BaseException:
+            self._broker_slots.release()
+            raise
+        self._broker_tasks.add(task)
+
+        def finished(completed):
+            self._broker_tasks.discard(completed)
+            self._broker_slots.release()
+            _consume(completed)
+
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
 
 
 def _consume(task: asyncio.Future) -> None:

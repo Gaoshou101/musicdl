@@ -60,7 +60,12 @@ class SourceManager:
         entry = self._validated(item)
         if entry["id"] in self._sources: raise ValueError("duplicate id")
         self._sources[entry["id"]] = entry
-        if persist: self._notify()
+        if persist:
+            try:
+                self._notify()
+            except BaseException:
+                self._sources.pop(entry["id"], None)
+                raise
         return deepcopy(entry)
 
     def list(self) -> list[dict]:
@@ -70,8 +75,8 @@ class SourceManager:
         """Apply the provided fields; an omitted or null field keeps its value."""
         if source_id not in self._sources:
             raise KeyError(source_id)
-        item = self._sources[source_id]
-        previous = deepcopy(item)
+        previous = self._sources[source_id]
+        item = deepcopy(previous)
         for name, value in changes.items():
             if name not in self._FIELDS:
                 raise ValueError("invalid source configuration")
@@ -79,6 +84,7 @@ class SourceManager:
                 continue
             item[name] = self._coerce(name, value)
         if item != previous:
+            self._sources[source_id] = item
             try:
                 self._notify()
             except BaseException:

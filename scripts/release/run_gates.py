@@ -4,12 +4,15 @@ import argparse, shutil, subprocess, sys, urllib.request, urllib.parse
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 COMPOSE=ROOT/'compose.prod.yaml'; NGINX=ROOT/'deploy/nginx/musicdl.conf'; CADDY=ROOT/'deploy/caddy/Caddyfile'
+_LAST_STATUS = {}
+
 def _python():
- p=ROOT/'.venv'/'Scripts'/'python.exe'
- if p.exists(): return p
- p=ROOT.parent.parent/'.venv'/'Scripts'/'python.exe'
- return p if p.exists() else Path(sys.executable)
-def report(n,s,d): print(f'[{n}] {s} - {d}'); return s=='PASS'
+ # Child suites must use the same environment that launched this gate.
+ return Path(sys.executable)
+def report(n,s,d):
+ _LAST_STATUS[n] = s
+ print(f'[{n}] {s} - {d}')
+ return s=='PASS'
 def compose_contract(t=None):
  t=t or COMPOSE.read_text()
  cs=[('services:\n  musicdl:' in t and '  plugin-runner:' in t and '  admin-panel:' not in t,'two application services: the app, which serves the console, and the plugin runner'),('redis:' not in t and 'MUSICDL_REDIS__URL: "${MUSICDL_REDIS__URL:?' in t,'external Redis only'),(t.count('user: "10001:10001"')==2,'every service non-root'),(t.count('read_only: true')==2 and t.count('cap_drop: [ALL]')==2 and t.count('no-new-privileges:true')==2,'read-only root and privilege boundary'),(t.count('limits:')==2 and t.count('cpus:')==2 and t.count('memory:')==2,'hard CPU/memory limits'),(t.count('healthcheck:')==2 and 'internal: true' in t,'health probes and internal network')]
@@ -86,6 +89,9 @@ def main():
  if a.self_test:
   base=COMPOSE.read_text(); n=NGINX.read_text(); c=CADDY.read_text(); plug=base.replace('  plugin-runner:\n','  plugin-runner:\n    environment:\n      API_KEY: leaked\n',1); badtele=base.replace('  plugin-runner:\n','  plugin-runner:\n    volumes:\n      - musicdl-telegram:/bad\n',1); checks=[not compose_contract(base.replace('read_only: true','read_only: false',1)), not telegram_contract(badtele), not proxy_contract(n,c.replace('log_skip @callback','',1)), not plugin_contract(plug)]; good=all(checks); print('[self-test]', 'PASS' if good else 'FAIL','- compose, Telegram, proxy, and plugin tamper checks')
  for n in (FUN if a.gate=='all' else {a.gate:FUN[a.gate]}):
-  ok=wecom(a.wecom_url,a.wecom_expected) if n=='wecom-callback' else recovery(a.redis_url,a.confirm_isolated,a.namespace) if n=='compose-recovery' else FUN[n](); good=good and (ok or (a.dry_run and n in {'wecom-callback','plugin-security','admin-auth','compose-recovery'}))
+  _LAST_STATUS.pop(n, None)
+  ok=wecom(a.wecom_url,a.wecom_expected) if n=='wecom-callback' else recovery(a.redis_url,a.confirm_isolated,a.namespace) if n=='compose-recovery' else FUN[n]()
+  skipped = a.dry_run and n in {'wecom-callback','plugin-security','admin-auth','compose-recovery'} and _LAST_STATUS.get(n) == 'NOT_RUN'
+  good = good and (ok or skipped)
  return 0 if good else 1
 if __name__=='__main__': raise SystemExit(main())

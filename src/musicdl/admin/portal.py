@@ -4,7 +4,10 @@ import asyncio
 import logging
 import os
 import secrets
+from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import replace
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -230,6 +233,26 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         response.set_cookie("csrf_token", csrf, httponly=False, secure=secure, samesite="lax")
         return csrf
 
+    unbound_runtime = object()
+    request_runtime = ContextVar("admin_request_runtime", default=unbound_runtime)
+
+    def current_runtime():
+        pinned = request_runtime.get()
+        return (runtime() if runtime is not None else None) if pinned is unbound_runtime else pinned
+
+    def uses_runtime(handler):
+        @wraps(handler)
+        async def guarded(*args, **kwargs):
+            service = current_runtime()
+            borrow = getattr(service, "borrow", None)
+            async with borrow() if callable(borrow) else nullcontext():
+                token = request_runtime.set(service)
+                try:
+                    return await handler(*args, **kwargs)
+                finally:
+                    request_runtime.reset(token)
+        return guarded
+
     def active_runtime():
         """The runtime the panel searches and downloads through.
 
@@ -237,7 +260,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         no WeCom account still answers here; a deployment whose runtime could
         not be assembled says so instead of failing halfway through a request.
         """
-        service = runtime() if runtime is not None else None
+        service = current_runtime()
         if service is None or getattr(service, "registry", None) is None:
             raise HTTPException(503, "search runtime is unavailable")
         return service
@@ -279,7 +302,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         on one screen above, which rebuilds the runtime in place, so the refusal
         says which of the two they are looking at.
         """
-        service = runtime() if runtime is not None else None
+        service = current_runtime()
         connector = getattr(service, "telegram", None) if service is not None else None
         if connector is None:
             raise HTTPException(409, "telegram connector is disabled")
@@ -293,7 +316,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     def telegram_view(result=None) -> dict[str, Any]:
         """What the login screen needs: is it wired, and what is the next step."""
         configured = getattr(config.settings, "telegram", None)
-        service = runtime() if runtime is not None else None
+        service = current_runtime()
         connector = getattr(service, "telegram", None) if service is not None else None
         view: dict[str, Any] = {"enabled": bool(getattr(configured, "enabled", False)),
                                 "profile": telegram_profile(), "available": connector is not None,
@@ -630,6 +653,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                                   await rebuild_runtime("delete_source"))
 
     @router.post("/sources/{source_id}/lossless-check")
+    @uses_runtime
     async def check_source_lossless(source_id: str, request: Request):
         """Ask one channel whether it really serves lossless, once, on demand.
 
@@ -651,6 +675,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return await probe.check(source_id, source_version=entry.version)
 
     @router.get("/search")
+    @uses_runtime
     async def search(request: Request, q: str = "", limit: int = 50):
         """The panel's own search: exactly the query the workers run.
 
@@ -689,6 +714,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     probe_cache = ProbeCache()
 
     @router.post("/search/probe")
+    @uses_runtime
     async def search_probe(body: dict, request: Request):
         mutate(request)
         raw = body.get("candidates")
@@ -702,6 +728,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return await probe_candidates(candidates, getattr(service, "resolvers", {}) or {}, cache=probe_cache)
 
     @router.post("/download")
+    @uses_runtime
     async def download(body: dict, request: Request):
         """Download one candidate the search just listed, into the media root.
 
@@ -919,6 +946,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return await health.check()
 
     @router.get("/telegram")
+    @uses_runtime
     async def read_telegram(request: Request):
         """Whether the stored Telegram session can talk to bots right now.
 
@@ -928,7 +956,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         that has happened.
         """
         require(request)
-        service = runtime() if runtime is not None else None
+        service = current_runtime()
         connector = getattr(service, "telegram", None) if service is not None else None
         if connector is None:
             return telegram_view()
@@ -936,6 +964,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return telegram_view(result)
 
     @router.post("/telegram/login")
+    @uses_runtime
     async def begin_telegram_login(body: dict, request: Request):
         """Ask Telegram for the code that authorises this account.
 
@@ -954,6 +983,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return telegram_view(result)
 
     @router.post("/telegram/login/verify")
+    @uses_runtime
     async def verify_telegram_login(body: dict, request: Request):
         mutate(request)
         values = body if isinstance(body, dict) else {}
@@ -966,6 +996,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return telegram_view(result)
 
     @router.post("/telegram/login/password")
+    @uses_runtime
     async def confirm_telegram_password(body: dict, request: Request):
         mutate(request)
         values = body if isinstance(body, dict) else {}
@@ -978,6 +1009,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return telegram_view(result)
 
     @router.post("/telegram/logout")
+    @uses_runtime
     async def forget_telegram_session(request: Request):
         """Forget the stored session, so the next login starts clean."""
         mutate(request)
@@ -1058,7 +1090,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         return audit.page(offset=offset, limit=limit)
 
     @router.get("/logs")
-    async def service_logs(request: Request, limit: int = 200, after: int = 0, level: str | None = None):
+    async def service_logs(request: Request, limit: int = 200, after: int = 0, level: str | None = None,
+                           generation: str | None = None):
         """What this process logged while the panel was running.
 
         The two stores beside this one answer questions the portal asked; this
@@ -1070,7 +1103,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         """
         require(request)
         try:
-            return logs.page(limit=limit, after=after, level=level)
+            return logs.page(limit=limit, after=after, level=level, generation=generation)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
 
