@@ -208,6 +208,8 @@ export type ServiceLogPage = {
   last_id: number
   /** How many lines have rolled out of the window since the process started. */
   dropped: number
+  generation?: string
+  reset?: boolean
 }
 
 export type Page<T> = { items: T[]; total: number; offset: number; limit: number }
@@ -615,7 +617,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       cache: 'no-store',
       signal: options.signal,
     })
-  } catch {
+  } catch (error) {
+    if (options.signal?.aborted) throw error
     throw new ApiError(0, '无法连接到管理服务，请检查网络后重试')
   }
 
@@ -760,8 +763,8 @@ export function probeCandidateSizes(candidates: Candidate[], signal?: AbortSigna
   })
 }
 
-export function searchCandidates(query: string, limit = 50): Promise<SearchReport> {
-  return request<SearchReport>('/search', { query: { q: query, limit } })
+export function searchCandidates(query: string, limit = 50, signal?: AbortSignal): Promise<SearchReport> {
+  return request<SearchReport>('/search', { query: { q: query, limit }, signal })
 }
 
 /**
@@ -778,13 +781,13 @@ export function downloadCandidate(candidate: Candidate, query?: string): Promise
   })
 }
 
-export function readHealth(): Promise<HealthReport> {
-  return request<HealthReport>('/health')
+export function readHealth(signal?: AbortSignal): Promise<HealthReport> {
+  return request<HealthReport>('/health', { signal })
 }
 
 /** What each channel did last, from the panel's own searches and downloads. */
-export function listSourceHealth(): Promise<SourceHealthReport> {
-  return request<SourceHealthReport>('/sources/health')
+export function listSourceHealth(signal?: AbortSignal): Promise<SourceHealthReport> {
+  return request<SourceHealthReport>('/sources/health', { signal })
 }
 
 /** Everything the panel owns, everything the deployment owns, and what is in force. */
@@ -898,12 +901,12 @@ export function logoutTelegram(): Promise<TelegramReport> {
   return request<TelegramReport>('/telegram/logout', { method: 'POST' })
 }
 
-export function readEvents(offset = 0, limit = 100): Promise<Page<DownloadEvent>> {
-  return request<Page<DownloadEvent>>('/events', { query: { offset, limit } })
+export function readEvents(offset = 0, limit = 100, signal?: AbortSignal): Promise<Page<DownloadEvent>> {
+  return request<Page<DownloadEvent>>('/events', { query: { offset, limit }, signal })
 }
 
-export function readAudit(offset = 0, limit = 100): Promise<Page<AuditEntry>> {
-  return request<Page<AuditEntry>>('/audit', { query: { offset, limit } })
+export function readAudit(offset = 0, limit = 100, signal?: AbortSignal): Promise<Page<AuditEntry>> {
+  return request<Page<AuditEntry>>('/audit', { query: { offset, limit }, signal })
 }
 
 /**
@@ -916,6 +919,8 @@ export function readServiceLogs(
   limit = 200,
   after = 0,
   level: 'info' | 'warning' | 'error' = 'info',
+  signal?: AbortSignal,
+  generation?: string,
 ): Promise<ServiceLogPage> {
-  return request<ServiceLogPage>('/logs', { query: { limit, after, level } })
+  return request<ServiceLogPage>('/logs', { query: { limit, after, level, generation }, signal })
 }

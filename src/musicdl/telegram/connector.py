@@ -29,9 +29,9 @@ def telethon_client_factory(api_id: int, api_hash: str, proxy: Any = None) -> Ca
     setting it cannot honour has to fail loudly instead of being dropped.
     """
     def factory(session_path: Path) -> TelegramClientProtocol:
+        resolved = resolve_proxy(proxy)
         from telethon import TelegramClient
         kwargs: dict[str, Any] = {"flood_sleep_threshold": 0}
-        resolved = resolve_proxy(proxy)
         if resolved is not None:
             kwargs["proxy"] = resolved
         return TelegramClient(session_path, api_id, api_hash, **kwargs)
@@ -161,8 +161,11 @@ class TelegramConnector:
         self._api_hash = api_hash
         self.factory = client_factory
         self._clients: dict[str, TelegramClientProtocol] = {}
+        self._client_locks: dict[str, asyncio.Lock] = {}
+        self._close_lock = asyncio.Lock()
+        self._closed = False
         self._bot_locks: dict[tuple[str, str], asyncio.Lock] = {}
-        self._pending_memory: dict[str, Any] | None = None
+        self._pending_memory: dict[str, dict[str, Any]] = {}
         self.root.mkdir(parents=True, exist_ok=True)
         self._harden(self.root)
 
@@ -187,16 +190,19 @@ class TelegramConnector:
             handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
                 json.dump(payload, stream)
+            self._pending_memory.pop(profile, None)
         except OSError:  # pragma: no cover - a volume that cannot be written
-            self._pending_memory = payload
+            self._pending_memory[profile] = payload
 
     def pending_login(self, profile: str) -> dict[str, Any]:
         """The login step waiting to be finished, if there is one."""
-        payload: Any = self._pending_memory
-        try:
-            payload = json.loads(self.pending_path(profile).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pass
+        path = self.pending_path(profile)
+        payload: Any = self._pending_memory.get(profile)
+        if payload is None:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
         if not isinstance(payload, dict):
             return {}
         sent_at = payload.get("sent_at")
@@ -205,7 +211,7 @@ class TelegramConnector:
         return payload
 
     def _forget_login(self, profile: str) -> None:
-        self._pending_memory = None
+        self._pending_memory.pop(profile, None)
         try:
             self.pending_path(profile).unlink()
         except OSError:
@@ -234,15 +240,21 @@ class TelegramConnector:
 
     async def _client(self, profile: str):
         path = self.session_path(profile)
-        client = self._clients.get(profile)
-        if client is None:
-            client = self.factory(path)
-            if inspect.isawaitable(client):
-                client = await client
-            self._clients[profile] = client
-        await client.connect()
-        self._harden_session(profile)
-        return client
+        if self._closed:
+            raise RuntimeError("telegram connector is closed")
+        lock = self._client_locks.setdefault(profile, asyncio.Lock())
+        async with lock:
+            if self._closed:
+                raise RuntimeError("telegram connector is closed")
+            client = self._clients.get(profile)
+            if client is None:
+                client = self.factory(path)
+                if inspect.isawaitable(client):
+                    client = await client
+                self._clients[profile] = client
+            await client.connect()
+            self._harden_session(profile)
+            return client
 
     @staticmethod
     def _failure(exc: Exception) -> TelegramResult:
@@ -328,23 +340,25 @@ class TelegramConnector:
         removed locally, and the next login writes a fresh one.
         """
         path = self.session_path(profile)
-        self._forget_login(profile)
-        client = self._clients.pop(profile, None)
-        if client is not None:
-            closer = getattr(client, "disconnect", None)
-            if callable(closer):
-                result = closer()
-                if inspect.isawaitable(result):
-                    await result
-        for suffix in (".session", ".session-wal", ".session-shm", ".session-journal"):
-            candidate = path.with_name(path.name + suffix)
-            try:
-                if candidate.exists():
-                    candidate.unlink()
-            except OSError:
-                return TelegramResult(TelegramStatus.ERROR,
-                                      error="telegram session file could not be removed")
-        return TelegramResult(TelegramStatus.INVALID_SESSION)
+        lock = self._client_locks.setdefault(profile, asyncio.Lock())
+        async with lock:
+            self._forget_login(profile)
+            client = self._clients.pop(profile, None)
+            if client is not None:
+                closer = getattr(client, "disconnect", None)
+                if callable(closer):
+                    result = closer()
+                    if inspect.isawaitable(result):
+                        await result
+            for suffix in (".session", ".session-wal", ".session-shm", ".session-journal"):
+                candidate = path.with_name(path.name + suffix)
+                try:
+                    if candidate.exists():
+                        candidate.unlink()
+                except OSError:
+                    return TelegramResult(TelegramStatus.ERROR,
+                                          error="telegram session file could not be removed")
+            return TelegramResult(TelegramStatus.INVALID_SESSION)
 
     def bot_requester(self, profile: str, decoder: Callable) -> Callable:
         """Build a safe async bridge for requesting one response from a bot."""
@@ -389,10 +403,25 @@ class TelegramConnector:
 
     async def disconnect(self) -> None:
         """Cleanly disconnect all active clients and clear memory references."""
-        for client in list(self._clients.values()):
-            if hasattr(client, "disconnect") and callable(client.disconnect):
-                res = client.disconnect()
-                if inspect.isawaitable(res):
-                    await res
-        self._clients.clear()
-        self._bot_locks.clear()
+        async with self._close_lock:
+            self._closed = True
+            failures = []
+            # Waiting for each profile also accounts for factories still running.
+            for profile in dict.fromkeys((*self._client_locks, *self._clients)):
+                lock = self._client_locks.setdefault(profile, asyncio.Lock())
+                async with lock:
+                    client = self._clients.pop(profile, None)
+                    closer = getattr(client, "disconnect", None)
+                    if not callable(closer):
+                        continue
+                    try:
+                        res = closer()
+                        if inspect.isawaitable(res):
+                            await res
+                    except Exception as exc:
+                        failures.append(exc)
+            self._client_locks.clear()
+            self._bot_locks.clear()
+            self._pending_memory.clear()
+            if failures:
+                raise ExceptionGroup("telegram cleanup failed", failures)

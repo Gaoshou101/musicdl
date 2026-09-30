@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 import asyncio
 import inspect
 import logging
@@ -166,8 +166,8 @@ def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
             return True
         return app.state.worker_error is None and not any(task.done() for task in tasks)
 
-    async def redis() -> bool | None:
-        state = getattr(app.state, "wecom_state", None)
+    async def redis(runtime) -> bool | None:
+        state = runtime.state if runtime is not None else getattr(app.state, "wecom_state", None)
         if state is None:
             # Redis carries the WeCom sessions and the job queue.  With no
             # WeCom account the runtime never opens a client, so asking after
@@ -175,40 +175,49 @@ def _admin_probes(settings: AppSettings, app: FastAPI) -> dict[str, Any]:
             return None
         return bool(await state.ping())
 
-    async def plugin_runner() -> bool | None:
+    async def plugin_runner(runtime) -> bool | None:
         # The runner is what actually fetches media, so its health is the one
         # an operator most wants to see; before a runtime exists there is
         # nothing to ask.
-        client = getattr(getattr(app.state, "runtime", None), "plugin_client", None)
+        client = getattr(runtime, "plugin_client", None)
         if client is None:
             return None
         return await client.service_health()
 
-    async def telegram() -> bool | None:
+    async def telegram(runtime) -> bool | None:
         # An enabled Telegram deployment is healthy only when a connector is
         # wired, at least one Bot definition is registered, and the account
         # session is authorized. A disabled deployment has nothing to check.
         configured = getattr(settings, "telegram", None)
         if not getattr(configured, "enabled", False):
             return None
-        runtime = getattr(app.state, "runtime", None)
         connector = getattr(runtime, "telegram", None)
         if connector is None or not getattr(runtime, "telegram_sources", 0):
             return False
         result = await connector.restore(getattr(configured, "profile", "default"))
         return result.status is TelegramStatus.READY
 
-    return {"readyz": readyz, "redis": redis, "plugin_runner": plugin_runner, "telegram": telegram}
+    def protected(probe):
+        async def check():
+            instance = getattr(app.state, "runtime", None)
+            borrow = getattr(instance, "borrow", None)
+            async with borrow() if callable(borrow) else nullcontext():
+                return await probe(instance)
+        return check
+
+    return {"readyz": readyz, "redis": protected(redis),
+            "plugin_runner": protected(plugin_runner), "telegram": protected(telegram)}
 
 
 class _Runtime:
     def __init__(self, *, redis, state, service, wecom, plugin_client, transport, registry,
                  message_worker, job_worker, telegram=None, plugin_registry=None, telegram_sources=0,
                  resolvers=None, refresh=None, preference=None, language_advisor=None,
-                 lossless_capability=None, lossless_probe=None):
+                 lossless_capability=None, lossless_probe=None, platform_search=None):
         self.redis, self.state, self.service = redis, state, service
         self.wecom, self.plugin_client, self.registry = wecom, plugin_client, registry
         self.transport = transport
+        self.platform_search = platform_search
         self.message_worker, self.job_worker = message_worker, job_worker
         # Search and resolve are separate capabilities: an lx source resolves
         # media but never searches, so the two maps are not the same one.
@@ -228,13 +237,60 @@ class _Runtime:
         # configured as a bot, so a second copy under "sources" would be a
         # toggle an operator could flip without any effect.
         self.plugin_registry = plugin_registry if plugin_registry is not None else registry
+        self._users = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._closing = False
+        self._closed = False
+        self._close_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def borrow(self):
+        """Keep this runtime alive for the complete request using it."""
+        if self._closing:
+            raise RuntimeError("runtime is closing")
+        self._users += 1
+        self._idle.clear()
+        try:
+            yield self
+        finally:
+            self._users -= 1
+            if self._users == 0:
+                self._idle.set()
 
     async def aclose(self) -> None:
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closing = True
+            await self._idle.wait()
+            try:
+                await self._close_resources()
+            except Exception:
+                self._closed = True
+                raise
+            self._closed = True
+
+    async def _close_resources(self) -> None:
+        # Attempt every close even if one dependency fails during shutdown.
+        failures = []
+        for resource in (self.lossless_probe, self.platform_search):
+            try:
+                await _maybe_close(resource)
+            except Exception as exc:
+                failures.append(exc)
         if self.telegram is not None:
-            await self.telegram.disconnect()
-        await _maybe_close(self.transport)
-        await _maybe_close(self.plugin_client)
-        await _maybe_close(self.redis)
+            try:
+                await self.telegram.disconnect()
+            except Exception as exc:
+                failures.append(exc)
+        for resource in (self.transport, self.plugin_client, self.wecom, self.redis):
+            try:
+                await _maybe_close(resource)
+            except Exception as exc:
+                failures.append(exc)
+        if failures:
+            raise ExceptionGroup("runtime cleanup failed", failures)
 
 
 def _telegram_sources(telegram_settings, bots, *, known_ids=frozenset(), factory=None):
@@ -435,6 +491,9 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                                        quality_preference=worker_settings.quality_preference,
                                        lossless_capability=lossless_capability,
                                        search_timeout=search_timeout,
+                                       pending_idle_ms=worker_settings.pending_idle_ms,
+                                       max_attempts=worker_settings.max_attempts,
+                                       retry_window_seconds=worker_settings.retry_window_seconds,
                                        selection_ttl=settings.wecom.selection_ttl)
         job_worker = JobWorker(redis, wecom, sources=resolvers, media_root=settings.media.root, state=state,
                                refresh=refresh, job_timeout=worker_settings.job_timeout,
@@ -462,7 +521,8 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                     telegram=telegram, plugin_registry=plugin_registry,
                     telegram_sources=telegram_sources, resolvers=resolvers,
                     refresh=refresh, preference=preference, language_advisor=language_advisor,
-                    lossless_capability=lossless_capability, lossless_probe=lossless_probe)
+                    lossless_capability=lossless_capability, lossless_probe=lossless_probe,
+                    platform_search=platform_search)
 
 
 def _panel_root(settings: AppSettings) -> str | None:
@@ -499,7 +559,7 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
         # swapping runtimes waits for it instead of building on top of a
         # half-stopped one.
         reload_lock = asyncio.Lock()
-        live: dict[str, Any] = {"runtime": None, "tasks": []}
+        live: dict[str, Any] = {"runtime": None, "tasks": [], "retired": set(), "shutting_down": False}
         if admin is not None:
             # Installed before anything else the lifespan does, so a start-up
             # that goes wrong is itself readable from the panel afterwards.
@@ -507,7 +567,7 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             admin.logs.install()
 
         def worker_finished(task: asyncio.Task) -> None:
-            if app.state.stopping or task.cancelled():
+            if app.state.stopping or task.cancelled() or task not in live["tasks"]:
                 return
             try:
                 error = task.exception()
@@ -593,6 +653,18 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 admin.publish_sources(getattr(instance, "plugin_registry", None)
                                       or getattr(instance, "registry", None))
 
+        def retire(instance):
+            task = asyncio.create_task(_maybe_close(instance))
+            live["retired"].add(task)
+
+            def finished(completed):
+                live["retired"].discard(completed)
+                if not completed.cancelled() and completed.exception() is not None:
+                    logger.warning("retired runtime cleanup failed")
+
+            task.add_done_callback(finished)
+            return task
+
         async def reload_runtime(reason: str = "manual") -> dict[str, Any]:
             """Adopt the settings in force without restarting the process.
 
@@ -605,69 +677,94 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             if admin is None and not settings.wecom.enabled:
                 return {"status": "skipped", "reason": "no runtime is assembled"}
             async with reload_lock:
+                if live["shutting_down"]:
+                    return {"status": "skipped", "reason": "application is shutting down"}
                 previous, tasks = live["runtime"], live["tasks"]
                 try:
                     built = await assemble()
                 except Exception as error:  # noqa: BLE001 - reported, not raised
                     logger.warning("runtime reload failed: %s", error, exc_info=True)
                     return {"status": "failed", "error": str(error)}
-                await stop_workers(tasks)
+                try:
+                    await stop_workers(tasks)
+                except BaseException:
+                    retire(built)
+                    adopt(previous, start_workers(previous))
+                    raise
+                app.state.worker_error = None
                 started = start_workers(built)
                 adopt(built, started)
-                if previous is not None:
-                    await _maybe_close(previous)
                 app.state.runtime_error = None
                 app.state.runtime_generation += 1
+                cleanup_failed = False
+                if previous is not None:
+                    try:
+                        await asyncio.shield(retire(previous))
+                    except Exception:
+                        cleanup_failed = True
+                        logger.warning("previous runtime cleanup failed after replacement")
                 registry = getattr(built, "registry", None)
                 sources = len(registry.enabled()) if registry is not None else 0
                 logger.info("runtime reloaded (%s): generation %d, %d sources",
                             reason, app.state.runtime_generation, sources)
                 return {"status": "reloaded", "reason": reason,
                         "generation": app.state.runtime_generation, "sources": sources,
-                        "workers": len(started)}
+                        "workers": len(started),
+                        **({"cleanup_warning": True} if cleanup_failed else {})}
 
         # Set before the first assembly, so a start-up that fails to build a
         # runtime still leaves the panel able to ask for another one.
         app.state.reload_runtime = reload_runtime
 
-        if settings.wecom.enabled and state_factory:
-            boundary = state_factory(settings)
-            if inspect.isawaitable(boundary):
-                boundary = await boundary
-            app.state.wecom_state = boundary
-            app.state.wecom_service = WeComService(settings.wecom, boundary, clock or time.time)
-        elif state_factory:
-            # An injected state boundary means the caller owns the WeCom half;
-            # assembling the source runtime on top of it is not what it asked
-            # for, and nothing here needs the plugin volume then.
-            pass
-        elif settings.wecom.enabled or admin is not None:
-            # The one registry answers both surfaces -- the WeCom workers and
-            # the panel's own search box -- so it is assembled whenever either
-            # is on.  A deployment that runs only the panel must not be left
-            # with nothing to search, and one that runs neither is not asked
-            # for plugin storage it will never read.
-            try:
-                built = await assemble()
-            except Exception as error:
-                # A WeCom deployment cannot serve its callback without workers;
-                # the panel can still start and report what is missing.
-                if settings.wecom.enabled:
-                    raise
-                app.state.runtime_error = error
-            else:
-                adopt(built, start_workers(built))
         try:
+            if settings.wecom.enabled and state_factory:
+                boundary = state_factory(settings)
+                if inspect.isawaitable(boundary):
+                    boundary = await boundary
+                app.state.wecom_state = boundary
+                app.state.wecom_service = WeComService(settings.wecom, boundary, clock or time.time)
+            elif state_factory:
+                # An injected state boundary means the caller owns the WeCom half;
+                # assembling the source runtime on top of it is not what it asked
+                # for, and nothing here needs the plugin volume then.
+                pass
+            elif settings.wecom.enabled or admin is not None:
+                # The one registry answers both surfaces -- the WeCom workers and
+                # the panel's own search box -- so it is assembled whenever either
+                # is on.  A deployment that runs only the panel must not be left
+                # with nothing to search, and one that runs neither is not asked
+                # for plugin storage it will never read.
+                try:
+                    built = await assemble()
+                except Exception as error:
+                    # A WeCom deployment cannot serve its callback without workers;
+                    # the panel can still start and report what is missing.
+                    if settings.wecom.enabled:
+                        raise
+                    app.state.runtime_error = error
+                else:
+                    adopt(built, start_workers(built))
             yield
         finally:
+            live["shutting_down"] = True
             app.state.stopping = True
-            await stop_workers(live["tasks"])
-            live["tasks"] = []
-            if live["runtime"] is not None:
-                await _maybe_close(live["runtime"])
-                live["runtime"] = None
-            if admin is not None:
-                admin.logs.uninstall()
+            try:
+                # A reload already assembling a replacement must finish its
+                # adoption before shutdown decides which runtime to close.
+                async with reload_lock:
+                    await stop_workers(live["tasks"])
+                    live["tasks"] = []
+                    if live["runtime"] is not None:
+                        await _maybe_close(live["runtime"])
+            finally:
+                try:
+                    retired = tuple(live["retired"])
+                    if retired:
+                        await asyncio.gather(*retired, return_exceptions=True)
+                finally:
+                    live["runtime"] = None
+                    if admin is not None:
+                        admin.logs.uninstall()
 
     app = FastAPI(title="musicdl", docs_url=None, redoc_url=None, lifespan=lifespan)
     admin = _AdminState(settings, app) if settings.admin.enabled else None
@@ -723,7 +820,12 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
         if service is None:
             return PlainTextResponse("restart required", status_code=503)
         try:
-            await service.handle_post(request)
+            # A slow body or state store must not hold the callback indefinitely.
+            async with asyncio.timeout(4.0):
+                runtime = getattr(app.state, "runtime", None)
+                borrow = getattr(runtime, "borrow", None)
+                async with borrow() if callable(borrow) else nullcontext():
+                    await service.handle_post(request)
         except ValueError as exc:
             if str(exc) == "unsupported_encoding":
                 return PlainTextResponse("unsupported media", status_code=415)
@@ -732,7 +834,7 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             return PlainTextResponse("bad request", status_code=400)
         except PermissionError:
             return PlainTextResponse("forbidden", status_code=403)
-        except StateUnavailable:
+        except (StateUnavailable, TimeoutError):
             return PlainTextResponse("not ready", status_code=503)
         return Response(status_code=200)
 

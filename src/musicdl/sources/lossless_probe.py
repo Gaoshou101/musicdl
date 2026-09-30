@@ -120,25 +120,42 @@ class LosslessProbe:
         self._observer = observer
         self._clock = clock if callable(clock) else time.time
         self._accepts_quality = _accepts_quality(resolver)
-        # One entry per source id, so a burst of askers runs one resolve.
-        self._inflight: dict[str, asyncio.Future] = {}
+        # A source update must never reuse the previous version's measurement.
+        self._inflight: dict[tuple[str, str | None], asyncio.Future] = {}
+        self._closed = False
 
     # -- the check -------------------------------------------------------
     async def check(self, source_id: str, *, source_version: str | None = None) -> dict:
         """Run (or reuse) one capability check and return its verdict."""
         if not isinstance(source_id, str) or not source_id:
             raise ValueError("invalid source id")
+        if self._closed:
+            raise RuntimeError("lossless probe closed")
         cached = self._cached(source_id, source_version)
         if cached is not None:
             return cached
-        pending = self._inflight.get(source_id)
+        key = (source_id, _version(source_version))
+        pending = self._inflight.get(key)
         if pending is None:
             pending = asyncio.ensure_future(self._run(source_id, source_version))
-            self._inflight[source_id] = pending
-            pending.add_done_callback(lambda _task, key=source_id: self._inflight.pop(key, None))
+            self._inflight[key] = pending
+            def finished(task, key=key):
+                self._inflight.pop(key, None)
+                if not task.cancelled():
+                    task.exception()
+            pending.add_done_callback(finished)
         # Shielded so one asker giving up does not cancel the shared probe the
         # others are still waiting on.
         return await asyncio.shield(pending)
+
+    async def aclose(self) -> None:
+        self._closed = True
+        tasks = tuple(self._inflight.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._inflight.clear()
 
     async def _run(self, source_id: str, source_version: str | None) -> dict:
         status, evidence = await self._measure(source_id)

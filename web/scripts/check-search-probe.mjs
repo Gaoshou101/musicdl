@@ -9,6 +9,11 @@ let cursor = 0, dirty = false, tree
 const slots = [], effects = [], calls = []
 const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]))
 const hooks = {
+  useRef(initial) {
+    const i = cursor++
+    slots[i] ??= { current: initial }
+    return slots[i]
+  },
   useState(initial) {
     const i = cursor++
     slots[i] ??= { value: initial }

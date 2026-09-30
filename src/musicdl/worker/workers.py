@@ -1,6 +1,5 @@
 from __future__ import annotations
 import json
-import inspect
 import asyncio
 import hashlib
 import math
@@ -21,13 +20,13 @@ from musicdl.media.models import LANGUAGES, ArtifactRecord, FallbackResult, Medi
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult, search_sources
 from musicdl.wecom.commands import CommandKind, ParsedCommand, parse_command
-from musicdl.wecom.results import NO_RESULTS_TEXT, quality_summary, selection_message, success_message
+from musicdl.wecom.results import NO_RESULTS_TEXT, quality_summary, selection_message, selection_pages, success_message
 from musicdl.media.validation import validated_destination
 from musicdl.wecom.state import EffectLease, RedisStateStore, SelectionContext, SelectionRejected
 from .selection import bind_user_selection, get_user_selection, get_selection_for_user, get_selection_for_request, _get_by_token
+from .selection import cancel_user_selection, move_selection_page, get_interaction_selection
+from .stream import _StreamWorker, _call, _field, TERMINAL_FAILURE_TEXT
 
-
-TERMINAL_FAILURE_TEXT = "处理失败，请稍后重试。"
 # A re-prompt answers the same question a second time, so it says why the first
 # answer is gone: the refreshed list may be rows the user has already read.
 FALLBACK_NOTICE = "上一次的结果下载失败，这里是最新的结果："
@@ -123,11 +122,6 @@ class _EffectGuard:
             pass
 
 
-async def _call(fn, *args, **kwargs):
-    value = fn(*args, **kwargs)
-    return await value if inspect.isawaitable(value) else value
-
-
 def _positive_seconds(value, name: str):
     if value is None:
         return None
@@ -184,11 +178,6 @@ def _context_from_route(data: Mapping[str, Any]) -> SelectionContext:
                             selection_generation=generation)
 
 
-def _field(fields: dict, name: str, default=None):
-    fields = {((k.decode() if isinstance(k, bytes) else k)): v for k, v in fields.items()}
-    value = fields.get(name, default)
-    return value.decode() if isinstance(value, bytes) else value
-
 def _envelope(fields):
     raw = _field(fields, "payload", "{}")
     outer = json.loads(raw)
@@ -218,91 +207,6 @@ def _command(payload: dict[str, Any]) -> ParsedCommand:
     return ParsedCommand(kind, value)
 
 
-class _StreamWorker:
-    def _configure_delivery(self, namespace: str, pending_idle_ms: int, max_attempts: int) -> None:
-        if not isinstance(pending_idle_ms, int) or isinstance(pending_idle_ms, bool) or not 1 <= pending_idle_ms <= 604800000:
-            raise ValueError("invalid pending idle")
-        if not isinstance(max_attempts, int) or isinstance(max_attempts, bool) or not 1 <= max_attempts <= 100:
-            raise ValueError("invalid max attempts")
-        self.namespace = namespace
-        self.pending_idle_ms = pending_idle_ms
-        self.max_attempts = max_attempts
-        self.dead_letter_stream = f"{namespace}:stream:dead-letter"
-
-    async def _ensure_group(self, stream, group):
-        if not hasattr(self.redis, "xgroup_create"):
-            raise RuntimeError("Redis consumer groups are required")
-        try: await self.redis.xgroup_create(stream, group, id="0", mkstream=True)
-        except Exception as exc:
-            if "BUSYGROUP" not in str(exc): raise
-
-    async def _read(self, stream: str, group: str, *, count: int = 10):
-        if hasattr(self.redis, "xautoclaim"):
-            claimed = await self.redis.xautoclaim(
-                stream, group, self.consumer, self.pending_idle_ms, "0-0", count=count,
-            )
-            if isinstance(claimed, (list, tuple)) and len(claimed) >= 2 and claimed[1]:
-                return [(stream, claimed[1])]
-        if not hasattr(self.redis, "xreadgroup"): raise RuntimeError("Redis xreadgroup is required")
-        return await self.redis.xreadgroup(group, self.consumer, {stream: ">"}, count=count, block=1)
-
-    async def _ack(self, stream, group, message_id):
-        if hasattr(self.redis, "xack"):
-            await self.redis.xack(stream, group, message_id)
-
-    def _retry_key(self, stream: str, message_id: Any) -> str:
-        value = f"{stream}:{_field({'id': message_id}, 'id', '')}"
-        return f"{self.namespace}:worker:retry:{hashlib.sha256(value.encode()).hexdigest()}"
-
-    async def _clear_retry(self, stream: str, message_id: Any) -> None:
-        if not hasattr(self.redis, "delete"):
-            return
-        await self.redis.delete(self._retry_key(stream, message_id))
-
-    async def _ack_then_clear(self, stream: str, group: str, message_id: Any) -> None:
-        await self._ack(stream, group, message_id)
-        try:
-            await self._clear_retry(stream, message_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
-
-    async def _record_failure(self, stream: str, group: str, message_id: Any, user: str = "") -> None:
-        key = self._retry_key(stream, message_id)
-        attempts = int(await self.redis.hincrby(key, "attempts", 1))
-        await self.redis.expire(key, self.retry_window_seconds)
-        if attempts < self.max_attempts:
-            return
-        fields = {
-            "source_stream": str(stream)[:128],
-            "message_id": str(_field({"id": message_id}, "id", ""))[:64],
-            "consumer": str(self.consumer)[:128],
-            "reason": "business_failure",
-            "attempts": str(attempts),
-        }
-        await self.redis.xadd(self.dead_letter_stream, fields, maxlen=1000, approximate=True)
-        await self._notify_terminal(stream, message_id, user)
-        await self._ack_then_clear(stream, group, message_id)
-
-    async def _notify_terminal(self, stream: str, message_id: Any, user: str) -> None:
-        """Deliver the bounded dead-letter notice for one terminal message."""
-        if not user:
-            return
-        try:
-            await _call(self.wecom.send_text, user, TERMINAL_FAILURE_TEXT)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
-
-    async def _run_loop(self, operation: Callable[[], Any], poll_interval: float) -> None:
-        while True:
-            handled = await operation()
-            if not handled:
-                await asyncio.sleep(poll_interval)
-
-
 class MessageWorker(_StreamWorker):
     def __init__(self, redis: Any, registry: Any, wecom: Any, *, state: RedisStateStore | None = None,
                  ai_ranker: Callable | None = None, group: str = "musicdl-workers", consumer: str | None = None,
@@ -319,6 +223,8 @@ class MessageWorker(_StreamWorker):
             raise ValueError("invalid search timeout")
         self.ai_ranker, self.group = ai_ranker, group
         self.consumer = consumer if consumer is not None else f"message-{secrets.token_hex(12)}"
+        if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 100:
+            raise ValueError("invalid max results")
         self.max_results, self.search_timeout = max_results, search_timeout
         if not isinstance(selection_ttl, int) or isinstance(selection_ttl, bool) or not 60 <= selection_ttl <= 86400:
             raise ValueError("invalid selection ttl")
@@ -329,6 +235,13 @@ class MessageWorker(_StreamWorker):
         self.stream = self.state.message_stream
 
     async def handle(self, envelope: dict[str, Any]) -> str | None:
+        # The whole search, optional AI and reply must finish before reclaim.
+        deadline = asyncio.get_running_loop().time() + min(
+            30.0, self.pending_idle_ms / 1000 * 0.95)
+        async with asyncio.timeout_at(deadline):
+            return await self._handle(envelope, deadline)
+
+    async def _handle(self, envelope: dict[str, Any], deadline: float) -> str | None:
         payload = envelope.get("payload", envelope)
         if isinstance(payload, str): payload = json.loads(payload)
         # enqueue_message stores routing metadata beside the user payload.
@@ -336,7 +249,14 @@ class MessageWorker(_StreamWorker):
         command = _command(payload)
         if command.kind is not CommandKind.SEARCH:
             return None
-        options = dict(timeout=self.search_timeout, quality_policy=self.quality_policy,
+        remaining = deadline - asyncio.get_running_loop().time()
+        # The configured search timeout is an upper bound. Leave room to
+        # persist the selection and send the reply before this stream entry
+        # becomes eligible for reclaim by another consumer.
+        reserve = min(WECOM_NOTICE_TIMEOUT_SECONDS + REDIS_OVERHEAD_SECONDS,
+                      max(1.0, remaining / 2))
+        search_timeout = min(self.search_timeout, max(0.1, remaining - reserve))
+        options = dict(timeout=search_timeout, quality_policy=self.quality_policy,
                        quality_preference=self.quality_preference)
         if self.lossless_capability is not None:
             # The channel-ordering bias is optional, so an unmeasured
@@ -345,7 +265,10 @@ class MessageWorker(_StreamWorker):
         result = await search_sources(self.registry, str(command.value), **options)
         if self.ai_ranker:
             try:
-                ranked = await _call(self.ai_ranker, result, str(command.value))
+                remaining = deadline - asyncio.get_running_loop().time()
+                # Optional ranking cannot spend the time needed to send results.
+                async with asyncio.timeout(max(0, remaining - WECOM_NOTICE_TIMEOUT_SECONDS - REDIS_OVERHEAD_SECONDS)):
+                    ranked = await _call(self.ai_ranker, result, str(command.value))
                 result = ranked.search if isinstance(ranked, AIRankResult) else ranked
             except asyncio.CancelledError: raise
             except Exception: pass
@@ -356,9 +279,10 @@ class MessageWorker(_StreamWorker):
         context = SelectionContext(str(payload["corp_id"]), str(payload["from_user"]), str(payload["request_id"]),
                                    result.version, snapshot, query=str(command.value), selection_generation=0)
         token = await self.state.issue_selection(context, ttl=self.selection_ttl)
-        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace)
+        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace,
+                                  page_size=self.max_results)
         await _call(self.wecom.send_text, context.from_user,
-                    selection_message(str(command.value), result.candidates, max_items=self.max_results))
+                    selection_pages(str(command.value), snapshot.values(), max_items=self.max_results)[0])
         return token
 
     async def run_once(self) -> int:
@@ -461,21 +385,103 @@ class JobWorker(_StreamWorker):
             raise SelectionRejected()
         return await self.handle_selection(token, _context_from_route(data), index)
 
+    async def _interaction_notice(self, user: str, text: str) -> None:
+        # A failed acknowledgement must not replay an already consumed selection.
+        if not user:
+            return
+        try:
+            async with asyncio.timeout(self.wecom_notice_timeout):
+                await _call(self.wecom.send_text, user, text)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    async def _handle_interaction(self, envelope: dict[str, Any]) -> bool:
+        command = _command(envelope)
+        if command.kind is CommandKind.SEARCH:
+            return False
+        user, corp = envelope.get("from_user", ""), envelope.get("corp_id", "")
+        if not user or not corp:
+            raise SelectionRejected()
+        if command.kind is CommandKind.UNSUPPORTED:
+            await self._interaction_notice(user, "发送歌名搜索，回复序号下载；n 下一页，p 上一页，/cancel 取消选曲。")
+            return True
+        request_id = str(envelope.get("request_id", ""))
+        if hasattr(self.redis, "eval") and request_id:
+            data = await get_interaction_selection(self.redis, corp, user, request_id,
+                                                   ttl=self.retry_window_seconds, namespace=self.namespace)
+        else:
+            data = await get_user_selection(self.redis, corp, user, namespace=self.namespace)
+        if not data:
+            await self._interaction_notice(user, "当前没有可选结果或结果已过期，请重新发送歌名。")
+            return True
+        context = _context_from_route(data)
+        if context.corp_id != corp or context.from_user != user:
+            raise SelectionRejected()
+        if command.kind is CommandKind.CANCEL:
+            cancelled = await cancel_user_selection(self.redis, data["token"], context, namespace=self.namespace)
+            text = ("已取消本次选曲，已进入队列的下载继续执行。" if cancelled
+                    else "搜索结果已更新，请使用最新列表。")
+            await self._interaction_notice(user, text)
+        elif command.kind in (CommandKind.NEXT, CommandKind.PREVIOUS):
+            if sorted(context.candidates) != list(range(1, len(context.candidates) + 1)):
+                raise SelectionRejected()
+            pages = selection_pages(context.query,
+                                    (context.candidates[i] for i in sorted(context.candidates)),
+                                    max_items=data.get("page_size", self.max_results),
+                                    notice=data.get("notice", ""))
+            page = await move_selection_page(
+                self.redis, data["token"], context,
+                request_id=request_id,
+                direction=1 if command.kind is CommandKind.NEXT else -1,
+                page_count=len(pages), namespace=self.namespace)
+            await self._interaction_notice(user, pages[page])
+        elif command.kind is CommandKind.SELECT:
+            index = command.value
+            if isinstance(index, bool) or not isinstance(index, int) or index not in context.candidates:
+                await self._interaction_notice(user, "序号不在当前结果中，请按列表中的序号选择。")
+                return True
+            result = await self.handle_selection(data["token"], context, index)
+            if not getattr(result, "duplicate", False):
+                await self._interaction_notice(user, "已加入下载队列，请稍候。")
+        return True
+
     async def run_selection_once(self) -> int:
+        # This group sees search callbacks too. Read one entry at a time to
+        # avoid starting the pending clock for work we cannot process yet, but
+        # skip a bounded number of search entries in the same poll.
+        seen: set[str | bytes] = set()
+        for _ in range(32):
+            count, skipped_search = await self._run_selection_batch_once(seen)
+            if count or not skipped_search:
+                return count
+        return 0
+
+    async def _run_selection_batch_once(self, seen: set[str | bytes]) -> tuple[int, bool]:
         await self._ensure_group(self.selection_stream, self.selection_group); count = 0
+        skipped_search = False
         for _, messages in await self._read(self.selection_stream, self.selection_group):
             for message_id, fields in messages:
+                # Real Redis never redelivers an acked entry through ">".
+                # Some test adapters are deliberately static; avoid repeating
+                # their entry or a faulty adapter's entry in this one poll.
+                if message_id in seen:
+                    return count, False
+                seen.add(message_id)
                 envelope: dict[str, Any] = {}
                 try:
-                    envelope = _envelope(fields); command = _command(envelope)
-                    if command.kind is not CommandKind.SELECT: raise SelectionRejected()
-                    index, user, corp = command.value, envelope.get("from_user", ""), envelope.get("corp_id", "")
-                    data = await get_user_selection(self.redis, corp, user, namespace=self.namespace)
-                    if not data: raise SelectionRejected()
-                    await self.handle_selection(data["token"], _context_from_route(data), int(index))
+                    envelope = _envelope(fields)
+                    async with asyncio.timeout(min(self.job_timeout, self.pending_idle_ms / 1000 * 0.95)):
+                        accepted = await self._handle_interaction(envelope)
+                    if not accepted:
+                        skipped_search = True
                 except asyncio.CancelledError:
                     raise
                 except (ValueError, KeyError, json.JSONDecodeError, SelectionRejected):
+                    if envelope.get("command") in ("select", "next", "previous", "cancel"):
+                        await self._interaction_notice(str(envelope.get("from_user", "")),
+                                                       "结果已失效或已选择，请重新发送歌名。")
                     try:
                         await self._ack_then_clear(self.selection_stream, self.selection_group, message_id)
                     except asyncio.CancelledError:
@@ -494,12 +500,12 @@ class JobWorker(_StreamWorker):
                     continue
                 try:
                     await self._ack_then_clear(self.selection_stream, self.selection_group, message_id)
-                    count += 1
+                    count += int(accepted)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     pass
-        return count
+        return count, skipped_search
 
     async def handle_job(self, job: dict[str, Any], *, job_id: str):
         if not isinstance(job_id, str) or not job_id or len(job_id) > 256:
@@ -768,16 +774,18 @@ class JobWorker(_StreamWorker):
         if refreshed is None or not user or not corp_id:
             await self._notify(job_id, "terminal_failure_notice", owner, deadline, user, self._failure_text(result))
             return
-        token = await self._rebind(job_id, payload, refreshed, owner, deadline, user, corp_id)
+        notice = self._refreshed_notice(result)
+        token = await self._rebind(job_id, payload, refreshed, owner, deadline, user, corp_id, notice=notice)
         if token is None:
             return
         await self._notify(job_id, "selection_prompt", owner, deadline, user,
-                           selection_message(str(payload.get("query") or ""), refreshed.candidates,
-                                             max_items=self.max_results,
-                                             notice=self._refreshed_notice(result)))
+                           selection_pages(str(payload.get("query") or ""),
+                                           refreshed.candidates[:EFFECT_REPLAY_LIMIT],
+                                           max_items=self.max_results,
+                                           notice=notice)[0])
 
     async def _rebind(self, job_id: str, payload: dict[str, Any], refreshed, owner: str, deadline: float,
-                      user: str, corp_id: str) -> str | None:
+                      user: str, corp_id: str, *, notice: str = "") -> str | None:
         """Persist one refreshed selection generation and return its token."""
         guard = self._guard(job_id, "rebind", owner, deadline)
         lease, record = await guard.claim()
@@ -796,7 +804,8 @@ class JobWorker(_StreamWorker):
             selection_generation=int(payload.get("generation") or 0) + 1)
         await guard.external(lease)
         token = await self.state.issue_selection(context, ttl=self.selection_ttl)
-        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace)
+        await bind_user_selection(self.redis, token, context, ttl=self.selection_ttl, namespace=self.namespace,
+                                  notice=notice, page_size=self.max_results)
         await guard.complete(lease, {"ok": True, "token": token,
                                      "generation": context.selection_generation})
         return token

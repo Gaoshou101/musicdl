@@ -1,6 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
+import { usePolling } from '@/lib/usePolling'
 import {
   Pulse,
   CheckCircle,
@@ -102,7 +103,7 @@ export default function HealthPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
 
-  const fetchHealth = useCallback(async () => {
+  const fetchHealth = useCallback(async (signal: AbortSignal) => {
     setRefreshing(true)
     try {
       // The dependency checks and the per-channel roll-up answer different
@@ -111,28 +112,25 @@ export default function HealthPage() {
       // backend keeps showing the dependency checks and says what is missing
       // rather than failing the whole page.
       const [report, channelReport] = await Promise.all([
-        readHealth(),
-        listSourceHealth().catch(() => {
-          setChannelsError(true)
-          return null
-        }),
+        readHealth(signal),
+        listSourceHealth(signal).catch(() => null),
       ])
+      if (signal.aborted) return
       setHealth(report)
       setChannels(channelReport)
+      setChannelsError(channelReport === null)
       setError('')
     } catch (err) {
-      setError(errorMessage(err))
+      if (!signal.aborted) setError(errorMessage(err))
     } finally {
-      setLoading(false)
-      setRefreshing(false)
+      if (!signal.aborted) {
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
   }, [])
 
-  useEffect(() => {
-    void fetchHealth()
-    const interval = setInterval(() => void fetchHealth(), 30000)
-    return () => clearInterval(interval)
-  }, [fetchHealth])
+  const refreshHealth = usePolling(fetchHealth, 30000)
 
   if (loading) {
     return (
@@ -153,7 +151,7 @@ export default function HealthPage() {
         </div>
         <button
           type="button"
-          onClick={() => void fetchHealth()}
+          onClick={() => void refreshHealth()}
           disabled={refreshing}
           className="flex items-center gap-2 px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 font-medium transition-colors"
         >

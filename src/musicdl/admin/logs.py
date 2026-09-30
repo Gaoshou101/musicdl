@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 
@@ -72,6 +73,7 @@ class LogBuffer(logging.Handler):
         self._entries: deque[tuple[int, int, dict]] = deque(maxlen=capacity)
         self._lock = threading.Lock()
         self._next_id = 0
+        self._generation = uuid.uuid4().hex
         self._dropped = 0
         self._attached: list[tuple[logging.Logger, bool]] = []
 
@@ -136,7 +138,8 @@ class LogBuffer(logging.Handler):
                 "traceback": None if traceback is None else _redact(traceback)}
 
     # -- reading ---------------------------------------------------------
-    def page(self, *, limit: int = 200, after: int = 0, level: str | None = None) -> dict:
+    def page(self, *, limit: int = 200, after: int = 0, level: str | None = None,
+             generation: str | None = None) -> dict:
         """One page of retained records, oldest first.
 
         ``after`` is the cursor the page before this one ended on: ``0`` asks
@@ -154,6 +157,10 @@ class LogBuffer(logging.Handler):
             raise ValueError("invalid level")
         threshold = 0 if level is None else LEVELS[level]
         with self._lock:
+            reset = ((generation is not None and generation != self._generation)
+                     or after > self._next_id)
+            if reset:
+                after = 0
             retained = [(entry_id, entry) for entry_id, levelno, entry in self._entries
                         if levelno >= threshold]
             total = len(retained)
@@ -163,7 +170,7 @@ class LogBuffer(logging.Handler):
                 page = retained[-limit:]
             return {"items": [{"id": entry_id, **entry} for entry_id, entry in page],
                     "total": total, "last_id": page[-1][0] if page else after,
-                    "dropped": self._dropped}
+                    "dropped": self._dropped, "generation": self._generation, "reset": reset}
 
 
 def _timestamp(record: logging.LogRecord) -> str:

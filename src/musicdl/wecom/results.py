@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from collections.abc import Iterable, Sequence
 
 from musicdl.media.models import DownloadResult
@@ -142,7 +144,8 @@ def _fit_row(index: int, candidate: Candidate, rows: Sequence[str], max_bytes: i
     return render()
 
 
-def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_bytes: int = 2048) -> str:
+def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_bytes: int = 2048,
+                   start_index: int = 1) -> str:
     """One short line per candidate, never more than ``max_bytes`` of UTF-8.
 
     A row leads with what a person chooses by -- the title, the artist, the
@@ -153,9 +156,11 @@ def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_
     """
     _bounded(max_items, 1, 100, "invalid_max_items")
     _bounded(max_bytes, MIN_LISTING_BYTES, 2048, "invalid_max_bytes")
+    _bounded(start_index, 1, 100, "invalid_start_index")
     rows: list[str] = []
-    for index, candidate in enumerate(candidates, 1):
-        if index > max_items:
+    for offset, candidate in enumerate(candidates):
+        index = start_index + offset
+        if offset >= max_items or index > 100:
             break
         row = _fit_row(index, candidate, rows, max_bytes)
         if row is None:
@@ -204,3 +209,37 @@ def selection_message(query: str, candidates: Iterable[Candidate], *, max_items:
         raise ValueError("invalid_max_bytes")
     listing = format_results(rows, max_items=max_items, max_bytes=budget)
     return head + listing + tail if listing else NO_RESULTS_TEXT
+
+
+def selection_pages(query: str, candidates: Iterable[Candidate], *, max_items: int = 10,
+                    max_bytes: int = 2048, notice: str = "") -> tuple[str, ...]:
+    """Build byte-bounded pages with the snapshot's original selection numbers."""
+    _bounded(max_items, 1, 100, "invalid_max_items")
+    _bounded(max_bytes, 512, 2048, "invalid_max_bytes")
+    if not isinstance(query, str):
+        raise ValueError("invalid_query")
+    rows = tuple(candidates)[:100]
+    if not rows:
+        return (NO_RESULTS_TEXT,)
+    plain = selection_message(query, rows, max_items=max_items, max_bytes=max_bytes, notice=notice)
+    # Preserve established replies when every frozen row fits in one message.
+    if len(rows) <= max_items and sum(bool(re.match(r"^[0-9]+[.] ", line))
+                                       for line in plain.splitlines()) == len(rows):
+        return (plain,)
+    # Reserve room for the final page count before deciding page boundaries.
+    tail = chr(10) * 2 + "回复序号下载；n 下一页，p 上一页，/cancel 取消选曲。"
+    header = _header(query, len(rows), notice)
+    reserve = len((header + "第 100/100 页" + chr(10) * 2 + tail).encode("utf-8"))
+    budget = max_bytes - reserve
+    pages: list[str] = []
+    offset = 0
+    while offset < len(rows):
+        listing = format_results(rows[offset:], max_items=max_items, max_bytes=budget,
+                                 start_index=offset + 1)
+        if not listing:
+            break
+        pages.append(listing)
+        offset += len(listing.splitlines())
+    return tuple((header if index == 1 else _header(query, len(rows), ""))
+                 + f"第 {index}/{len(pages)} 页" + chr(10) * 2 + listing + tail
+                 for index, listing in enumerate(pages, 1))

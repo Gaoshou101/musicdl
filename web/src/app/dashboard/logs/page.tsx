@@ -14,6 +14,7 @@ import {
   readServiceLogs,
 } from '@/lib/api'
 import { formatBytes, shortHash } from '@/lib/format'
+import { usePolling } from '@/lib/usePolling'
 
 type Tab = 'events' | 'audit' | 'service'
 type Filter = 'all' | 'failed'
@@ -81,13 +82,14 @@ const LOG_LEVEL_CLASS: Record<string, string> = {
 
 /** The store keeps entries oldest first; a log window wants the newest ones. */
 async function readTail<T>(
-  fetcher: (offset: number, limit: number) => Promise<Page<T>>,
+  fetcher: (offset: number, limit: number, signal?: AbortSignal) => Promise<Page<T>>,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<Page<T>> {
-  const head = await fetcher(0, 1)
+  const head = await fetcher(0, 1, signal)
   if (head.total <= 1) return head
   const offset = Math.max(0, head.total - limit)
-  return fetcher(offset, limit)
+  return fetcher(offset, limit, signal)
 }
 
 /**
@@ -188,63 +190,56 @@ export default function LogsPage() {
   // The cursor lives in a ref as well as in state: the polling interval must
   // not be torn down and rebuilt every time one more line arrives.
   const lastIdRef = useRef(0)
+  const generationRef = useRef<string | undefined>(undefined)
 
-  const fetchLogs = useCallback(async () => {
+  const serviceResetRef = useRef(true)
+
+  const fetchLogs = useCallback(async (signal: AbortSignal) => {
     try {
-      const [eventPage, auditPage] = await Promise.all([readTail(readEvents, 100), readTail(readAudit, 100)])
+      const [eventPage, auditPage] = await Promise.all([
+        readTail(readEvents, 100, signal), readTail(readAudit, 100, signal),
+      ])
+      if (signal.aborted) return
       setEvents(eventPage.items)
       setAudit(auditPage.items)
       setTotals({ events: eventPage.total, audit: auditPage.total })
       setError('')
     } catch (err) {
-      setError(errorMessage(err))
+      if (!signal.aborted) setError(errorMessage(err))
     } finally {
-      setLoading(false)
+      if (!signal.aborted) setLoading(false)
     }
   }, [])
 
-  /**
-   * Pull the service's own log, from the cursor rather than from a page number.
-   *
-   * `reset` re-reads the newest records and replaces what is shown; the polling
-   * path asks only for what arrived after the last id this page holds, so a
-   * window that stays open does not reprint itself every three seconds.
-   */
-  const fetchServiceLogs = useCallback(async (reset: boolean) => {
+  const fetchServiceLogs = useCallback(async (signal: AbortSignal) => {
+    const reset = serviceResetRef.current
     const after = reset ? 0 : lastIdRef.current
     try {
-      const page = await readServiceLogs(200, after, level)
+      const page = await readServiceLogs(200, after, level, signal, generationRef.current)
+      if (signal.aborted) return
+      serviceResetRef.current = false
       lastIdRef.current = page.last_id
+      generationRef.current = page.generation
       setLogTotal(page.total)
       setDropped(page.dropped)
       setLogs((current) => {
-        if (reset) return page.items.slice(-LOG_CAP)
+        if (reset || page.reset) return page.items.slice(-LOG_CAP)
         if (page.items.length === 0) return current
-        const merged = [...current, ...page.items]
-        return merged.length > LOG_CAP ? merged.slice(merged.length - LOG_CAP) : merged
+        // Keep repeated entries out of the displayed window.
+        const seen = new Set(current.map((entry) => entry.id))
+        const merged = [...current, ...page.items.filter((entry) => !seen.has(entry.id))]
+        return merged.slice(-LOG_CAP)
       })
       setError('')
     } catch (err) {
-      setError(errorMessage(err))
+      if (!signal.aborted) setError(errorMessage(err))
     } finally {
-      setLoading(false)
+      if (!signal.aborted) setLoading(false)
     }
   }, [level])
 
-  useEffect(() => {
-    void fetchLogs()
-    const interval = setInterval(() => void fetchLogs(), 10000)
-    return () => clearInterval(interval)
-  }, [fetchLogs])
-
-  useEffect(() => {
-    if (tab !== 'service' || paused) return
-    // The first look at the tab takes the newest records; every one after it
-    // asks for what came since, including the load that follows a level change.
-    void fetchServiceLogs(lastIdRef.current === 0)
-    const interval = setInterval(() => void fetchServiceLogs(false), SERVICE_POLL_MS)
-    return () => clearInterval(interval)
-  }, [tab, paused, fetchServiceLogs])
+  const refreshLogs = usePolling(fetchLogs, 10000, tab !== 'service')
+  const refreshServiceLogs = usePolling(fetchServiceLogs, SERVICE_POLL_MS, tab === 'service' && !paused)
 
   useEffect(() => {
     if (autoScroll && logsEndRef.current) logsEndRef.current.scrollIntoView({ behavior: 'smooth' })
@@ -254,6 +249,7 @@ export default function LogsPage() {
     setLevel(next)
     // A different threshold is a different window, so the cursor starts over.
     lastIdRef.current = 0
+    serviceResetRef.current = true
     setLogs([])
   }
 
@@ -332,13 +328,14 @@ export default function LogsPage() {
             type="button"
             onClick={() => {
               if (tab !== 'service') {
-                void fetchLogs()
+                void refreshLogs()
                 return
               }
               // The button also resumes: a paused window that is asked for the
               // newest lines plainly wants to be live again.
-              setPaused(false)
-              void fetchServiceLogs(true)
+              serviceResetRef.current = true
+              if (paused) setPaused(false)
+              else void refreshServiceLogs(true)
             }}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 font-medium transition-colors"
           >

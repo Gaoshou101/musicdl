@@ -73,6 +73,9 @@ jobs:
       - name: Typecheck
         working-directory: web
         run: npx tsc --noEmit
+      - name: Service log cursor regression
+        working-directory: web
+        run: npm run check:service-logs
       - name: Build the service the deployment file describes, console included
         # The production file, not the development one: it is what a host runs,
         # and it layers on nothing -- combining the two would merge their

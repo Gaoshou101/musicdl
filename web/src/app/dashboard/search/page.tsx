@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   MagnifyingGlass,
   MusicNotes,
@@ -64,23 +64,40 @@ export default function SearchPage() {
   const [probedSizes, setProbedSizes] = useState<Record<string, number | null>>({})
   const [probing, setProbing] = useState<Record<string, boolean>>({})
   const [downloads, setDownloads] = useState<Record<string, RowState>>({})
+  const searchRequest = useRef<AbortController | null>(null)
+  const generation = useRef(0)
+  const activeDownloads = useRef(new Set<string>())
+
+  useEffect(() => () => {
+    searchRequest.current?.abort()
+    generation.current += 1
+  }, [])
 
   const runSearch = useCallback(async (text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
+    searchRequest.current?.abort()
+    const controller = new AbortController()
+    searchRequest.current = controller
+    generation.current += 1
     setReport(null)
     setSearching(true)
     setError('')
     setDownloads({})
     try {
-      const result = await searchCandidates(trimmed, limit)
+      const result = await searchCandidates(trimmed, limit, controller.signal)
+      if (controller.signal.aborted) return
       setReport(result)
       setSourceFilter('all')
     } catch (err) {
+      if (controller.signal.aborted) return
       setReport(null)
       setError(errorMessage(err))
     } finally {
-      setSearching(false)
+      if (searchRequest.current === controller && !controller.signal.aborted) {
+        searchRequest.current = null
+        setSearching(false)
+      }
     }
   }, [limit])
 
@@ -102,14 +119,26 @@ export default function SearchPage() {
 
   const handleDownload = async (candidate: Candidate) => {
     const key = rowKey(candidate)
+    const downloadKey = JSON.stringify([candidate.source_id, candidate.source_version, candidate.item_id])
+    if (activeDownloads.current.has(downloadKey)) {
+      setError('该歌曲正在下载，请等待当前任务完成。')
+      return
+    }
+    activeDownloads.current.add(downloadKey)
+    const requestedGeneration = generation.current
     setDownloads((current) => ({ ...current, [key]: { status: 'busy' } }))
     try {
       // The query goes with the candidate: the backend retries a failed
       // channel by refreshing the same search, not by guessing from the title.
       const result = await downloadCandidate(candidate, report?.query ?? query)
+      if (generation.current !== requestedGeneration) return
       setDownloads((current) => ({ ...current, [key]: { status: 'done', report: result } }))
     } catch (err) {
-      setDownloads((current) => ({ ...current, [key]: { status: 'error', error: errorMessage(err) } }))
+      if (generation.current === requestedGeneration) {
+        setDownloads((current) => ({ ...current, [key]: { status: 'error', error: errorMessage(err) } }))
+      }
+    } finally {
+      activeDownloads.current.delete(downloadKey)
     }
   }
 

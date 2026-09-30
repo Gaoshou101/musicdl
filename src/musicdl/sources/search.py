@@ -104,18 +104,29 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
         raise ValueError("invalid_timeout")
     if not isinstance(max_results_per_source, int) or isinstance(max_results_per_source, bool) or not 1 <= max_results_per_source <= 1000:
         raise ValueError("invalid_max_results_per_source")
+    entries = registry.enabled()
+    outcomes = await asyncio.gather(*(_invoke(e, query, timeout, max_results_per_source) for e in entries))
+    # One consistent health snapshot per search instead of repeated lookups for
+    # every duplicate candidate, retained row and alternative-channel sort.
+    preference = {entry.source_id: _preference_weight(preference, entry.source_id) for entry in entries}
+    lossless_bias = ({entry.source_id: _lossless_bias(lossless_capability, entry.source_id) for entry in entries}
+                     if quality_policy == "lossless_first" else {})
+    ranks: dict[tuple[int, int], tuple[int, ...]] = {}
+
     def rank_of(candidate, priority):
+        key = (id(candidate), priority)
+        if key in ranks:
+            return ranks[key]
         quality = quality_key(candidate, priority, policy=quality_policy, preference=quality_preference)
         if quality_policy != "lossless_first":
             # Compatibility mode keeps the historical quality key byte for byte.
+            ranks[key] = quality
             return quality
         # A measured capability leads the quality key and is all-zero when
         # nothing was measured, so an unknown channel leaves the order exactly
         # as v1.0.5 left it.
-        return (_lossless_bias(lossless_capability, candidate.source_id),) + quality
-
-    entries = registry.enabled()
-    outcomes = await asyncio.gather(*(_invoke(e, query, timeout, max_results_per_source) for e in entries))
+        ranks[key] = (lossless_bias.get(candidate.source_id, 0),) + quality
+        return ranks[key]
     by_identity: dict[tuple, tuple[Candidate, SourceEntry]] = {}
     # Every channel that offered a recording, grouped by the identity they all
     # agree on.  A group is kept whole while the winner is picked from it,
@@ -206,9 +217,11 @@ def _offers_of(group: Sequence[tuple[Candidate, SourceEntry]],
                 -_preference_weight(preference, candidate.source_id),
                 candidate.source_id.casefold(), candidate.item_id.casefold())
     names: list[str] = []
+    seen: set[str] = set()
     for candidate, _ in sorted(group, key=order):
-        if candidate.source_id not in names:
+        if candidate.source_id not in seen:
             names.append(candidate.source_id)
+            seen.add(candidate.source_id)
     return tuple(names)
 
 
@@ -227,6 +240,8 @@ def _preference_weight(preference: Mapping[str, int] | Callable[[str], int] | No
     except Exception:
         return 0
     if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float) and not math.isfinite(value):
         return 0
     return int(value)
 
