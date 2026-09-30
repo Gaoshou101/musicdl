@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from musicdl.media import DownloadMetadata, MediaError, download_with_fallback
-from musicdl.media.fallback import replacement_candidates
+from musicdl.media.fallback import replacement_candidates, replacement_channel_rows
 from musicdl.media.models import ArtifactRecord
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
@@ -49,8 +49,9 @@ def test_secret_media_error_is_redacted_in_fallback(tmp_path):
     assert all("SECRET" not in repr(x) and "https://" not in repr(x) for x in events)
 
 
-def result(candidates=()):
-    return SearchResult(tuple(candidates), (SourceStatus("a", "1", "ok", len(candidates)),), "v")
+def result(candidates=(), channels=()):
+    return SearchResult(tuple(candidates), (SourceStatus("a", "1", "ok", len(candidates)),), "v",
+                        channels=tuple(tuple(row) for row in channels))
 
 
 def test_success_does_not_enter_fallback(tmp_path):
@@ -214,6 +215,102 @@ def test_content_switch_budget_is_bounded_and_never_retries_a_source(tmp_path):
     assert len([event for event in events if event.stage == "channel_switch"]) == 3
     assert [event.source_id for event in events if event.stage == "download" and event.status == "failed"] == [
         "primary", "a", "b", "c"]
+
+
+def test_collapsed_search_row_can_fall_back_to_its_second_channel(tmp_path):
+    class Invalid(Source):
+        async def download(self, item, *, quality=None):
+            raise MediaError("media_response_invalid")
+
+    class Lossless(Source):
+        async def download(self, item, *, quality=None):
+            assert quality == "flac"
+            return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg", quality="flac")
+
+    first, second, third = (candidate(name) for name in ("first", "second", "third"))
+    refreshed = result((first,), ((first, second, third),))
+    events = []
+
+    async def refresh(query, excluded):
+        return refreshed
+
+    outcome = asyncio.run(download_with_fallback(
+        first, {"first": Invalid(), "second": Lossless(), "third": Invalid()}, tmp_path,
+        request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        refresh=refresh, record=events.append))
+
+    assert outcome.download is not None and outcome.download_source_id == "second"
+    assert outcome.channel_switches == 1
+    assert set(outcome.attempted_source_ids) == {"first", "second"}
+    assert [(event.from_source_id, event.to_source_id) for event in events
+            if event.stage == "channel_switch"] == [("first", "second")]
+
+
+def test_collapsed_search_row_can_switch_through_all_three_alternates(tmp_path):
+    class Invalid(Source):
+        def __init__(self, source_id):
+            super().__init__()
+            self.source_id = source_id
+            self.attempts = []
+
+        async def download(self, item, *, quality=None):
+            self.attempts.append(item.item_id)
+            raise MediaError("media_response_invalid")
+
+    rows = tuple(Candidate(source_id=name, source_version="1", item_id=f"{name}-item",
+                           title="Song", artist="Artist", format="flac")
+                 for name in ("primary", "a", "b", "c"))
+    sources = {row.source_id: Invalid(row.source_id) for row in rows}
+    events = []
+
+    async def refresh(query, excluded):
+        return result((rows[0],), (rows,))
+
+    outcome = asyncio.run(download_with_fallback(
+        rows[0], sources, tmp_path, request_id="r", query="Song", quality="flac",
+        quality_policy="lossless_first", refresh=refresh, record=events.append))
+
+    switches = [event for event in events if event.stage == "channel_switch"]
+    assert outcome.download is None and outcome.channel_switches == 3
+    assert set(outcome.attempted_source_ids) == {"primary", "a", "b", "c"}
+    assert [source.attempts for source in sources.values()] == [["primary-item"], ["a-item"],
+                                                                ["b-item"], ["c-item"]]
+    assert len(switches) == 3
+    assert switches[1].skipped_sources["a"] == "already_attempted"
+    assert switches[2].skipped_sources["b"] == "already_attempted"
+
+
+def test_refresh_failed_source_membership_checks_the_collapsed_channel_rows(tmp_path):
+    primary = candidate("primary")
+    backup = candidate("backup")
+    source = Source(fail=True)
+    events = []
+
+    async def refresh(query, excluded):
+        return result((backup,), ((backup, primary),))
+
+    outcome = asyncio.run(download_with_fallback(
+        primary, {"primary": source, "backup": Source()}, tmp_path, request_id="r", query="Song",
+        refresh=refresh, record=events.append))
+
+    assert outcome.refreshed is None
+    assert outcome.refresh_error == "refresh_included_failed_source"
+
+
+def test_empty_channel_rows_preserve_the_legacy_candidate_pool():
+    wanted, backup = candidate("primary"), candidate("backup")
+    foreign = Candidate(source_id="foreign", source_version="1", item_id="other",
+                        title="Other Song", artist="Other Artist")
+    legacy_result = result((backup, foreign))
+    channel_rows = replacement_channel_rows(wanted, legacy_result)
+
+    legacy = replacement_candidates(wanted, legacy_result.candidates,
+                                    {"backup": Source(), "foreign": Source()})
+    empty_channels = replacement_candidates(wanted, legacy_result.candidates,
+                                            {"backup": Source(), "foreign": Source()},
+                                            channel_rows=channel_rows)
+
+    assert empty_channels == legacy == ([backup], {"foreign": "different_recording"})
 
 
 def test_timed_out_content_replacement_records_one_media_timeout_failure(tmp_path):

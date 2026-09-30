@@ -383,6 +383,24 @@ def test_download_retries_on_another_channel_that_has_the_same_track(tmp_path):
     assert (tmp_path / payload["relative_path"]).read_bytes() == AUDIO
 
 
+def test_panel_retry_uses_the_collapsed_rows_own_channel_candidate(tmp_path):
+    broken, backup, extra = BrokenSource(), Source("backup"), Source("extra")
+    backup_row = Candidate(source_id="backup", source_version="1.0.0", item_id="backup-own-id",
+                           title="稻香", artist="周杰伦", album="魔杰座", duration=210, format="mp3")
+    extra_row = Candidate(source_id="extra", source_version="1.0.0", item_id="extra-own-id",
+                          title="稻香", artist="周杰伦", album="魔杰座", duration=210, format="mp3")
+    refreshed = SearchResult((backup_row,), (), "v", channels=((backup_row, extra_row),))
+    app, _ = fallback_app(tmp_path, [broken, backup, extra], refreshed)
+
+    response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
+
+    assert response.status_code == 200
+    assert response.json()["source_id"] == "backup"
+    assert broken.downloaded == ["1"]
+    assert backup.downloaded == ["backup-own-id"]
+    assert extra.downloaded == []
+
+
 def test_content_failures_can_switch_through_three_channels(tmp_path):
     primary = BrokenSource("primary", "media_response_invalid")
     first = BrokenSource("first", "signature_mismatch")

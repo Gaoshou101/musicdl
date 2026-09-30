@@ -4,7 +4,7 @@ import pytest
 
 from musicdl.sources.models import Candidate
 from musicdl.sources.registry import SourceEntry, SourceRegistry
-from musicdl.sources.search import quality_key, search_result_version, search_sources
+from musicdl.sources.search import SearchResult, quality_key, search_result_version, search_sources
 
 
 def candidate(source, item, title="Song"):
@@ -304,7 +304,7 @@ def test_one_catalogue_entry_is_one_row_that_names_every_channel_behind_it():
     async def first(query):
         return [_catalogue_row("a", "tx")]
     async def second(query):
-        return [_catalogue_row("b", "tx")]
+        return [_catalogue_row("b", "tx", "b-own-item")]
     async def other_platform(query):
         return [_catalogue_row("c", "wy")]
     registry = SourceRegistry([SourceEntry("a", "1", first), SourceEntry("b", "1", second),
@@ -315,6 +315,25 @@ def test_one_catalogue_entry_is_one_row_that_names_every_channel_behind_it():
     assert [(candidate.platform, candidate.source_id) for candidate in result.candidates] == [
         ("tx", "a"), ("wy", "c")]
     assert result.offers == (("a", "b"), ("c",))
+    assert [[row.source_id for row in channel] for channel in result.channels] == [["a", "b"], ["c"]]
+    assert [[row.item_id for row in channel] for channel in result.channels] == [["x", "b-own-item"], ["x"]]
+    assert all(channel[0].source_id == candidate.source_id
+               for candidate, channel in zip(result.candidates, result.channels))
+    assert tuple(tuple(row.source_id for row in channel) for channel in result.channels) == result.offers
+
+
+def test_search_result_channel_rows_default_empty_for_legacy_positional_construction():
+    async def first(query):
+        return [_catalogue_row("a", "tx")]
+    async def second(query):
+        return [_catalogue_row("b", "tx")]
+
+    result = asyncio.run(search_sources(SourceRegistry([
+        SourceEntry("a", "1", first), SourceEntry("b", "1", second)]), "song"))
+    legacy = SearchResult(result.candidates, result.statuses, result.version, result.offers)
+
+    assert legacy.channels == ()
+    assert len(result.channels) == len(result.candidates) == len(result.offers) == 1
 
 
 def test_the_offer_order_is_the_order_the_panel_last_saw_working():

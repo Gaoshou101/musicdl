@@ -18,7 +18,12 @@ from typing import Any, Callable
 from musicdl.config import AppSettings, WorkerSettings
 from musicdl.ai.diagnose import probe_endpoint
 from musicdl.media import download_candidate, download_with_fallback
-from musicdl.media.fallback import CONTENT_FAILURE_CODES, MAX_CHANNEL_SWITCHES, replacement_candidates
+from musicdl.media.fallback import (
+    CONTENT_FAILURE_CODES,
+    MAX_CHANNEL_SWITCHES,
+    replacement_candidates,
+    replacement_channel_rows,
+)
 from musicdl.media.language import resolve_language
 from musicdl.media.probe import ProbeCache, probe_candidates
 from musicdl.media.models import DownloadEvent, MediaError, emit_event
@@ -80,7 +85,8 @@ def _same_recording(wanted: Candidate, other: Candidate) -> bool:
 def _replacement(wanted: Candidate, candidates, resolvers, *, attempted_source_ids=(),
                 source_health: SourceHealthStore | None = None,
                 lossless_capability=None, quality_policy: str = "lossless_first",
-                quality: str | None = None, preference=None, with_skips: bool = False):
+                quality: str | None = None, preference=None, with_skips: bool = False,
+                channel_rows=()):
     """The best other channel's copy of a recording that just failed.
 
     The job's attempted set is authoritative. Source roll-up health is read
@@ -95,7 +101,7 @@ def _replacement(wanted: Candidate, candidates, resolvers, *, attempted_source_i
                        else source_health.fallback_health),
         lossless_capability=None if quality_policy == "best_available" else lossless_capability,
         quality_policy=quality_policy,
-        quality=quality, recording_match=_same_recording)
+        quality=quality, recording_match=_same_recording, channel_rows=channel_rows)
     if with_skips:
         return (matches[0] if matches else None), skipped
     return matches[0] if matches else None
@@ -837,12 +843,15 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         for _ in range(switch_limit):
             if not may_continue_after_error:
                 break
+            refreshed = attempt.refreshed
+            channel_rows = replacement_channel_rows(current_candidate, refreshed, _same_recording)
             replacement, skipped = _replacement(
-                current_candidate, getattr(attempt.refreshed, "candidates", ()), resolvers,
+                current_candidate, getattr(refreshed, "candidates", ()), resolvers,
                 attempted_source_ids=attempted_sources, source_health=source_health,
                 preference=getattr(service, "preference", None),
                 lossless_capability=getattr(service, "lossless_capability", None),
-                quality_policy=quality_policy, quality=tier_for(current_candidate), with_skips=True)
+                quality_policy=quality_policy, quality=tier_for(current_candidate), with_skips=True,
+                channel_rows=channel_rows)
             if replacement is None:
                 break
             emit_event(recorded, DownloadEvent(

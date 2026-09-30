@@ -38,6 +38,9 @@ class SearchResult:
     # same row once per installed source.  Defaulted and last, so every
     # existing positional construction keeps meaning what it did.
     offers: tuple[tuple[str, ...], ...] = ()
+    # Resolver-ready rows for the channels behind each collapsed candidate.
+    # Defaulted and last so existing positional construction remains valid.
+    channels: tuple[tuple[Candidate, ...], ...] = ()
 
 
 def search_result_version(candidates: Sequence[Candidate]) -> str:
@@ -178,7 +181,9 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     ordered = tuple(c for _, c, _ in sorted(ranked, key=ordering))
     offers = tuple(_offers_of(offered[candidate.canonical_version_key], preference, rank_of)
                    for candidate in ordered)
-    return SearchResult(ordered, tuple(s for s, _ in outcomes), search_result_version(ordered), offers)
+    channels = tuple(_channel_rows_of(offered[candidate.canonical_version_key], preference, rank_of)
+                     for candidate in ordered)
+    return SearchResult(ordered, tuple(s for s, _ in outcomes), search_result_version(ordered), offers, channels)
 
 
 def quality_key(candidate: Candidate, priority: int, *, policy: str = "lossless_first",
@@ -223,6 +228,25 @@ def _offers_of(group: Sequence[tuple[Candidate, SourceEntry]],
             names.append(candidate.source_id)
             seen.add(candidate.source_id)
     return tuple(names)
+
+
+def _channel_rows_of(group: Sequence[tuple[Candidate, SourceEntry]],
+                     preference: Mapping[str, int] | Callable[[str], int] | None,
+                     rank_of=quality_key) -> tuple[Candidate, ...]:
+    """Return one resolver-ready row per offering channel in offer order."""
+    def order(pair: tuple[Candidate, SourceEntry]) -> tuple:
+        candidate, entry = pair
+        quality = rank_of(candidate, entry.priority)
+        return (*(-value for value in quality),
+                -_preference_weight(preference, candidate.source_id),
+                candidate.source_id.casefold(), candidate.item_id.casefold())
+    rows: list[Candidate] = []
+    seen: set[str] = set()
+    for candidate, _ in sorted(group, key=order):
+        if candidate.source_id not in seen:
+            rows.append(candidate)
+            seen.add(candidate.source_id)
+    return tuple(rows)
 
 
 def _preference_weight(preference: Mapping[str, int] | Callable[[str], int] | None, source_id: str) -> int:
