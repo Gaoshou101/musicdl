@@ -16,6 +16,8 @@ import io
 import mmap
 import os
 import time
+from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Final
 
@@ -42,6 +44,7 @@ MAX_MP3_RESYNCS: Final[int] = 32
 RESYNC_SCAN_BYTES: Final[int] = 512 * 1024
 STREAM_SCAN_TIMEOUT_SECONDS: Final[float] = 5.0
 MAX_FLAC_METADATA_BYTES: Final[int] = 64 * 1024 * 1024
+MAX_FLAC_FRAME_PROBE_BITS: Final[int] = 2_000_000
 
 _MPEG1_SAMPLE_RATES: Final[tuple[int, ...]] = (44100, 48000, 32000)
 _MPEG2_SAMPLE_RATES: Final[tuple[int, ...]] = (22050, 24000, 16000)
@@ -63,6 +66,17 @@ class StreamIntegrity:
     status: str
 
 
+@dataclass
+class _StreamIntegrityDiagnostics:
+    """Private facts used by download policy without changing the public result."""
+
+    flac_duration_trusted: bool = False
+
+
+_ACTIVE_INTEGRITY_DIAGNOSTICS: ContextVar[_StreamIntegrityDiagnostics | None] = ContextVar(
+    "musicdl_active_integrity_diagnostics", default=None)
+
+
 def verify_stream_integrity(
     path: str | os.PathLike[str],
     *,
@@ -77,6 +91,7 @@ def verify_stream_integrity(
     MP3 stays on its existing frame-chain path in :func:`duration_seconds`.
     """
     file_format: str | None = None
+    diagnostics = _ACTIVE_INTEGRITY_DIAGNOSTICS.get()
     try:
         with open(os.fspath(path), "rb") as handle:
             size = os.fstat(handle.fileno()).st_size
@@ -104,12 +119,27 @@ def verify_stream_integrity(
                 return StreamIntegrity(file_format, "unverified")
             with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
                 if file_format == "flac":
-                    status, _reason = _verify_flac_integrity(data, deadline)
+                    status, _reason = _verify_flac_integrity(data, deadline, diagnostics)
                 else:
                     status = _verify_mp4_integrity(data, deadline, expected_duration)
             return StreamIntegrity(file_format, status)
     except Exception:  # noqa: BLE001 - an uncertain parser or I/O result fails open
         return StreamIntegrity(file_format, "unverified")
+
+
+def _verify_stream_integrity_with_diagnostics(
+    path: str | os.PathLike[str], *, expected_duration: float | None = None,
+    verifier: Callable[..., StreamIntegrity] | None = None,
+) -> tuple[StreamIntegrity, _StreamIntegrityDiagnostics]:
+    """Call the public verifier and capture private trust facts for its caller."""
+    diagnostics = _StreamIntegrityDiagnostics()
+    token = _ACTIVE_INTEGRITY_DIAGNOSTICS.set(diagnostics)
+    try:
+        verify = verify_stream_integrity if verifier is None else verifier
+        result = verify(path, expected_duration=expected_duration)
+    finally:
+        _ACTIVE_INTEGRITY_DIAGNOSTICS.reset(token)
+    return result, diagnostics
 
 
 def _has_flac_magic(data) -> bool:
@@ -121,7 +151,9 @@ def _has_flac_magic(data) -> bool:
     return start is not None and data[start:start + 4] == b"fLaC"
 
 
-def _verify_flac_integrity(data, deadline: float) -> tuple[str, str | None]:
+def _verify_flac_integrity(
+    data, deadline: float, diagnostics: _StreamIntegrityDiagnostics | None = None,
+) -> tuple[str, str | None]:
     """Return a FLAC status and a private reason when it is unverified.
 
     The reason is diagnostic evidence for the conservative parser. The public
@@ -175,13 +207,22 @@ def _verify_flac_integrity(data, deadline: float) -> tuple[str, str | None]:
     if streaminfo is None or streaminfo[0] <= 0 or streaminfo[1] <= 0:
         return "unverified", "missing_or_invalid_streaminfo_sample_count"
     sample_rate, total_samples, channels, bits_per_sample, min_block, max_block = streaminfo
+    if diagnostics is not None:
+        diagnostics.flac_duration_trusted = True
     frame_start = offset
+    first_frame = _flac_frame_header(
+        data, frame_start, sample_rate, channels, bits_per_sample)
+    if first_frame is None or not first_frame[3] or first_frame[1] != 0:
+        if diagnostics is not None:
+            diagnostics.flac_duration_trusted = False
+        # FLAC starts its frame chain immediately after metadata. Resyncing for
+        # a later frame zero could mistake compressed payload in an unsupported
+        # first frame for a fresh, trusted stream.
+        return "unverified", "first_frame_header_unverified"
+    # Keep physical EOF as the scan boundary. A ``TAG`` sequence at EOF-128
+    # may be inside a verbatim subframe; a terminal structural probe can
+    # recognize a real ID3v1 suffix after it has established the frame end.
     frame_end = len(data)
-    if frame_end - frame_start >= 128 and data[frame_end - 128:frame_end - 125] == b"TAG":
-        # ID3v1 is a fixed 128-byte suffix after the FLAC frame chain.  Its
-        # marker and position make it distinguishable from bytes in a frame;
-        # arbitrary trailing data still has to fail the terminal frame CRC.
-        frame_end -= 128
     accepted = 0
     actual_samples = 0
     blocking_strategy: int | None = None
@@ -246,6 +287,36 @@ def _verify_flac_integrity(data, deadline: float) -> tuple[str, str | None]:
             previous_crc_valid, previous_crc_reason = _flac_terminal_frame_crc_diagnostic(
                 data, final_frame_start, final_frame_payload_start, candidate, deadline)
             if not previous_crc_valid:
+                if previous_crc_reason == "terminal_frame_crc_mismatch":
+                    try:
+                        structural_end = _flac_frame_structural_end(
+                            data, final_frame_start, len(data), sample_rate, channels,
+                            bits_per_sample, deadline)
+                    except _FlacFrameTruncated:
+                        if time.monotonic() >= deadline:
+                            return "unverified", "frame_boundary_probe_timeout"
+                        return "incomplete", "previous_frame_truncated"
+                    except _FlacFrameProbeError as exc:
+                        return "unverified", f"frame_boundary_probe_{exc.reason}"
+                    if structural_end > candidate:
+                        # A CRC-8-valid sync inside a decodable subframe is not
+                        # a frame boundary, even if its number looks plausible.
+                        continue
+                    if structural_end < candidate:
+                        structural_crc_valid, structural_crc_reason = (
+                            _flac_terminal_frame_crc_diagnostic(
+                                data, final_frame_start, final_frame_payload_start,
+                                structural_end, deadline))
+                        if (not structural_crc_valid
+                                and structural_crc_reason == "terminal_frame_crc_mismatch"):
+                            return "incomplete", "previous_frame_crc_mismatch"
+                        if (structural_crc_valid and structural_end + 128 == len(data)
+                                and data[structural_end:structural_end + 3] == b"TAG"):
+                            # A sync-like sequence inside an ID3v1 field cannot
+                            # establish another audio frame.
+                            continue
+                        return "unverified", "bytes_between_structural_frames"
+                    return "incomplete", "previous_frame_crc_mismatch"
                 return "unverified", (
                     f"previous_frame_{previous_crc_reason}:frame_start={final_frame_start}"
                     f":frame_end={candidate}"
@@ -268,6 +339,8 @@ def _verify_flac_integrity(data, deadline: float) -> tuple[str, str | None]:
     short_tolerance, _ = duration_tolerance(claimed_duration)
     missing_samples = total_samples - actual_samples
     if missing_samples < 0:
+        if diagnostics is not None:
+            diagnostics.flac_duration_trusted = False
         return "unverified", "frame_samples_exceed_streaminfo"
     if missing_samples > short_tolerance * sample_rate:
         return "incomplete", None
@@ -280,9 +353,30 @@ def _verify_flac_integrity(data, deadline: float) -> tuple[str, str | None]:
     crc_valid, crc_reason = _flac_terminal_frame_crc_diagnostic(
         data, final_frame_start, final_frame_payload_start, frame_end, deadline)
     if not crc_valid:
-        if crc_reason == "terminal_frame_crc_mismatch":
-            crc_reason = (f"{crc_reason}:frame_start={final_frame_start}:frame_end={frame_end}"
-                          f":actual_samples={actual_samples}:total_samples={total_samples}")
+        if crc_reason in {"terminal_frame_crc_mismatch", "terminal_frame_payload_empty"}:
+            try:
+                structural_end = _flac_frame_structural_end(
+                    data, final_frame_start, len(data), sample_rate, channels,
+                    bits_per_sample, deadline)
+            except _FlacFrameTruncated:
+                if time.monotonic() >= deadline:
+                    return "unverified", "terminal_boundary_probe_timeout"
+                return "incomplete", "terminal_frame_truncated"
+            except _FlacFrameProbeError as exc:
+                return "unverified", f"terminal_boundary_probe_{exc.reason}"
+            structural_crc_valid, structural_crc_reason = _flac_terminal_frame_crc_diagnostic(
+                data, final_frame_start, final_frame_payload_start, structural_end, deadline)
+            if (not structural_crc_valid
+                    and structural_crc_reason == "terminal_frame_crc_mismatch"):
+                return "incomplete", "terminal_frame_crc_mismatch"
+            if structural_crc_valid:
+                if structural_end == len(data):
+                    return "complete", None
+                if (structural_end + 128 == len(data)
+                        and data[structural_end:structural_end + 3] == b"TAG"):
+                    return "complete", None
+                return "unverified", "unknown_bytes_after_terminal_frame"
+            crc_reason = "terminal_boundary_unresolved"
         return "unverified", crc_reason
     return "complete", None
 
@@ -344,6 +438,158 @@ def _flac_frame_header(data, offset: int, stream_rate: int, stream_channels: int
         return None
     header_crc = data[cursor]
     return strategy, frame_number, block_samples, _flac_crc8(data[offset:cursor]) == header_crc, cursor + 1
+
+
+class _FlacFrameProbeError(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _FlacFrameTruncated(_FlacFrameProbeError):
+    pass
+
+
+class _FlacBitReader:
+    """A small, bounded reader used only to locate a suspect FLAC frame end."""
+
+    def __init__(self, data, start: int, boundary: int, deadline: float):
+        self.data = data
+        self.bit = start * 8
+        self.boundary = boundary
+        self.deadline = deadline
+        self.limit = min(boundary * 8, self.bit + MAX_FLAC_FRAME_PROBE_BITS)
+        self.operations = 0
+
+    def _check(self, count: int) -> int:
+        self.operations += 1
+        if self.operations % 4096 == 0 and time.monotonic() >= self.deadline:
+            raise _FlacFrameProbeError("timeout")
+        if count < 0:
+            raise _FlacFrameProbeError("negative_bit_count")
+        end = self.bit + count
+        if end > self.limit:
+            if self.limit == self.boundary * 8 and self.boundary <= len(self.data):
+                if time.monotonic() >= self.deadline:
+                    raise _FlacFrameProbeError("timeout")
+                raise _FlacFrameTruncated("frame_payload_truncated")
+            raise _FlacFrameProbeError("probe_limit")
+        return end
+
+    def check_deadline(self) -> None:
+        if time.monotonic() >= self.deadline:
+            raise _FlacFrameProbeError("timeout")
+
+    def read(self, count: int) -> int:
+        end = self._check(count)
+        value = 0
+        while self.bit < end:
+            byte = self.data[self.bit >> 3]
+            shift = 7 - (self.bit & 7)
+            take = min(end - self.bit, 8 - (self.bit & 7))
+            value = (value << take) | ((byte >> (shift + 1 - take)) & ((1 << take) - 1))
+            self.bit += take
+        return value
+
+    def skip(self, count: int) -> None:
+        self.bit = self._check(count)
+
+    def unary(self) -> int:
+        zeros = 0
+        while self.read(1) == 0:
+            zeros += 1
+            if zeros > 1_000_000:
+                raise _FlacFrameProbeError("unary_limit")
+        return zeros
+
+    def align_zero(self) -> None:
+        remainder = self.bit & 7
+        if remainder and self.read(8 - remainder) != 0:
+            raise _FlacFrameProbeError("nonzero_padding")
+
+
+def _flac_frame_channels(assignment: int, stream_bits: int) -> tuple[int, ...]:
+    if assignment <= 7:
+        return (stream_bits,) * (assignment + 1)
+    if assignment == 8:
+        return stream_bits, stream_bits + 1
+    if assignment == 9:
+        return stream_bits + 1, stream_bits
+    if assignment == 10:
+        return stream_bits, stream_bits + 1
+    raise _FlacFrameProbeError("channel_assignment")
+
+
+def _flac_skip_residual(reader: _FlacBitReader, block_samples: int, order: int) -> None:
+    method = reader.read(2)
+    if method not in (0, 1):
+        raise _FlacFrameProbeError("residual_method")
+    partition_order = reader.read(4)
+    partitions = 1 << partition_order
+    if block_samples % partitions:
+        raise _FlacFrameProbeError("partition_shape")
+    per_partition = block_samples // partitions
+    parameter_width = 4 if method == 0 else 5
+    escape = (1 << parameter_width) - 1
+    for partition in range(partitions):
+        samples = per_partition - order if partition == 0 else per_partition
+        if samples < 0:
+            raise _FlacFrameProbeError("partition_order")
+        parameter = reader.read(parameter_width)
+        if parameter == escape:
+            raw_width = reader.read(5)
+            reader.skip(samples * raw_width)
+        else:
+            for _ in range(samples):
+                reader.unary()
+                reader.skip(parameter)
+
+
+def _flac_frame_structural_end(data, frame_start: int, boundary: int,
+                               sample_rate: int, channels: int, bits_per_sample: int,
+                               deadline: float) -> int:
+    """Find a suspect frame's exact end from its subframe grammar, not sync bytes."""
+    if time.monotonic() >= deadline:
+        raise _FlacFrameProbeError("timeout")
+    parsed = _flac_frame_header(data, frame_start, sample_rate, channels, bits_per_sample)
+    if parsed is None or not parsed[3]:
+        raise _FlacFrameProbeError("frame_header")
+    _strategy, _number, block_samples, _header_crc_valid, payload_start = parsed
+    assignment = data[frame_start + 3] >> 4
+    reader = _FlacBitReader(data, payload_start, boundary, deadline)
+    for channel_bits in _flac_frame_channels(assignment, bits_per_sample):
+        if reader.read(1) != 0:
+            raise _FlacFrameProbeError("subframe_reserved")
+        subframe_type = reader.read(6)
+        wasted_bits = reader.unary() + 1 if reader.read(1) else 0
+        sample_width = channel_bits - wasted_bits
+        if sample_width <= 0:
+            raise _FlacFrameProbeError("wasted_bits")
+        if subframe_type == 0:
+            reader.skip(sample_width)
+        elif subframe_type == 1:
+            reader.skip(block_samples * sample_width)
+        elif 8 <= subframe_type <= 12:
+            order = subframe_type - 8
+            reader.skip(order * sample_width)
+            _flac_skip_residual(reader, block_samples, order)
+        elif 32 <= subframe_type <= 63:
+            order = (subframe_type & 0x1F) + 1
+            reader.skip(order * sample_width)
+            precision_code = reader.read(4)
+            if precision_code == 15:
+                raise _FlacFrameProbeError("lpc_precision")
+            precision = precision_code + 1
+            reader.skip(5 + order * precision)
+            _flac_skip_residual(reader, block_samples, order)
+        else:
+            raise _FlacFrameProbeError("subframe_type")
+    reader.align_zero()
+    frame_end = reader.bit // 8 + 2
+    if frame_end > boundary:
+        reader.check_deadline()
+        raise _FlacFrameTruncated("frame_crc_truncated")
+    return frame_end
 
 
 def _flac_terminal_frame_crc_valid(data, frame_start: int, payload_start: int,

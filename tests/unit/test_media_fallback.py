@@ -123,6 +123,99 @@ def test_content_failure_switches_channels_and_prefers_known_lossless_source(tmp
     assert outcome.download.requested_quality == "flac"
 
 
+def test_damaged_flac_is_refused_then_fallback_delivers_backup(tmp_path):
+    primary = Candidate(source_id="primary", source_version="1", item_id="i", title="Song",
+                        artist="Artist", format="flac", duration=30)
+    backup = Candidate(source_id="backup", source_version="1", item_id="i", title="Song",
+                       artist="Artist", format="flac", duration=30)
+    good_flac = (Path(__file__).resolve().parents[1] / "fixtures" / "media"
+                 / "ffmpeg_30s.flac").read_bytes()
+    damaged_flac = bytearray(good_flac)
+    damaged_flac[-1] ^= 0x01
+    events = []
+
+    class DamagedFlac(Source):
+        async def download(self, item, *, quality=None):
+            return DownloadMetadata(chunks(bytes(damaged_flac)), extension="flac",
+                                     media_type="audio/flac", quality="flac")
+
+    class GoodBackup(Source):
+        async def download(self, item, *, quality=None):
+            return DownloadMetadata(chunks(good_flac), extension="flac", media_type="audio/flac",
+                                     quality="flac")
+
+    async def refresh(query, excluded):
+        assert excluded == frozenset({"primary"})
+        return result((backup,))
+
+    outcome = asyncio.run(download_with_fallback(
+        primary, {"primary": DamagedFlac(), "backup": GoodBackup()}, tmp_path,
+        request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        refresh=refresh, record=events.append))
+
+    assert outcome.download is not None and outcome.download_source_id == "backup"
+    assert outcome.download.actual_quality == "flac"
+    assert outcome.download.duration_seconds == pytest.approx(30)
+    assert [event.error_code for event in events if event.error_code] == ["incomplete_audio"]
+    assert [(event.source_id, event.status) for event in events if event.stage == "download"] == [
+        ("primary", "failed"), ("backup", "success")]
+    assert [(event.from_source_id, event.to_source_id) for event in events
+            if event.stage == "channel_switch"] == [("primary", "backup")]
+    published = tmp_path / outcome.download.relative_path
+    assert published.read_bytes() == good_flac
+    published_files = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert published_files == [published]
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_unverified_flac_catalogue_mismatch_switches_to_valid_backup(tmp_path):
+    from test_media_duration import flac_bytes
+
+    primary = Candidate(source_id="primary", source_version="1", item_id="i", title="Song",
+                        artist="Artist", format="flac", duration=30)
+    backup = Candidate(source_id="backup", source_version="1", item_id="i", title="Song",
+                       artist="Artist", format="flac", duration=30)
+    good_flac = (Path(__file__).resolve().parents[1] / "fixtures" / "media"
+                 / "ffmpeg_30s.flac").read_bytes()
+    # The shared fixture builder emits valid frame headers with sample-rate
+    # code 0, so 8000 Hz comes from STREAMINFO and all 60 seconds are present.
+    mismatched_unverified = flac_bytes(60 * 8000, rate=8000, verbatim=True)
+    mismatched_unverified += b"unsupported-trailer"
+    events = []
+
+    class UnverifiedMismatch(Source):
+        async def download(self, item, *, quality=None):
+            return DownloadMetadata(chunks(mismatched_unverified), extension="flac",
+                                     media_type="audio/flac", quality="flac")
+
+    class GoodBackup(Source):
+        async def download(self, item, *, quality=None):
+            return DownloadMetadata(chunks(good_flac), extension="flac", media_type="audio/flac",
+                                     quality="flac")
+
+    async def refresh(query, excluded):
+        assert excluded == frozenset({"primary"})
+        return result((backup,))
+
+    outcome = asyncio.run(download_with_fallback(
+        primary, {"primary": UnverifiedMismatch(), "backup": GoodBackup()}, tmp_path,
+        request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        refresh=refresh, record=events.append))
+
+    assert outcome.download is not None and outcome.download_source_id == "backup"
+    assert outcome.download.actual_quality == "flac"
+    assert outcome.download.duration_seconds == pytest.approx(30)
+    assert [event.error_code for event in events if event.error_code] == [
+        "duration_unverified", "incomplete_audio"]
+    assert [(event.source_id, event.status) for event in events if event.stage == "download"] == [
+        ("primary", "failed"), ("backup", "success")]
+    published = tmp_path / outcome.download.relative_path
+    assert published.read_bytes() == good_flac
+    published_files = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert published_files == [published]
+    assert not list(tmp_path.rglob("*.part"))
+
+
 def test_best_available_preserves_reprompt_instead_of_content_switching(tmp_path):
     class Invalid(Source):
         async def download(self, item):
