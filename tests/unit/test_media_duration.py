@@ -1,8 +1,8 @@
 """Real playing time, read out of a finished file, and what it refuses.
 
-Every sample here is built by hand in a few kilobytes, so the suite stays
-honest about what it measures and needs no encoder, no ffmpeg and no fixture
-binary in the repository.
+Most samples are built by hand so their container declarations stay explicit.
+A compact, checked-in FFmpeg FLAC fixture exercises the integrity path against
+real encoder output without requiring FFmpeg when the test suite runs.
 
 FLAC and MP4 fixtures include frame headers and sample tables so the download
 policy can compare what those structures claim with the bytes actually held.
@@ -11,6 +11,7 @@ MP3 fixtures stay focused on frame-chain measurement and its existing limits.
 
 import asyncio
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +31,18 @@ from musicdl.sources.models import Candidate
 FLAC_RATE = 44100
 MP3_FRAME_LENGTH = 144 * 128 * 1000 // 44100  # MPEG-1 Layer III, 128 kbps, 44.1 kHz
 MP3_FRAME_SAMPLES = 1152
+# Generated once with:
+# `ffmpeg -f lavfi -i anullsrc=r=44100:cl=stereo -t 30 -c:a flac \
+#   -compression_level 5 -metadata_header_padding 0 -y \
+#   tests/fixtures/media/ffmpeg_30s.flac`
+ENCODER_FLAC_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "media" / "ffmpeg_30s.flac"
+)
+
+
+def _encoder_flac_bytes() -> bytes:
+    """Read the small 30-second encoder-produced FLAC fixture."""
+    return ENCODER_FLAC_FIXTURE.read_bytes()
 
 
 def _flac_crc8(data: bytes) -> int:
@@ -116,6 +129,19 @@ def flac_bytes(total_samples: int, rate: int = FLAC_RATE, *, channels: int = 1,
         remaining -= count
         number += 1
     return b"fLaC" + b"".join(metadata_blocks) + frames
+
+
+def flac_with_false_strategy_header() -> bytes:
+    """A valid fixed-block FLAC whose verbatim samples resemble a bad header."""
+    data = bytearray(flac_bytes(8192, rate=8000, verbatim=True))
+    first_frame_start = 42
+    first_frame_end = first_frame_start + len(flac_frame(0, 4096, verbatim=True))
+    fake_offset = first_frame_start + 8 + 1 + 128
+    fake_header = b"\xff\xf9\x70\x00\x00\x0f\xff"
+    data[fake_offset:fake_offset + 8] = fake_header + bytes((_flac_crc8(fake_header) ^ 1,))
+    data[first_frame_end - 2:first_frame_end] = _flac_crc16(
+        data[first_frame_start:first_frame_end - 2]).to_bytes(2, "big")
+    return bytes(data)
 
 
 def mp3_bytes(frames: int) -> bytes:
@@ -431,7 +457,7 @@ def test_bitrate_is_left_empty_when_it_cannot_be_told(size, duration):
 # Real containers, built by name: pytest ids cannot carry raw bytes, and a
 # Windows environment variable is what the current-test marker rides in.
 PREVIEW_SAMPLES = {
-    "flac": (lambda: flac_bytes(int(30 * FLAC_RATE)), "flac", "audio/flac"),
+    "flac": (_encoder_flac_bytes, "flac", "audio/flac"),
     "mp3": (lambda: mp3_bytes(20), "mp3", "audio/mpeg"),
     "m4a": (lambda: mp4_bytes(30.0), "m4a", "audio/mp4"),
 }
@@ -488,20 +514,35 @@ def test_a_full_length_file_is_delivered_with_its_measured_time(tmp_path, name):
 def test_a_refused_preview_leaves_no_file_behind(tmp_path):
     events = []
     with pytest.raises(MediaError, match="incomplete_audio"):
-        download(flac_bytes(int(30 * FLAC_RATE)), extension="flac", media_type="audio/flac",
+        download(_encoder_flac_bytes(), extension="flac", media_type="audio/flac",
                  duration=210, tmp_path=tmp_path, events=events)
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
     assert not list(tmp_path.rglob("*.part"))
 
 
-@pytest.mark.parametrize("fraction", [0.5, 0.125, 0.05])
-def test_a_truncated_flac_is_refused_from_its_actual_frames(tmp_path, fraction):
-    full = flac_bytes(210 * FLAC_RATE)
+def test_encoder_generated_flac_fixture_is_complete(tmp_path):
+    from musicdl.media.duration import verify_stream_integrity
+
+    data = _encoder_flac_bytes()
+    path = tmp_path / "ffmpeg-30s.flac"
+    path.write_bytes(data)
+    assert container_duration(data) == pytest.approx(30.0)
+    assert verify_stream_integrity(path, expected_duration=30).status == "complete"
+
+
+@pytest.mark.parametrize(("fraction", "label"), [(0.5, "half"), (0.125, "eighth")])
+def test_a_truncated_encoder_generated_flac_is_incomplete(tmp_path, fraction, label):
+    from musicdl.media.duration import verify_stream_integrity
+
+    full = _encoder_flac_bytes()
     cut = full[:int(len(full) * fraction)]
+    path = tmp_path / f"ffmpeg-30s-{label}.flac"
+    path.write_bytes(cut)
+    assert verify_stream_integrity(path, expected_duration=30).status == "incomplete"
     events = []
     with pytest.raises(MediaError, match="incomplete_audio"):
-        download(cut, extension="flac", media_type="audio/flac", duration=210,
-                 tmp_path=tmp_path, events=events)
+        download(cut, extension="flac", media_type="audio/flac", duration=30,
+                 verify_duration="strict", tmp_path=tmp_path, events=events)
     assert [event.error_code for event in events if event.error_code] == ["incomplete_audio"]
 
 
@@ -531,6 +572,66 @@ def test_a_flac_with_an_id3v2_prefix_is_found_and_scanned(tmp_path):
     path.write_bytes(prefix + flac_bytes(210 * FLAC_RATE))
     assert container_duration(path.read_bytes()) == pytest.approx(210)
     assert verify_stream_integrity(path, expected_duration=210).status == "complete"
+
+
+def test_flac_false_strategy_header_in_frame_payload_does_not_stop_scan(tmp_path):
+    from musicdl.media.duration import verify_stream_integrity
+
+    path = tmp_path / "false-strategy-header.flac"
+    path.write_bytes(flac_with_false_strategy_header())
+    assert verify_stream_integrity(path, expected_duration=8192 / 8000).status == "complete"
+
+
+def test_a_flac_with_an_id3v1_suffix_is_complete(tmp_path):
+    from musicdl.media.duration import verify_stream_integrity
+
+    path = tmp_path / "id3v1.flac"
+    path.write_bytes(_encoder_flac_bytes() + b"TAG" + bytes(125))
+    assert verify_stream_integrity(path, expected_duration=30).status == "complete"
+
+
+@pytest.mark.parametrize("corruption", ["payload", "crc16"])
+def test_a_flac_with_a_corrupt_nonterminal_frame_and_id3v1_is_unverified(
+    tmp_path, corruption,
+):
+    from musicdl.media.duration import _flac_frame_header, verify_stream_integrity
+
+    data = bytearray(_encoder_flac_bytes())
+    frame_headers = []
+    for offset in range(42, len(data) - 8):
+        if data[offset:offset + 2] != b"\xff\xf8":
+            continue
+        parsed = _flac_frame_header(data, offset, 44100, 2, 16)
+        if parsed is not None and parsed[3]:
+            frame_headers.append((offset, parsed))
+            if len(frame_headers) == 2:
+                break
+    assert len(frame_headers) == 2
+    first_start, first_header = frame_headers[0]
+    second_start = frame_headers[1][0]
+    corrupt_at = first_header[4] if corruption == "payload" else second_start - 1
+    data[corrupt_at] ^= 0x01
+    data.extend(b"TAG" + bytes(125))
+
+    path = tmp_path / f"corrupt-first-frame-{corruption}-id3v1.flac"
+    path.write_bytes(data)
+    assert verify_stream_integrity(path, expected_duration=30).status == "unverified"
+
+
+def test_random_trailing_data_never_makes_a_flac_complete(tmp_path):
+    from musicdl.media.duration import verify_stream_integrity
+
+    path = tmp_path / "random-tail.flac"
+    path.write_bytes(_encoder_flac_bytes() + b"\x91\x04random-tail\x00")
+    assert verify_stream_integrity(path, expected_duration=30).status != "complete"
+
+
+def test_a_complete_flac_passes_the_strict_download_policy(tmp_path):
+    events = []
+    result = download(_encoder_flac_bytes(), extension="flac", media_type="audio/flac",
+                      duration=30, verify_duration="strict", tmp_path=tmp_path, events=events)
+    assert result.duration_seconds == pytest.approx(30)
+    assert [event.status for event in events if event.stage == "download"] == ["success"]
 
 
 def test_flac_header_crc_failure_is_unverified_not_incomplete(tmp_path):

@@ -104,7 +104,7 @@ def verify_stream_integrity(
                 return StreamIntegrity(file_format, "unverified")
             with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
                 if file_format == "flac":
-                    status = _verify_flac_integrity(data, deadline)
+                    status, _reason = _verify_flac_integrity(data, deadline)
                 else:
                     status = _verify_mp4_integrity(data, deadline, expected_duration)
             return StreamIntegrity(file_format, status)
@@ -121,14 +121,19 @@ def _has_flac_magic(data) -> bool:
     return start is not None and data[start:start + 4] == b"fLaC"
 
 
-def _verify_flac_integrity(data, deadline: float) -> str:
+def _verify_flac_integrity(data, deadline: float) -> tuple[str, str | None]:
+    """Return a FLAC status and a private reason when it is unverified.
+
+    The reason is diagnostic evidence for the conservative parser. The public
+    ``StreamIntegrity`` shape deliberately stays unchanged.
+    """
     start = 0
     if data[:3] == b"ID3":
         start = _id3_size(data[:10])
         if start is None:
-            return "unverified"
+            return "unverified", "invalid_id3v2_prefix"
     if data[start:start + 4] != b"fLaC":
-        return "unverified"
+        return "unverified", "flac_magic_missing"
 
     offset = start + 4
     streaminfo: tuple[int, int, int, int, int, int] | None = None
@@ -136,7 +141,7 @@ def _verify_flac_integrity(data, deadline: float) -> str:
     metadata_blocks = 0
     while offset + 4 <= len(data):
         if time.monotonic() >= deadline:
-            return "unverified"
+            return "unverified", "metadata_scan_timeout"
         block_header = data[offset]
         last = bool(block_header & 0x80)
         kind = block_header & 0x7F
@@ -144,12 +149,12 @@ def _verify_flac_integrity(data, deadline: float) -> str:
         body = offset + 4
         block_end = body + length
         if block_end > len(data) or block_end - metadata_start > MAX_FLAC_METADATA_BYTES:
-            return "unverified"
+            return "unverified", "metadata_block_out_of_bounds_or_limit"
         if metadata_blocks == 0 and (kind != 0 or length != 34):
-            return "unverified"
+            return "unverified", "streaminfo_not_first_metadata_block"
         if kind == 0:
             if length != 34 or streaminfo is not None:
-                return "unverified"
+                return "unverified", "invalid_or_duplicate_streaminfo"
             packed = int.from_bytes(data[body + 10:body + 18], "big")
             sample_rate = packed >> 44
             channels = ((packed >> 41) & 0x07) + 1
@@ -158,19 +163,25 @@ def _verify_flac_integrity(data, deadline: float) -> str:
             min_block = int.from_bytes(data[body:body + 2], "big")
             max_block = int.from_bytes(data[body + 2:body + 4], "big")
             if min_block <= 0 or max_block < min_block:
-                return "unverified"
+                return "unverified", "invalid_streaminfo_block_sizes"
             streaminfo = sample_rate, total_samples, channels, bits_per_sample, min_block, max_block
         metadata_blocks += 1
         offset = block_end
         if last:
             break
     else:
-        return "unverified"
+        return "unverified", "metadata_missing_last_block_marker"
 
     if streaminfo is None or streaminfo[0] <= 0 or streaminfo[1] <= 0:
-        return "unverified"
+        return "unverified", "missing_or_invalid_streaminfo_sample_count"
     sample_rate, total_samples, channels, bits_per_sample, min_block, max_block = streaminfo
     frame_start = offset
+    frame_end = len(data)
+    if frame_end - frame_start >= 128 and data[frame_end - 128:frame_end - 125] == b"TAG":
+        # ID3v1 is a fixed 128-byte suffix after the FLAC frame chain.  Its
+        # marker and position make it distinguishable from bytes in a frame;
+        # arbitrary trailing data still has to fail the terminal frame CRC.
+        frame_end -= 128
     accepted = 0
     actual_samples = 0
     blocking_strategy: int | None = None
@@ -180,10 +191,10 @@ def _verify_flac_integrity(data, deadline: float) -> str:
     final_frame_payload_start: int | None = None
     position = frame_start
     candidates = 0
-    while position + 1 < len(data):
+    while position + 1 < frame_end:
         if time.monotonic() >= deadline:
-            return "unverified"
-        scan_end = min(len(data), position + SCAN_CHUNK_BYTES)
+            return "unverified", "frame_scan_timeout"
+        scan_end = min(frame_end, position + SCAN_CHUNK_BYTES)
         candidate = data.find(b"\xff", position, scan_end)
         if candidate < 0:
             position = scan_end
@@ -193,56 +204,87 @@ def _verify_flac_integrity(data, deadline: float) -> str:
             continue
         candidates += 1
         if candidates % 256 == 0 and time.monotonic() >= deadline:
-            return "unverified"
+            return "unverified", "frame_scan_timeout_after_candidates"
         parsed = _flac_frame_header(data, candidate, sample_rate, channels, bits_per_sample)
         if parsed is None:
             continue
         strategy, number, block_samples, crc_valid, payload_start = parsed
+        if not crc_valid:
+            if accepted and final_frame_start is not None and final_frame_payload_start is not None:
+                boundary_valid, boundary_reason = _flac_terminal_frame_crc_diagnostic(
+                    data, final_frame_start, final_frame_payload_start, candidate, deadline)
+                if boundary_valid:
+                    return "unverified", "invalid_frame_header_at_validated_boundary"
+                if boundary_reason != "terminal_frame_crc_mismatch":
+                    return "unverified", f"frame_candidate_boundary_{boundary_reason}"
+            # A header-shaped sequence inside compressed frame data is not a
+            # frame unless its CRC-8 is valid.  If it cannot be the boundary
+            # after the preceding frame either, keep scanning for the next one.
+            continue
         if accepted == 0:
             if number != 0:
                 continue
             blocking_strategy = strategy
         else:
             if strategy != blocking_strategy:
-                return "unverified"
+                return "unverified", (
+                    f"blocking_strategy_changed:offset={candidate}:header_crc_valid={crc_valid}"
+                )
             expected_number = (previous_number + 1 if strategy == 0
                                else previous_number + previous_block_samples)
             if number != expected_number:
                 if number > expected_number:
                     # A trusted but non-contiguous frame means the parser did
                     # not account for every frame, so a short count is not proof.
-                    return "unverified"
+                    return "unverified", "frame_number_gap"
                 continue
+            # A CRC-8-valid, contiguous header establishes the previous frame's
+            # end. Check that frame before accepting the next one: checking only
+            # the terminal CRC could otherwise hide corruption in earlier audio.
+            if final_frame_start is None or final_frame_payload_start is None:
+                return "unverified", "previous_frame_bounds_missing"
+            previous_crc_valid, previous_crc_reason = _flac_terminal_frame_crc_diagnostic(
+                data, final_frame_start, final_frame_payload_start, candidate, deadline)
+            if not previous_crc_valid:
+                return "unverified", (
+                    f"previous_frame_{previous_crc_reason}:frame_start={final_frame_start}"
+                    f":frame_end={candidate}"
+                )
             if previous_block_samples is not None and previous_block_samples < min_block:
-                return "unverified"
-        if not crc_valid:
-            return "unverified"
+                return "unverified", "previous_frame_block_below_streaminfo_min"
         if block_samples > max_block:
-            return "unverified"
+            return "unverified", "frame_block_exceeds_streaminfo_max"
         accepted += 1
         actual_samples += block_samples
         previous_number, previous_block_samples = number, block_samples
         final_frame_start = candidate
         final_frame_payload_start = payload_start
 
-    if time.monotonic() >= deadline or accepted == 0:
-        return "unverified"
+    if time.monotonic() >= deadline:
+        return "unverified", "frame_scan_timeout_at_eof"
+    if accepted == 0:
+        return "unverified", "no_valid_frames"
     claimed_duration = total_samples / sample_rate
     short_tolerance, _ = duration_tolerance(claimed_duration)
     missing_samples = total_samples - actual_samples
     if missing_samples < 0:
-        return "unverified"
+        return "unverified", "frame_samples_exceed_streaminfo"
     if missing_samples > short_tolerance * sample_rate:
-        return "incomplete"
+        return "incomplete", None
     # Header CRC-8 only proves that the frame's declaration is intact. It says
     # nothing about the subframes or the trailing frame CRC-16. Treat EOF as
     # the terminal boundary and require a non-empty payload plus its checksum
     # to match before its declared samples can count as present.
-    if (final_frame_start is None or final_frame_payload_start is None
-            or not _flac_terminal_frame_crc_valid(
-                data, final_frame_start, final_frame_payload_start, len(data), deadline)):
-        return "unverified"
-    return "complete"
+    if final_frame_start is None or final_frame_payload_start is None:
+        return "unverified", "terminal_frame_bounds_missing"
+    crc_valid, crc_reason = _flac_terminal_frame_crc_diagnostic(
+        data, final_frame_start, final_frame_payload_start, frame_end, deadline)
+    if not crc_valid:
+        if crc_reason == "terminal_frame_crc_mismatch":
+            crc_reason = (f"{crc_reason}:frame_start={final_frame_start}:frame_end={frame_end}"
+                          f":actual_samples={actual_samples}:total_samples={total_samples}")
+        return "unverified", crc_reason
+    return "complete", None
 
 
 def _flac_frame_header(data, offset: int, stream_rate: int, stream_channels: int,
@@ -307,15 +349,36 @@ def _flac_frame_header(data, offset: int, stream_rate: int, stream_channels: int
 def _flac_terminal_frame_crc_valid(data, frame_start: int, payload_start: int,
                                    frame_end: int, deadline: float) -> bool:
     """Validate the last frame's payload and CRC-16 at the physical EOF."""
+    return _flac_terminal_frame_crc_diagnostic(
+        data, frame_start, payload_start, frame_end, deadline)[0]
+
+
+def _flac_terminal_frame_crc_diagnostic(data, frame_start: int, payload_start: int,
+                                        frame_end: int, deadline: float) -> tuple[bool, str | None]:
+    """Validate the terminal frame and distinguish a timeout from bad CRC."""
     checksum_start = frame_end - 2
     if payload_start >= checksum_start:
-        return False
+        return False, "terminal_frame_payload_empty"
     crc = 0
-    for index in range(frame_start, checksum_start):
-        if (index - frame_start) % 8192 == 0 and time.monotonic() >= deadline:
-            return False
-        crc = ((crc << 8) & 0xFFFF) ^ _FLAC_CRC16_TABLE[((crc >> 8) ^ data[index]) & 0xFF]
-    return crc == int.from_bytes(data[checksum_start:frame_end], "big")
+    table3, table2, table1, table0 = _FLAC_CRC16_SLICE_TABLES
+    chunk_start = frame_start
+    while chunk_start < checksum_start:
+        if time.monotonic() >= deadline:
+            return False, "terminal_frame_crc_timeout"
+        chunk_end = min(checksum_start, chunk_start + 65536)
+        chunk = data[chunk_start:chunk_end]
+        bulk_end = len(chunk) - (len(chunk) % 4)
+        for offset in range(0, bulk_end, 4):
+            crc = (table3[(crc >> 8) ^ chunk[offset]]
+                   ^ table2[(crc & 0xFF) ^ chunk[offset + 1]]
+                   ^ table1[chunk[offset + 2]]
+                   ^ table0[chunk[offset + 3]])
+        for byte in chunk[bulk_end:]:
+            crc = table0[(crc >> 8) ^ byte] ^ ((crc & 0xFF) << 8)
+        chunk_start = chunk_end
+    if crc != int.from_bytes(data[checksum_start:frame_end], "big"):
+        return False, "terminal_frame_crc_mismatch"
+    return True, None
 
 
 def _flac_crc16_table() -> tuple[int, ...]:
@@ -329,6 +392,22 @@ def _flac_crc16_table() -> tuple[int, ...]:
 
 
 _FLAC_CRC16_TABLE: Final[tuple[int, ...]] = _flac_crc16_table()
+
+
+def _flac_crc16_slice_tables() -> tuple[tuple[int, ...], ...]:
+    """Build four-byte slicing tables for FLAC's CRC-16 polynomial."""
+    base = _FLAC_CRC16_TABLE
+
+    def advance(crc: int, byte: int) -> int:
+        return base[(crc >> 8) ^ byte] ^ ((crc & 0xFF) << 8)
+
+    one_zero = tuple(advance(value, 0) for value in base)
+    two_zeros = tuple(advance(value, 0) for value in one_zero)
+    three_zeros = tuple(advance(value, 0) for value in two_zeros)
+    return three_zeros, two_zeros, one_zero, base
+
+
+_FLAC_CRC16_SLICE_TABLES: Final = _flac_crc16_slice_tables()
 
 
 def _flac_utf8_number_at(data, offset: int) -> tuple[int, int] | None:
