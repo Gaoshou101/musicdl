@@ -65,6 +65,7 @@ def replacement_candidates(
     quality: str | None = None,
     reservation: ArtifactRecord | None = None,
     recording_match: Callable[[Candidate, Candidate], bool] | None = None,
+    channel_rows=(),
 ) -> tuple[list[Candidate], dict[str, str]]:
     """Rank unused resolvers for the same recording and explain exclusions."""
     attempted = set(attempted_source_ids or ())
@@ -73,7 +74,7 @@ def replacement_candidates(
     active_match = recording_match or (
         lambda wanted_item, other: normalize_text(wanted_item.title) == normalize_text(other.title)
         and normalize_text(wanted_item.artist) == normalize_text(other.artist))
-    for item in candidates or ():
+    for item in (channel_rows or candidates or ()):
         source_id = getattr(item, "source_id", None)
         if not isinstance(source_id, str) or not source_id:
             continue
@@ -126,6 +127,29 @@ def replacement_candidates(
 
     ranked = sorted(grouped.values(), key=order)
     return ranked, skipped
+
+
+def replacement_channel_rows(
+    wanted: Candidate,
+    refreshed: SearchResult,
+    recording_match: Callable[[Candidate, Candidate], bool] | None = None,
+) -> tuple[Candidate, ...]:
+    """Flatten resolver rows for refreshed recordings matching ``wanted``.
+
+    Older callers and fixtures construct ``SearchResult`` without channel rows;
+    those retain the complete representative list so their existing exclusion
+    and ``skipped`` explanations stay unchanged. The replacement selector still
+    applies its own recording matcher to those rows.
+    """
+    matches = recording_match or (
+        lambda wanted_item, other: normalize_text(wanted_item.title) == normalize_text(other.title)
+        and normalize_text(wanted_item.artist) == normalize_text(other.artist))
+    candidates = getattr(refreshed, "candidates", ()) or ()
+    channels = getattr(refreshed, "channels", ()) or ()
+    if len(channels) == len(candidates) and channels:
+        return tuple(item for representative, row in zip(candidates, channels)
+                     if matches(wanted, representative) for item in row)
+    return tuple(candidates)
 
 
 async def _resolve_media(source: DownloadSource, candidate: Candidate, quality: str | None, *,
@@ -282,11 +306,13 @@ async def download_with_fallback(
                                 else:
                                     async with asyncio.timeout(refresh_budget):
                                         quality_refreshed = await refresh(query, frozenset(attempted_sources))
+                                channel_rows = replacement_channel_rows(target, quality_refreshed)
                                 matches, skipped = replacement_candidates(
                                     target, quality_refreshed.candidates, sources,
                                     attempted_source_ids=attempted_sources, preference=preference,
                                     health_status=channel_health, lossless_capability=lossless_capability,
-                                    quality_policy=quality_policy, quality=target_quality)
+                                    quality_policy=quality_policy, quality=target_quality,
+                                    channel_rows=channel_rows)
                                 if matches:
                                     alternate = matches[0]
                                     alternate_quality = requested_quality(alternate, policy=quality_policy,
@@ -367,11 +393,13 @@ async def download_with_fallback(
 
         current = original_candidate
         while channel_refreshed is not None and switch_count < max_channel_switches:
+            channel_rows = replacement_channel_rows(current, channel_refreshed)
             ranked, skipped = replacement_candidates(
                 current, channel_refreshed.candidates, sources,
                 attempted_source_ids=attempted_sources, preference=preference,
                 health_status=channel_health, lossless_capability=lossless_capability,
-                quality_policy=quality_policy, quality=quality, reservation=reservation)
+                quality_policy=quality_policy, quality=quality, reservation=reservation,
+                channel_rows=channel_rows)
             if not ranked:
                 break
             alternate = ranked[0]
@@ -447,7 +475,8 @@ async def download_with_fallback(
         else:
             async with asyncio.timeout(refresh_budget):
                 refreshed_value = await refresh(query, frozenset({failed_source}))
-        if (any(item.source_id == failed_source for item in refreshed_value.candidates)
+        if (any(item.source_id == failed_source
+                for item in replacement_channel_rows(candidate, refreshed_value))
                 and not (download_error in CONTENT_FAILURE_CODES and channel_refreshed is not None)):
             refresh_error = "refresh_included_failed_source"
             emit_event(record, DownloadEvent(request_id, candidate.item_id, failed_source, candidate.source_version,
