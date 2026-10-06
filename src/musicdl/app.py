@@ -31,6 +31,7 @@ from .admin import (DEFAULT_BOTS, AdminAuth, AdminStateStore, AuditLogStore, Bot
 from .admin.csrf import CSRFMiddleware
 from .admin.portal import create_admin_router
 from .media import classify_language
+from .media.history import DownloadHistoryStore, HistoryUnavailable
 from .telegram.connector import TelegramConnector, telethon_client_factory
 from .telegram.models import TelegramStatus
 from .telegram.source import TelegramBotSource
@@ -60,13 +61,14 @@ async def _maybe_close(value: Any) -> None:
 class _AdminState:
     """Mutable administration state mounted once per application instance."""
 
-    def __init__(self, settings: AppSettings, app: FastAPI) -> None:
+    def __init__(self, settings: AppSettings, app: FastAPI, history: DownloadHistoryStore) -> None:
         self.settings = settings
         self.store = AdminStateStore(settings.admin.state_path)
         self.auth = AdminAuth(on_change=self.persist)
         self.sources = SourceManager(on_change=self.persist)
         self.bots = BotManager(on_change=self.persist)
         self.events = EventLogStore()
+        self.history = history
         self.audit = AuditLogStore()
         # One roll-up per process, fed by the panel's own search and download so
         # the channel health view has something to answer with from the first
@@ -89,6 +91,7 @@ class _AdminState:
                                                audit=self.audit, limiter=self.limiter,
                                                config=self.config,
                                                source_health=self.source_health,
+                                               history=self.history,
                                                logs=self.logs,
                                                plugins=self.plugin_store,
                                                runtime=lambda: getattr(app.state, "runtime", None),
@@ -357,7 +360,8 @@ def _search_adapter(stored, source: PluginSource, platform_search: PlatformSearc
 
 
 def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
-                   telegram_client_factory=None, preference=None, source_health=None, event_log=None):
+                   telegram_client_factory=None, preference=None, source_health=None, event_log=None,
+                   history=None):
     """Build one runtime.
 
     ``bots`` and ``sources`` are the definitions the portal owns.  A stored
@@ -511,6 +515,7 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                                preference=preference,
                                channel_health=None if source_health is None else source_health.fallback_health,
                                lossless_capability=lossless_capability,
+                               history=history,
                                record=(None if event_log is None else
                                        lambda event: (event_log.append(event), source_health.observe_event(event))
                                        if source_health is not None else event_log.append(event)),
@@ -548,9 +553,17 @@ def _panel_root(settings: AppSettings) -> str | None:
 def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any], Any] | None = None,
                clock=None, runtime_factory: Callable[[Any], Any] | None = None) -> FastAPI:
     settings = settings or AppSettings()
+    history_path = (Path(settings.admin.state_path).with_name("download-history.sqlite3")
+                    if settings.admin.state_path else Path(settings.plugin.app_data_root) / "download-history.sqlite3")
+    history = DownloadHistoryStore(history_path)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # A runtime hot-reload shares this store and never performs recovery.
+        try:
+            history.recover()
+        except HistoryUnavailable:
+            logger.warning("download history unavailable at startup")
         app.state.worker_error = None
         app.state.stopping = False
         app.state.runtime_error = None
@@ -594,7 +607,8 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 lambda current: _build_runtime(current, clock, bots=definitions,
                                                sources=source_definitions,
                                                preference=preference, source_health=source_health,
-                                               event_log=None if admin is None else admin.events))
+                                               event_log=None if admin is None else admin.events,
+                                               history=history))
             built = factory(settings)
             if inspect.isawaitable(built):
                 built = await built
@@ -765,9 +779,11 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                     live["runtime"] = None
                     if admin is not None:
                         admin.logs.uninstall()
+                    history.close()
 
     app = FastAPI(title="musicdl", docs_url=None, redoc_url=None, lifespan=lifespan)
-    admin = _AdminState(settings, app) if settings.admin.enabled else None
+    admin = _AdminState(settings, app, history) if settings.admin.enabled else None
+    app.state.download_history = history
     app.state.admin = admin
     # Read as plain state by /readyz, which must answer even when no lifespan
     # ever ran: a probe should never be the thing that raises.

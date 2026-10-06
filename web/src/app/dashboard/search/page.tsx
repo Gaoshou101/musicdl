@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   MagnifyingGlass,
@@ -193,6 +194,9 @@ export default function SearchPage() {
         <p className="text-neutral-400 text-sm mt-1">
           用与机器人完全相同的音源注册表搜索并试下载，验证音源是否真的可用
         </p>
+        <Link href="/dashboard/downloads" className="inline-block text-sm text-accent-300 hover:underline mt-3">
+          查看下载历史与换源过程 →
+        </Link>
       </div>
 
       <form onSubmit={handleSearch} className="mb-6">
@@ -402,12 +406,19 @@ export default function SearchPage() {
                       语言 {state.report.language} · 请求 {shortHash(state.report.request_id, 12)}
                     </p>
                     <DowngradeNote report={state.report} />
+                    {state.report.history_warning && (
+                      <p className="text-warning" role="status">文件已下载，但历史记录保存不完整，请检查应用数据目录。</p>
+                    )}
                     {state.report.fallback_from && (
                       <p className="text-warning">
                         原音源 {state.report.fallback_from} 未能取到音频，已改用 {state.report.source_id} 下载
                       </p>
                     )}
                     <p className="font-mono">sha256 {state.report.sha256}</p>
+                    <Link href={`/dashboard/downloads?id=${encodeURIComponent(state.report.request_id)}`}
+                      className="block text-accent-300 hover:underline">
+                      查看本次下载记录
+                    </Link>
                     <a
                       href={mediaUrl(state.report.relative_path)}
                       target="_blank"

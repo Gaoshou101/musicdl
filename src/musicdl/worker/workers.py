@@ -13,6 +13,7 @@ from musicdl.ai.models import AIRankResult
 from musicdl.config import REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS
 from musicdl.media.fallback import download_with_fallback
 from musicdl.media.download import source_download
+from musicdl.media.history import DownloadJournal, HistoryUnavailable, download_report
 from musicdl.sources.quality import (QUALITY_REVISION, bitrate_kbps, format_bytes, is_lossless,
                                      proven_lossy, requested_quality, served_quality)
 from musicdl.media.language import resolve_language
@@ -339,11 +340,12 @@ class JobWorker(_StreamWorker):
                  redis_overhead_seconds: float = REDIS_OVERHEAD_SECONDS,
                  wecom_notice_timeout: float = WECOM_NOTICE_TIMEOUT_SECONDS,
                  quality_policy: str = "lossless_first", quality_preference: str | None = None,
-                 preference=None, channel_health=None, lossless_capability=None, record=None):
+                 preference=None, channel_health=None, lossless_capability=None, record=None, history=None):
         self.quality_policy, self.quality_preference = quality_policy, quality_preference
         self.preference, self.channel_health = preference, channel_health
         self.lossless_capability = lossless_capability
         self.record = record
+        self.history = history
         self.redis, self.wecom, self.sources, self.media_root = redis, wecom, sources, media_root
         self.state, self.refresh, self.language_advisor = state or RedisStateStore(redis), refresh, language_advisor
         if not isinstance(selection_ttl, int) or isinstance(selection_ttl, bool) or not 60 <= selection_ttl <= 86400:
@@ -602,6 +604,46 @@ class JobWorker(_StreamWorker):
         return record
 
     async def _run_download_effect(self, job_id: str, payload: dict[str, Any], candidate: Candidate,
+                                   owner: str, deadline: float):
+        if self.history is None:
+            return await self._run_download_effect_tracked(job_id, payload, candidate, owner, deadline)
+        # Namespace and job identity, not the message request id: a selection can
+        # create more than one download, and Redis replay must not create rows.
+        task_id = "wecom-" + hashlib.sha256(f"{self.state.namespace}:{job_id}".encode()).hexdigest()[:32]
+        try:
+            journal = DownloadJournal(self.history, task_id, candidate, origin="wecom",
+                                      query=str(payload.get("query") or candidate.title),
+                                      quality=requested_quality(candidate, policy=self.quality_policy,
+                                                                preference=self.quality_preference))
+        except HistoryUnavailable:
+            # History is observational: a Redis delivery/effect must never be
+            # retried just because its independent journal is unavailable.
+            self.history.warn(task_id)
+            return await self._run_download_effect_tracked(job_id, payload, candidate, owner, deadline)
+        with journal.activate():
+            try:
+                result = await self._run_download_effect_tracked(job_id, payload, candidate, owner, deadline)
+            except asyncio.CancelledError:
+                journal.finish("interrupted", error_code="download_cancelled")
+                raise
+            except JobDeferred:
+                journal.finish("interrupted", error_code="download_deferred")
+                raise
+            except EffectUncertain:
+                journal.finish("interrupted", error_code="download_uncertain")
+                raise
+            except Exception:
+                journal.finish("interrupted", error_code="download_uncertain")
+                raise
+            if result.download is not None:
+                source_id = getattr(result, "download_source_id", None) or candidate.source_id
+                journal.finish("succeeded", result=download_report(str(payload["request_id"]), source_id,
+                               candidate.source_id if source_id != candidate.source_id else None, result.download))
+            else:
+                journal.finish("failed", error_code=result.download_error or "download_failed")
+            return result
+
+    async def _run_download_effect_tracked(self, job_id: str, payload: dict[str, Any], candidate: Candidate,
                                    owner: str, deadline: float):
         guard = self._guard(job_id, "download", owner, deadline)
         lease, record = await guard.claim()
