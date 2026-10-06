@@ -227,6 +227,29 @@ def git_source(source, commit, repo):
             and isinstance(digest, dict) and digest.get("sha1") == commit)
 
 
+def git_provenance(predicate, commit, repo):
+    """Validate the primary input and dependency at explicit SLSA schema paths."""
+    if not isinstance(predicate, dict):
+        return False
+    if "buildDefinition" in predicate or "runDetails" in predicate:
+        definition = predicate.get("buildDefinition")
+        if not isinstance(definition, dict):
+            return False
+        parameters = definition.get("externalParameters")
+        if not isinstance(parameters, dict):
+            return False
+        source = parameters.get("configSource")
+        dependencies = definition.get("resolvedDependencies")
+    else:
+        invocation = predicate.get("invocation")
+        if not isinstance(invocation, dict):
+            return False
+        source = invocation.get("configSource")
+        dependencies = predicate.get("materials")
+    return (git_source(source, commit, repo) and isinstance(dependencies, list)
+            and any(git_source(item, commit, repo) for item in dependencies))
+
+
 def check_image(report, image, evidence, version, commit, repo):
     manifest, configs, provenance = evidence["manifest"], evidence["configs"], evidence["provenance"]
     digest = manifest.get("digest", "")
@@ -254,12 +277,9 @@ def check_image(report, image, evidence, version, commit, repo):
         for name, expected in (("revision", commit), ("version", version), ("source", f"https://github.com/{repo}")):
             report.check(f"{image}-{platform}-{name}", labels.get(f"org.opencontainers.image.{name}"), expected)
         predicate = provenance.get(platform, {}).get("SLSA", {})
-        config_source = predicate.get("invocation", {}).get("configSource", {})
-        materials = predicate.get("materials", [])
         report.check(f"{image}-{platform}-git-provenance",
-                     git_source(config_source, commit, repo) and isinstance(materials, list)
-                     and any(git_source(item, commit, repo) for item in materials), True,
-                     detail="Buildx SLSA v0.2 primary Git input and matching source material")
+                     git_provenance(predicate, commit, repo), True,
+                     detail="Buildx SLSA v0.2/v1 primary Git input and matching source dependency")
     return digest
 
 
@@ -316,12 +336,18 @@ def main(argv=None):
     parser.add_argument("mode", choices=("preflight", "published", "body"))
     parser.add_argument("--tag")
     parser.add_argument("--repo", default=REPO)
+    parser.add_argument("--source-root", type=Path, default=ROOT,
+                        help="Git checkout to verify (defaults to the checker repository)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--require-ci", action="store_true")
     parser.add_argument("--source-commit")
     parser.add_argument("--main-digest")
     parser.add_argument("--runner-digest")
     args = parser.parse_args(argv)
+    source_root = args.source_root.resolve()
+    if not source_root.is_dir():
+        parser.error("--source-root must be an existing directory")
+    run = lambda command_args: command(command_args, root=source_root)
     if args.mode in {"published", "body"} and not args.tag:
         parser.error("--tag is required")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo):
@@ -330,22 +356,22 @@ def main(argv=None):
         try:
             if not args.tag.startswith("v") or not VERSION.fullmatch(args.tag[1:]):
                 raise ValueError("invalid release tag")
-            notes = (ROOT / f"docs/release-notes/{args.tag}.md").read_text(encoding="utf-8")
+            notes = (source_root / f"docs/release-notes/{args.tag}.md").read_text(encoding="utf-8")
             if hasattr(sys.stdout, "reconfigure"):
                 sys.stdout.reconfigure(encoding="utf-8")
             print(release_body(notes, args.tag, args.source_commit or "", args.main_digest or "", args.runner_digest or ""), end="")
             return 0
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
-    report = preflight(tag=args.tag)
+    report = preflight(root=source_root, tag=args.tag, run=run)
     if args.require_ci:
-        require_ci(report, args.repo, command)
+        require_ci(report, args.repo, run)
     if args.mode == "published":
         report.mode = "published"
         if report.exit_code() == 0:
             try:
-                evidence = collect_published(args.tag, report.source_commit, args.repo, command)
-                notes = command(["git", "show", f"HEAD:docs/release-notes/{args.tag}.md"])
+                evidence = collect_published(args.tag, report.source_commit, args.repo, run)
+                notes = run(["git", "show", f"HEAD:docs/release-notes/{args.tag}.md"])
                 check_published(report, evidence, notes, args.tag, args.repo)
             except (Unavailable, OSError) as exc:
                 report.unavailable("published-evidence", str(exc))

@@ -175,6 +175,131 @@ def test_complete_published_evidence_passes(published):
     assert checked(published).exit_code() == 0
 
 
+def v1_fixture():
+    return json.loads((ROOT / "tests/fixtures/release/buildx-slsa-v1.json").read_text(encoding="utf-8"))
+
+
+def test_real_v1_primary_inputs_and_dependencies_for_both_images_and_platforms():
+    fixture = v1_fixture()
+    for image in verify.IMAGES:
+        for platform in verify.PLATFORMS:
+            predicate = fixture["images"][image][platform]["SLSA"]
+            assert verify.git_provenance(predicate, fixture["source_commit"], verify.REPO)
+
+
+@pytest.mark.parametrize("tamper", ["primary-uri", "primary-sha", "dependency-uri", "dependency-sha",
+                                    "missing-dependencies", "wrong-type", "unrelated-sha", "legacy-bypass",
+                                    "missing-definition-legacy-bypass"])
+def test_v1_provenance_rejects_wrong_or_missing_primary_and_dependency(tamper):
+    fixture = v1_fixture()
+    commit = fixture["source_commit"]
+    predicate = fixture["images"][verify.IMAGES[0]]["linux/amd64"]["SLSA"]
+    definition = predicate["buildDefinition"]
+    source = definition["externalParameters"]["configSource"]
+    dependency = next(item for item in definition["resolvedDependencies"] if "sha1" in item["digest"])
+    if tamper == "primary-uri":
+        source["uri"] = f"https://github.com/other/repo.git#{commit}"
+    elif tamper == "primary-sha":
+        source["digest"]["sha1"] = OTHER
+    elif tamper == "dependency-uri":
+        dependency["uri"] = f"https://github.com/other/repo.git#{commit}"
+    elif tamper == "dependency-sha":
+        dependency["digest"]["sha1"] = OTHER
+    elif tamper == "missing-dependencies":
+        definition.pop("resolvedDependencies")
+    elif tamper == "wrong-type":
+        definition["externalParameters"] = []
+    elif tamper == "unrelated-sha":
+        definition["externalParameters"].pop("configSource")
+        predicate["unrelated"] = source
+    else:
+        predicate["invocation"] = {"configSource": copy.deepcopy(source)}
+        predicate["materials"] = [copy.deepcopy(source)]
+        if tamper == "missing-definition-legacy-bypass":
+            predicate.pop("buildDefinition")
+            predicate["runDetails"] = {}
+        else:
+            definition["externalParameters"]["configSource"]["digest"]["sha1"] = OTHER
+    assert not verify.git_provenance(predicate, commit, verify.REPO)
+
+
+@pytest.mark.parametrize("predicate", [None, [], {}, {"buildDefinition": None}, {"buildDefinition": []},
+                                       {"invocation": None}, {"invocation": {"configSource": {}}}])
+def test_unrecognized_provenance_is_not_verified(predicate):
+    assert not verify.git_provenance(predicate, SHA, verify.REPO)
+
+
+def test_full_image_check_accepts_v1_without_weakening_other_gates(published):
+    fixture = v1_fixture()
+    # Use the real structure with the synthetic fixture's commit to isolate schema support.
+    for image in verify.IMAGES:
+        published["images"][image]["provenance"] = json.loads(
+            json.dumps(fixture["images"][image]).replace(fixture["source_commit"], SHA))
+    assert checked(published).exit_code() == 0
+    published["images"][verify.IMAGES[1]]["provenance"]["linux/arm64"]["SLSA"]["buildDefinition"]["resolvedDependencies"] = []
+    assert checked(published).exit_code() == 1
+
+
+def repo_command(root, *args):
+    return subprocess.run(["git", "-c", "user.name=Release Test", "-c", "user.email=release-test@example.invalid", *args],
+                          cwd=root, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def init_tagged_repo(root, marker):
+    (root / "source-marker").write_text(marker, encoding="utf-8")
+    repo_command(root, "init")
+    repo_command(root, "add", ".")
+    repo_command(root, "commit", "-m", "fixture")
+    repo_command(root, "tag", "-a", TAG, "-m", "fixture")
+    return repo_command(root, "rev-parse", "HEAD")
+
+
+def test_source_root_uses_release_checkout_for_all_published_git_evidence(release_tree, tmp_path, monkeypatch, capsys, published):
+    checker_root = tmp_path / "checker"
+    shutil.copytree(release_tree, checker_root)
+    release_sha = init_tagged_repo(release_tree, "release")
+    checker_sha = init_tagged_repo(checker_root, "checker")
+    assert checker_sha != release_sha
+    monkeypatch.setattr(verify, "ROOT", checker_root)
+    def collect(tag, commit, repo, run):
+        assert commit == release_sha
+        assert run(["git", "rev-parse", "HEAD"]) == release_sha
+        return json.loads(json.dumps(published).replace(SHA, release_sha))
+    monkeypatch.setattr(verify, "collect_published", collect)
+    assert verify.main(["published", "--tag", TAG, "--source-root", str(release_tree), "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["source_commit"] == release_sha
+    assert report["status"] == "PASS"
+
+
+@pytest.mark.parametrize("tamper", ["version", "staged", "tag-commit", "not-git"])
+def test_source_root_cannot_use_checker_to_hide_release_errors(release_tree, tmp_path, monkeypatch, capsys, tamper):
+    checker_root = tmp_path / "checker"
+    shutil.copytree(release_tree, checker_root)
+    init_tagged_repo(checker_root, "checker")
+    if tamper != "not-git":
+        init_tagged_repo(release_tree, "release")
+    if tamper == "version":
+        path = release_tree / "docker/plugin/pyproject.toml"
+        path.write_text(path.read_text(encoding="utf-8").replace(VERSION, "99.0.0"), encoding="utf-8")
+    elif tamper == "staged":
+        with (release_tree / "README.md").open("a", encoding="utf-8") as handle:
+            handle.write("\nlocal edit\n")
+        repo_command(release_tree, "add", "README.md")
+    elif tamper == "tag-commit":
+        (release_tree / "source-marker").write_text("new commit", encoding="utf-8")
+        repo_command(release_tree, "add", "source-marker")
+        repo_command(release_tree, "commit", "-m", "later commit")
+    monkeypatch.setattr(verify, "ROOT", checker_root)
+    assert verify.main(["preflight", "--tag", TAG, "--source-root", str(release_tree), "--json"]) != 0
+    assert json.loads(capsys.readouterr().out)["status"] != "PASS"
+
+
+def test_source_root_must_exist(tmp_path):
+    with pytest.raises(SystemExit):
+        verify.main(["preflight", "--source-root", str(tmp_path / "missing")])
+
+
 @pytest.mark.parametrize("field,value", [("isDraft", True), ("isPrerelease", True), ("isDraft", 0), ("tagName", "v99.0.0"),
                                          ("name", "wrong"), ("body", "rewritten release")])
 def test_release_drift_fails(published, field, value):
