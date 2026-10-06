@@ -99,7 +99,7 @@ def _replacement(wanted: Candidate, candidates, resolvers, *, attempted_source_i
         # Health and capability ranking are for lossless-first recovery.
         preference=None if quality_policy == "best_available" else preference,
         health_status=(None if quality_policy == "best_available" or source_health is None
-                       else source_health.fallback_health),
+                       else source_health.delivery_health),
         lossless_capability=None if quality_policy == "best_available" else lossless_capability,
         quality_policy=quality_policy,
         quality=quality, recording_match=_same_recording, channel_rows=channel_rows)
@@ -696,17 +696,24 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         service = active_runtime()
         if not 1 <= limit <= 200:
             raise HTTPException(422, "invalid limit")
+        options = {}
+        if quality_policy == "lossless_first":
+            for entry in service.registry.enabled():
+                source_health.bind_source_version(entry.source_id, entry.version)
+            options["preference"] = source_health.delivery_preference
         try:
             result = await search_sources(service.registry, q, timeout=search_timeout,
                                           quality_policy=quality_policy,
                                           quality_preference=quality_preference,
-                                          lossless_capability=getattr(service, "lossless_capability", None))
+                                          lossless_capability=getattr(service, "lossless_capability", None),
+                                          **options)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         # A search the panel ran is also the cheapest health probe every enabled
         # source can get, so each answer is recorded against its channel.
         for status in result.statuses:
-            source_health.observe_search(status.source_id, status.status, count=status.count)
+            source_health.observe_search(status.source_id, status.status, count=status.count,
+                                         source_version=status.source_version)
         page = result.candidates[:limit]
         return {"query": q.strip(), "version": result.version, "count": len(page),
                 "total": len(result.candidates),
@@ -873,6 +880,11 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             except MediaError as exc:
                 raise failed(exc.code) from None
             except TimeoutError:
+                # asyncio.timeout cancels the inner transfer first. Replace
+                # that cancellation with the timeout verdict for this attempt.
+                emit_event(recorded, DownloadEvent(request_id, candidate.item_id, candidate.source_id,
+                                                  candidate.source_version, "download", "failed",
+                                                  error_code="media_timeout", requested_quality=quality))
                 raise failed("media_timeout") from None
             return report(candidate.source_id, None, result)
 
@@ -884,8 +896,10 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             resolve_stream_timeout=_stream_budget(resolvers.get(candidate.source_id), resolve_timeout),
             refresh_timeout=search_timeout, language=language, quality=quality,
             quality_policy=quality_policy,
-            preference=getattr(service, "preference", None),
-            channel_health=source_health.fallback_health,
+            preference=(source_health.delivery_preference if quality_policy == "lossless_first"
+                        else getattr(service, "preference", None)),
+            channel_health=(source_health.delivery_health if quality_policy == "lossless_first"
+                            else source_health.fallback_health),
             lossless_capability=getattr(service, "lossless_capability", None),
             health_timeout=health_timeout, verify_duration=verify_duration, record=recorded)
         if attempt.download is not None:
@@ -909,7 +923,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             replacement, skipped = _replacement(
                 current_candidate, getattr(refreshed, "candidates", ()), resolvers,
                 attempted_source_ids=attempted_sources, source_health=source_health,
-                preference=getattr(service, "preference", None),
+                preference=(source_health.delivery_preference if quality_policy == "lossless_first"
+                            else getattr(service, "preference", None)),
                 lossless_capability=getattr(service, "lossless_capability", None),
                 quality_policy=quality_policy, quality=tier_for(current_candidate), with_skips=True,
                 channel_rows=channel_rows)

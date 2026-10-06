@@ -625,6 +625,22 @@ def test_the_panel_gives_a_slow_channel_the_budget_it_asks_for(tmp_path):
     assert served.status_code == 200 and slow.served is True
 
 
+def test_single_source_timeout_is_a_failed_attempt_not_an_excluded_cancellation(tmp_path):
+    async def scenario():
+        async with client_for(app_with(tmp_path, SlowSource(0.01))) as client:
+            token = await signed_in(client)
+            candidate = await first_candidate(client)
+            response = await client.post("/admin/download", json={"candidate": candidate},
+                                         headers={"x-csrf-token": token})
+            stats = (await client.get("/admin/sources/health")).json()["sources"][0]["metrics"]
+            return response, stats
+
+    response, stats = run(scenario())
+    assert response.status_code == 504 and response.json()["detail"] == "media_timeout"
+    assert stats["download"] == {"samples": 1, "successes": 0, "failures": 1, "excluded": 0, "rate": 0.0}
+    assert stats["quality"]["samples"] == 0
+
+
 # -- the tier the panel asks for -------------------------------------------
 #
 # ``lossless_first`` is the deployment's default, but the panel's download used

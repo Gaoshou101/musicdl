@@ -214,9 +214,11 @@ class MessageWorker(_StreamWorker):
                  max_results: int = 10, search_timeout: float = 10.0, selection_ttl: int = 600,
                  pending_idle_ms: int = 30001, max_attempts: int = 3, retry_window_seconds: int = 86400,
                  quality_policy: str = "lossless_first", quality_preference: str | None = None,
-                 lossless_capability: Mapping[str, bool | None] | Callable[[str], bool | None] | None = None):
+                 lossless_capability: Mapping[str, bool | None] | Callable[[str], bool | None] | None = None,
+                 preference=None, observe_search: Callable | None = None):
         self.quality_policy, self.quality_preference = quality_policy, quality_preference
         self.lossless_capability = lossless_capability
+        self.preference, self.observe_search = preference, observe_search
         self.redis, self.registry, self.wecom = redis, registry, wecom
         self.state = state or RedisStateStore(redis)
         self.retry_window_seconds = _retry_window(retry_window_seconds)
@@ -263,7 +265,13 @@ class MessageWorker(_StreamWorker):
             # The channel-ordering bias is optional, so an unmeasured
             # deployment keeps the exact search signature it always had.
             options["lossless_capability"] = self.lossless_capability
+        if self.quality_policy == "lossless_first" and self.preference is not None:
+            options["preference"] = self.preference
         result = await search_sources(self.registry, str(command.value), **options)
+        if self.observe_search is not None:
+            for status in result.statuses:
+                self.observe_search(status.source_id, status.status, count=status.count,
+                                    source_version=status.source_version)
         if self.ai_ranker:
             try:
                 remaining = deadline - asyncio.get_running_loop().time()

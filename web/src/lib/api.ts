@@ -85,6 +85,23 @@ export type LosslessStatus = 'unknown' | 'lossless' | 'lossy'
  */
 export type LosslessEvidence = { extension?: string | null; quality?: string | null }
 
+export type SourceOutcomeMetric = {
+  samples: number
+  successes: number
+  failures: number
+  rate: number | null
+}
+
+export type SourceMetrics = {
+  scope: 'process'
+  window_size: number
+  search: SourceOutcomeMetric
+  download: SourceOutcomeMetric & { excluded: number }
+  /** Samples count only lossless requests whose successful answer can be judged. */
+  quality: { samples: number; fulfilled: number; downgraded: number; unknown: number; rate: number | null }
+  ranking: { eligible: boolean; minimum_samples: number; score: number }
+}
+
 export type SourceHealthRow = {
   id: string
   name: string | null
@@ -97,6 +114,8 @@ export type SourceHealthRow = {
   successes: number
   failures: number
   success_rate: number | null
+  /** Separate process-scoped windows; absent on older backends. */
+  metrics?: SourceMetrics
   searches: number
   downloads: number
   refreshes: number
