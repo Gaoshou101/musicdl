@@ -38,6 +38,16 @@ them to the current version.
 Before editing, run `git grep -n "<previous version>" -- .` and account for every
 remaining hit in the pull request.
 
+Run the structured metadata check after the bump (Python 3.12 and the existing
+dev dependencies are required):
+
+```bash
+python scripts/release/verify_release.py preflight --json
+```
+
+CI runs this check and the panel's service-log, search-probe, source-import, and
+channel-metric regressions before its production Compose build and smoke test.
+
 ## 2. Write the release notes
 
 `docs/release-notes/v<version>.md` is the source of truth for the published
@@ -62,28 +72,49 @@ gh pr create --fill
 Wait for every `ci.yml` job on the pull request to pass, merge it, and confirm the
 same jobs are green on `main`. The quick-install CI smoke pins the last published
 images during this stage because the candidate images do not exist until the tag
-is pushed. Then tag the merge commit without changing the local checkout:
+is pushed. Tag the merge commit, then check out that tag for verification:
 
 ```bash
 git fetch origin main
 git tag -a v<version> origin/main -m "musicdl <version>"
+git checkout --detach v<version>
+python scripts/release/verify_release.py preflight --tag v<version> --require-ci --json
 git push origin v<version>
 ```
 
 ## 4. Let the workflow publish, then verify
 
-Pushing the tag starts `docker-publish.yml`, whose two jobs push the images and
-then create the GitHub Release. Verify all four outputs name the same commit:
+Pushing the tag starts `docker-publish.yml`. Before Docker login or push, tagged
+preflight checks the metadata, annotated tag, committed notes, and latest successful
+`main` push CI for the same commit. Both images build from the Git context pinned to
+that SHA, with OCI source/version/revision labels and Buildx `mode=max` provenance.
+The release job uses the checker's shared body formatter to append both digests.
+Wait for the entire workflow to finish, then verify all four outputs:
 
 ```bash
 gh run list --workflow docker-publish.yml --limit 3
-gh release view v<version> --json name,tagName,body,url
-docker buildx imagetools inspect wit7zz/musicdl:<version> --format '{{.Manifest.Digest}}'
-docker buildx imagetools inspect wit7zz/musicdl-plugin-runner:<version> --format '{{.Manifest.Digest}}'
+python scripts/release/verify_release.py published --tag v<version> --repo Gaoshou101/musicdl --json
 ```
 
 The digests in the release body must equal the ones the registry reports, and the
 release body's `Source commit` must equal `git rev-parse v<version>^{commit}`.
+The read-only checker requires authenticated `gh` and `docker buildx`. It checks
+the exact committed release body, both versioned index digests, amd64/arm64 image
+configs and labels, each platform's SLSA v0.2 primary Git input and source material,
+attestation reference annotations, and the latest matching completed/successful CI
+and tag-publish runs. Reads after resolving the version tag are pinned to its digest.
+Buildx exposes predicates, not raw in-toto subjects or signatures; this is source
+consistency verification, not signature verification. Older images without these
+labels or attestations will fail; do not rebuild historical images to make them pass.
+Tagged checks also require version/recommendation metadata to match HEAD, including
+staged changes; local edits cannot mask drift in the release commit. Ordinary no-tag
+preflight may run while preparing an uncommitted version bump.
+
+Every mode returns `PASS`, `FAIL`, or `NOT_RUN` with individual evidence in JSON.
+Exit codes are 0 (all checks pass), 1 (a definite mismatch), and 2 (only unavailable
+tools or evidence). Missing credentials, timeouts, and absent Docker are never PASS.
+`run_gates.py` remains the separate environment/safety gate runner; these consistency
+checks do not replace real deployment acceptance.
 After publication, run the quick-install smoke without `MUSICDL_IMAGE_TAG` to
 exercise the newly published default image pair. The pre-tag CI smoke used the
 previous version and does not prove this last step.
@@ -114,6 +145,6 @@ Do not re-tag or rebuild historical images merely to backfill the release.
 1. 从 `main` 切分支，同步上表所有文件里的版本号；改之前先跑 `git grep -n "<旧版本>" -- .`，PR 里逐条说明剩余命中。
 2. 写 `docs/release-notes/v<新版本>.md`（`# musicdl <版本>` + `## English` + `## 中文`）；源码提交和镜像摘要由工作流追加，不要手写。
 3. 开 PR，等 `ci.yml` 全绿后合并，确认 `main` 上也全绿，再对合并提交打注解标签 `v<版本>` 并推送。
-4. 推标签会触发 `docker-publish.yml`：先出两个镜像，再创建 GitHub Release。用 `gh release view` 和 `docker buildx imagetools inspect` 核对四份产物指向同一提交。
+4. 推标签会先检查元数据、注解标签和同一提交的 main CI，再出两个镜像和 GitHub Release。等待整个工作流成功后，在该标签的检出目录执行 `python scripts/release/verify_release.py published --tag v<版本> --json`，核对正文、摘要、双平台标签和源码 provenance；退出码 0/1/2 分别代表通过/失败/无法验证。
 5. 同一版发布里把快速安装默认值和 README 里的版本一起推进，然后在部署主机改 `MUSICDL_IMAGE_TAG`、拉取并重建服务。
 6. 只有标签没有 Release 就是不完整发版：用 `gh release create` 补建，并补上源码提交与两个镜像摘要。
