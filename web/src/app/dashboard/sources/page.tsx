@@ -34,6 +34,7 @@ import {
 } from '@/lib/api'
 import type { SourceItem } from '@/lib/api'
 import { formatBytes } from '@/lib/format'
+import ChannelMetrics from '@/components/ChannelMetrics'
 import {
   cloneImportGrants,
   duplicateSourceIds,
@@ -131,13 +132,12 @@ const VERDICT_CLASS: Record<SourceHealthVerdict, string> = {
  */
 function ChannelBadge({ row }: { row: SourceHealthRow | undefined }) {
   if (!row) return null
-  const rate = row.success_rate === null ? '—' : `${Math.round(row.success_rate * 100)}%`
   return (
     <span
       className={`text-xs px-2 py-1 rounded-md ${VERDICT_CLASS[row.status]}`}
-      title={`最近 ${row.attempts} 次结果的成功率 ${rate}`}
+      title="搜索、刷新与下载的综合状态；下载可靠性见下方分项统计"
     >
-      渠道 {VERDICT_TEXT[row.status]}
+      综合 {VERDICT_TEXT[row.status]}
     </span>
   )
 }
@@ -984,6 +984,7 @@ export default function SourcesPage() {
                     <p className="text-xs mt-1">
                       <EgressLine source={source} />
                     </p>
+                    <ChannelMetrics row={channels[source.id]} />
                   </div>
                 </div>
 

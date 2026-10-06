@@ -69,6 +69,27 @@ def test_message_empty_result_sends_without_binding(monkeypatch):
     async def search(*a,**k): return SearchResult((),(),"v")
     monkeypatch.setattr("musicdl.worker.workers.search_sources",search); state,wc=State(),WeCom()
     assert run(MessageWorker(Redis(),object(),wc,state=state).handle({"corp_id":"c","from_user":"u","request_id":"r","command":"search","value":"x"})) is None and state.issued==[] and wc.sent==[("u","没有找到匹配结果。")]
+
+
+@pytest.mark.parametrize("policy", ["lossless_first", "best_available"])
+def test_message_observes_empty_source_answers_and_preserves_legacy_search_options(monkeypatch, policy):
+    from musicdl.admin.health import SourceHealthStore
+    from musicdl.sources.search import SourceStatus
+    store, options = SourceHealthStore(), []
+
+    async def search(*args, **kwargs):
+        options.append(kwargs)
+        return SearchResult((), (SourceStatus("src", "1", "ok", 0), SourceStatus("down", "1", "timeout")), "v")
+
+    monkeypatch.setattr("musicdl.worker.workers.search_sources", search)
+    worker = MessageWorker(Redis(), object(), WeCom(), state=State(), quality_policy=policy,
+                           preference=store.delivery_preference, observe_search=store.observe_search)
+    run(worker.handle({"corp_id": "c", "from_user": "u", "request_id": "r", "command": "search", "value": "x"}))
+    rows = {row["id"]: row["metrics"] for row in store.snapshot()["sources"]}
+    assert rows["src"]["search"]["successes"] == 1
+    assert rows["down"]["search"]["failures"] == 1
+    assert rows["src"]["download"]["samples"] == 0
+    assert ("preference" in options[0]) is (policy == "lossless_first")
 def test_message_ai_failure_falls_back(monkeypatch):
     async def search(*a,**k): return SearchResult((candidate(),),(),"v")
     async def rank(*a): raise RuntimeError("AI down")

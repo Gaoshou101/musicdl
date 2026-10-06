@@ -193,6 +193,31 @@ def test_build_runtime_exposes_refresh_callback_for_search_sources(runtime_fakes
     assert runtime.job_worker.kwargs["sources"] == {}
 
 
+@pytest.mark.parametrize("policy", ["lossless_first", "best_available"])
+def test_runtime_statistics_are_wired_without_an_event_log(runtime_fakes, policy):
+    from musicdl.admin.health import SourceHealthStore
+    from musicdl.media.models import DownloadEvent
+    store = SourceHealthStore()
+    _Store.plugins = (_Plugin("first", operations=("search", "resolve")), _Plugin("second"))
+    settings = _settings()
+    settings.worker.quality_policy = policy
+    legacy = store.preference
+    runtime = runtime_fakes._build_runtime(settings, source_health=store, preference=legacy)
+    expected = store.delivery_preference if policy == "lossless_first" else legacy
+    assert runtime.preference == expected
+    assert runtime.message_worker.kwargs["observe_search"] == store.observe_catalogue
+    assert runtime.message_worker.kwargs["preference"] == expected
+    asyncio.run(runtime.refresh("needle", frozenset({"first"})))
+    rows = {row["id"]: row["metrics"] for row in store.snapshot()["sources"]}
+    assert rows["first"]["search"]["samples"] == 0
+    assert rows["second"]["search"]["successes"] == 1
+    assert store.preference("second") == 0
+    runtime.job_worker.kwargs["record"](DownloadEvent("r", "track", "first", "1", "download", "success",
+                                                       requested_quality="flac", actual_quality="flac"))
+    row = next(row for row in store.snapshot()["sources"] if row["id"] == "first")
+    assert row["metrics"]["download"]["successes"] == row["metrics"]["quality"]["fulfilled"] == 1
+
+
 def test_build_runtime_maps_only_search_and_resolve_plugins_into_download_sources(runtime_fakes):
     resolver = _Plugin("resolver", operations=("search", "resolve"))
     search_only = _Plugin("searcher", operations=("search",))

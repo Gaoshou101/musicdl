@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from 'react'
 import { usePolling } from '@/lib/usePolling'
+import ChannelMetrics from '@/components/ChannelMetrics'
 import {
   Pulse,
   CheckCircle,
@@ -218,8 +219,8 @@ export default function HealthPage() {
             <div className="mt-8">
               <h2 className="text-xl font-semibold tracking-tight">渠道健康度</h2>
               <p className="text-neutral-400 text-sm mt-1 mb-4">
-                按后台自己发起的搜索与下载汇总：最近 {channels.window} 次结果的成败，以及最后一次报错。没有跑过的渠道显示「未验证」——
-                这不是故障，只是还没有证据。到「搜索测试」跑一次，所有启用的音源都会给出一行。
+                搜索、来源下载尝试和无损交付分别统计，每类取最近 {channels.window} 次结果，显示各自的样本数。
+                统计在服务重启后清零，逐次记录可到「下载历史」查看。未使用的渠道显示「未验证」。
               </p>
               {channels.sources.length === 0 ? (
                 <div className="glass rounded-xl p-6 text-sm text-neutral-400">
@@ -235,7 +236,7 @@ export default function HealthPage() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-medium text-sm">{channel.name || channel.id}</span>
                             <span className={`text-xs ${CHANNEL_CLASS[channel.status]}`}>
-                              {CHANNEL_TEXT[channel.status]}
+                              综合 {CHANNEL_TEXT[channel.status]}
                             </span>
                             {!channel.enabled && (
                               <span className="px-2 py-0.5 rounded text-xs bg-neutral-800/60 text-neutral-400">已停用</span>
@@ -248,15 +249,11 @@ export default function HealthPage() {
                         </div>
                       </div>
                       <div className="text-xs text-neutral-400 flex flex-wrap gap-x-4 gap-y-1">
-                        <span>搜索 {channel.searches}</span>
-                        <span>下载 {channel.downloads}</span>
-                        <span>
-                          成功率 {channel.success_rate === null ? '—' : `${Math.round(channel.success_rate * 100)}%`}
-                        </span>
                         {channel.last_health !== null && channel.last_health !== undefined && (
                           <span>探活 {channel.last_health ? '通过' : '未通过'}</span>
                         )}
                       </div>
+                      <div className="w-full"><ChannelMetrics row={channel} /></div>
                       <div className="text-xs text-neutral-500 w-full md:w-60 md:text-right">
                         {channel.last_error ? (
                           <span>

@@ -4,12 +4,13 @@ import dataclasses
 import asyncio
 import math
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from itertools import islice
 from collections.abc import Awaitable, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 from musicdl.secrets import redact_secrets
 from musicdl.media.models import DownloadEvent
+from musicdl.sources.quality import is_lossless, proven_lossy
 
 
 class HealthAggregator:
@@ -68,6 +69,13 @@ SEARCH_OK = "ok"
 # temporary file, not the channel misbehaving, so it is deliberately absent.
 _ATTEMPT_STAGES = {"download": "downloads", "refresh": "refreshes"}
 
+# These outcomes say nothing about whether another channel could deliver.
+_LOCAL_DOWNLOAD_ERRORS = frozenset({
+    "download_cancelled", "invalid_max_bytes", "invalid_verify_duration",
+    "path_escape", "path_too_long", "media_url_denied", "media_host_denied",
+    "media_address_denied", "media_redirect_denied", "artifact_uncertain", "cleanup_failed",
+})
+
 # How long one measured lossless answer stays trustworthy.  A channel's answer
 # is about the script it is running and the catalogue it is fronting, and both
 # change slowly, so a week is long enough to stop a healthy deployment from
@@ -116,6 +124,7 @@ class SourceHealthStore:
 
     WINDOW = 20
     LIMIT = 200
+    MINIMUM_DOWNLOAD_SAMPLES = 5
 
     # The lossless roll-up is bounded and expiring like everything else here:
     # the two limits are separate so a deployment that churns through source
@@ -144,12 +153,18 @@ class SourceHealthStore:
         self._lossless: dict[str, dict] = {}
 
     # -- recording -------------------------------------------------------
-    def observe_search(self, source_id: str, status: str, *, count: int = 0) -> None:
+    def observe_search(self, source_id: str, status: str, *, count: int = 0,
+                       source_version: str | None = None, record_legacy: bool = True) -> None:
         """Record one source's answer to one search the panel just ran."""
         record = self._record(source_id)
         if record is None:
             return
+        if self._metric_version(record, source_version):
+            record["search_outcomes"].append(str(status) == SEARCH_OK)
+            record["metric_last_search"] = (record["observation_sequence"] + 1, str(status) == SEARCH_OK)
         record["observation_sequence"] += 1
+        if not record_legacy:
+            return
         record["last_search_sequence"] = record["observation_sequence"]
         record["searches"] += 1
         record["last_search"] = str(status)
@@ -158,6 +173,11 @@ class SourceHealthStore:
         if str(status) != SEARCH_OK:
             record["last_error"] = f"search_{status}"
             record["last_error_stage"] = "search"
+
+    def observe_catalogue(self, source_id: str, status: str, *, count: int = 0,
+                          source_version: str | None = None) -> None:
+        """New search instrumentation must not change legacy preference inputs."""
+        self.observe_search(source_id, status, count=count, source_version=source_version, record_legacy=False)
 
     def observe_event(self, event: DownloadEvent | dict) -> None:
         """Record one event the media pipeline emitted for a source."""
@@ -171,6 +191,12 @@ class SourceHealthStore:
         record = self._record(source_id)
         if record is None:
             return
+        if stage in {"download", "health"} and self._metric_version(record, data.get("source_version")):
+            if stage == "download":
+                self._observe_download(record, data)
+            else:
+                record["metric_last_health"] = (record["observation_sequence"] + 1,
+                                                data.get("status"), data.get("healthy"))
         record["observation_sequence"] += 1
         record[f"last_{stage}_sequence"] = record["observation_sequence"]
         status = str(data.get("status"))
@@ -205,7 +231,134 @@ class SourceHealthStore:
                   "last_search_sequence": 0, "last_download_sequence": 0,
                   "last_refresh_sequence": 0, "last_health_sequence": 0}
         self._records[source_id] = record
+        record.update(search_outcomes=deque(maxlen=self.window), delivery_outcomes=OrderedDict(),
+                      quality_outcomes=OrderedDict(),
+                      health_downloads=OrderedDict(),
+                      metric_version=None, metric_version_bound=False,
+                      metric_last_search=None, metric_last_health=None)
         return record
+
+    def bind_source_version(self, source_id: str, source_version: str | None) -> None:
+        """Bind live registry versions; late events from retired scripts are ignored.
+
+        Legacy roll-ups remain unchanged for compatibility, while the new
+        windows cannot lend an old script's reliability to its replacement.
+        """
+        record = self._record(source_id)
+        if record is None:
+            return
+        version = _version(source_version)
+        if record["metric_version"] != version:
+            record["search_outcomes"].clear()
+            record["delivery_outcomes"].clear()
+            record["quality_outcomes"].clear()
+            record["health_downloads"].clear()
+            record["metric_last_search"] = record["metric_last_health"] = None
+        record["metric_version"] = version
+        record["metric_version_bound"] = True
+
+    def _metric_version(self, record: dict, version) -> bool:
+        version = _version(version)
+        if version is None:
+            return True
+        if record["metric_version_bound"]:
+            return version == record["metric_version"]
+        if version != record["metric_version"]:
+            record["search_outcomes"].clear()
+            record["delivery_outcomes"].clear()
+            record["quality_outcomes"].clear()
+            record["health_downloads"].clear()
+            record["metric_last_search"] = record["metric_last_health"] = None
+            record["metric_version"] = version
+        return True
+
+    def _observe_download(self, record: dict, data: dict) -> None:
+        status = data.get("status")
+        if status not in {"success", "failed", "cancelled"}:
+            return
+        # A timeout can replace a cancelled event, and a closing failure can
+        # replace success. Latest terminal outcome wins without double-counting.
+        key = tuple(data.get(name) for name in
+                    ("request_id", "source_id", "source_version", "candidate_id"))
+        if not all(isinstance(value, str) and value for value in key):
+            key = ("anonymous", record["observation_sequence"])
+        excluded = status == "cancelled" or data.get("error_code") in _LOCAL_DOWNLOAD_ERRORS
+        quality = None
+        if status == "success" and is_lossless(data.get("requested_quality")):
+            actual = data.get("actual_quality")
+            quality = "fulfilled" if is_lossless(actual) else ("downgraded" if proven_lossy(actual) else "unknown")
+        outcomes = record["delivery_outcomes"]
+        outcomes[key] = {"success": status == "success", "excluded": excluded, "quality": quality,
+                         "sequence": record["observation_sequence"] + 1}
+        outcomes.move_to_end(key)
+        while len(outcomes) > self.window:
+            outcomes.popitem(last=False)
+        health_downloads = record["health_downloads"]
+        health_downloads.pop(key, None)
+        if not excluded:
+            health_downloads[key] = outcomes[key]
+            while len(health_downloads) > self.window:
+                health_downloads.popitem(last=False)
+        qualities = record["quality_outcomes"]
+        qualities.pop(key, None)
+        if quality is not None:
+            qualities[key] = quality
+            while len(qualities) > self.window:
+                qualities.popitem(last=False)
+
+    def _metrics(self, source_id: str) -> dict:
+        record = self._records.get(source_id)
+        searches = list(record["search_outcomes"]) if record else []
+        deliveries = list(record["delivery_outcomes"].values()) if record else []
+        counted = [item for item in deliveries if not item["excluded"]]
+        def outcome(values):
+            successes = sum(values)
+            return {"samples": len(values), "successes": successes,
+                    "failures": len(values) - successes,
+                    "rate": round(successes / len(values), 3) if values else None}
+        download = outcome([item["success"] for item in counted])
+        download["excluded"] = len(deliveries) - len(counted)
+        qualities = list(record["quality_outcomes"].values()) if record else []
+        fulfilled, downgraded = qualities.count("fulfilled"), qualities.count("downgraded")
+        judged = fulfilled + downgraded
+        eligible = download["samples"] >= self.MINIMUM_DOWNLOAD_SAMPLES
+        score = round(10 * (download["successes"] - download["failures"]) /
+                      (download["samples"] + 4)) if eligible else 0
+        return {"scope": "process", "window_size": self.window,
+                "search": outcome(searches), "download": download,
+                "quality": {"samples": judged, "fulfilled": fulfilled, "downgraded": downgraded,
+                            "unknown": qualities.count("unknown"),
+                            "rate": round(fulfilled / judged, 3) if judged else None},
+                "ranking": {"eligible": eligible, "minimum_samples": self.MINIMUM_DOWNLOAD_SAMPLES,
+                            "score": score}}
+
+    def delivery_preference(self, source_id: str) -> int:
+        """A small-sample guarded download tie-break, independent of search traffic."""
+        try:
+            return self._metrics(source_id)["ranking"]["score"]
+        except Exception:
+            return 0
+
+    def delivery_health(self, source_id: str) -> bool | None:
+        """Recent delivery evidence with local exclusions and live versions respected."""
+        try:
+            record = self._records.get(source_id)
+            if record is None:
+                return None
+            deliveries = list(record["health_downloads"].values())
+            latest = deliveries[-1] if deliveries else None
+            health = record["metric_last_health"]
+            if health and (latest is None or health[0] > latest["sequence"]):
+                if health[1] == "failed" or health[2] is False:
+                    return False
+                if latest is None and health[1] == "success" and health[2] is True:
+                    return True
+            if latest is not None:
+                return latest["success"]
+            search = record["metric_last_search"]
+            return search[1] if search else None
+        except Exception:
+            return None
 
     # -- the lossless capability cache -----------------------------------
     def observe_lossless(self, source_id: str, *, capable: bool | None, evidence=None,
@@ -417,7 +570,7 @@ class SourceHealthStore:
     def _view(self, source_id: str, *, configured: bool, name, enabled: bool, priority) -> dict:
         record = self._records.get(source_id)
         common = {"id": source_id, "name": name, "enabled": enabled, "priority": priority,
-                  "configured": configured}
+                  "configured": configured, "metrics": self._metrics(source_id)}
         if record is None:
             return dict(common, status="unknown", attempts=0, successes=0, failures=0, success_rate=None,
                         searches=0, downloads=0, refreshes=0, last_search=None, last_download=None,

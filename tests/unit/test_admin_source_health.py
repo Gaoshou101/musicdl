@@ -227,7 +227,8 @@ class Runtime:
         self.registry = registry
 
 
-def build(*, failing: bool = False, bots=None, source_health=None, entries=None):
+def build(*, failing: bool = False, bots=None, source_health=None, entries=None,
+          quality_policy="lossless_first"):
     source = Source(failing=failing)
     auth, sources = AdminAuth(), SourceManager()
     auth.change_credentials("admin", "admin", "new-password")
@@ -236,7 +237,7 @@ def build(*, failing: bool = False, bots=None, source_health=None, entries=None)
     service = Runtime(SourceRegistry(entries if entries is not None else [SourceEntry("primary", "1.0.0", source)]))
     app.include_router(create_admin_router(auth=auth, sources=sources, events=EventLogStore(),
                                            bots=bots, source_health=source_health,
-                                           runtime=lambda: service, worker=WorkerSettings()))
+                                           runtime=lambda: service, worker=WorkerSettings(quality_policy=quality_policy)))
     app.add_middleware(CSRFMiddleware, auth=auth)
     return app
 
@@ -537,4 +538,27 @@ def test_the_ttl_is_a_module_level_constant():
 
     assert health.LOSSLESS_TTL > 0
     assert SourceHealthStore.LOSSLESS_TTL == health.LOSSLESS_TTL
+
+
+@pytest.mark.parametrize("policy, expected", [("lossless_first", "reliable"), ("best_available", "primary")])
+def test_panel_search_uses_delivery_evidence_only_in_lossless_first(policy, expected):
+    reliable = Source()
+    reliable.source_id = "reliable"
+    store = SourceHealthStore()
+    for source_id, status in (("primary", "failed"), ("reliable", "success")):
+        for i in range(5):
+            store.observe_event(DownloadEvent(str(i), "1", source_id, "1.0.0", "download", status))
+    entries = [SourceEntry("primary", "1.0.0", Source()), SourceEntry("reliable", "1.0.0", reliable)]
+
+    async def scenario():
+        async with client_for(build(source_health=store, entries=entries, quality_policy=policy)) as client:
+            await signed_in(client)
+            response = await client.get("/admin/search", params={"q": "稻香"})
+            assert response.status_code == 200
+            return response.json()
+
+    assert run(scenario())["candidates"][0]["source_id"] == expected
+    primary = row(store.snapshot(), "primary")["metrics"]
+    assert primary["search"]["samples"] == 1
+    assert primary["download"]["failures"] == 5
 

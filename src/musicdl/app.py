@@ -438,6 +438,10 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
     lossless_capability = None
     lossless_probe = None
     if source_health is not None:
+        for source_id, version in versions.items():
+            source_health.bind_source_version(source_id, version)
+        if worker_settings.quality_policy == "lossless_first":
+            preference = source_health.delivery_preference
         def lossless_capability(source_id):
             return source_health.lossless_capability(source_id, source_version=versions.get(source_id))
 
@@ -485,8 +489,19 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
             # Only a runtime with a health roll-up has a capability opinion;
             # without one the search keeps the exact signature it always had.
             options["lossless_capability"] = lossless_capability
-        return await search_sources(SourceRegistry(e for e in entries if e.source_id not in excluded),
-                                     query, **options)
+        result = await search_sources(SourceRegistry(e for e in entries if e.source_id not in excluded),
+                                      query, **options)
+        if source_health is not None:
+            for status in result.statuses:
+                source_health.observe_catalogue(status.source_id, status.status, count=status.count,
+                                             source_version=status.source_version)
+        return result
+
+    def record_download(event):
+        if event_log is not None:
+            event_log.append(event)
+        if source_health is not None:
+            source_health.observe_event(event)
 
     message_worker = job_worker = None
     if settings.wecom.enabled:
@@ -494,6 +509,8 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                                        quality_policy=worker_settings.quality_policy,
                                        quality_preference=worker_settings.quality_preference,
                                        lossless_capability=lossless_capability,
+                                       preference=preference,
+                                       observe_search=None if source_health is None else source_health.observe_catalogue,
                                        search_timeout=search_timeout,
                                        pending_idle_ms=worker_settings.pending_idle_ms,
                                        max_attempts=worker_settings.max_attempts,
@@ -513,12 +530,12 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                                max_attempts=worker_settings.max_attempts,
                                verify_duration=settings.media.verify_duration,
                                preference=preference,
-                               channel_health=None if source_health is None else source_health.fallback_health,
+                               channel_health=(None if source_health is None else
+                                               source_health.delivery_health if worker_settings.quality_policy == "lossless_first"
+                                               else source_health.fallback_health),
                                lossless_capability=lossless_capability,
                                history=history,
-                               record=(None if event_log is None else
-                                       lambda event: (event_log.append(event), source_health.observe_event(event))
-                                       if source_health is not None else event_log.append(event)),
+                               record=record_download if event_log is not None or source_health is not None else None,
                                selection_ttl=settings.wecom.selection_ttl)
     return _Runtime(redis=redis, state=state, service=service, wecom=wecom,
                     plugin_client=plugin_client, transport=transport, registry=registry,

@@ -68,6 +68,12 @@ History uses standard-library SQLite at `download-history.sqlite3` beside the co
 
 A journal unavailable before a panel download starts refuses that request. If history writing fails after a file has already succeeded, the response keeps the successful artifact and explicitly warns that history could not be saved. WeCom journal failures are logged without changing Redis effect outcomes. All history APIs require the existing administrator session. Only bounded metadata and fixed error codes are stored; media paths are relative, and the journal is excluded from the media-serving route.
 
+### Channel statistics and selection
+
+Channel health and source management show separate search availability, source-attempt download success, and lossless-request fulfillment rates, each with its own sample count. A normal search answer, including an empty list, counts as available. Download outcomes are counted once per request/source/version/candidate attempt; retries may therefore contribute different candidates or sources to one task. Cancellations and identified local policy errors are shown separately and excluded from the download denominator. Quality fulfillment considers successful downloads requested as lossless: proven lossless fulfills the request, proven lossy is a downgrade, and ambiguous answers remain unknown outside the denominator. A capability probe does not count as a delivered file.
+
+These bounded statistics cover the current process and reset on service restart; persistent attempt evidence remains in download history. Download reliability affects source tie-breaking only after the minimum sample count is reached. Search traffic cannot improve the download rate or erase a recent download failure. Declared priority, measured lossless capability, bounded fallback, and `best_available` compatibility retain their existing roles. Both panel and WeCom searches feed the same channel statistics.
+
 ### Which Compose file should I use?
 
 The repository ships four manifests for four different situations. Each file's header states the same summary; pick with this table:
