@@ -16,6 +16,9 @@ jobs:
   publish:
     name: Build and publish images
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       version: ${{ steps.tag.outputs.value }}
       main: ${{ steps.main.outputs.digest }}
@@ -23,6 +26,19 @@ jobs:
     steps:
       - name: Check out release source
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install release checker dependency
+        run: python -m pip install 'PyYAML>=6.0.2,<7'
+      - name: Verify numbered release before publishing
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/release/verify_release.py preflight --tag "${{ github.ref_name }}" --require-ci --json
 
       - name: Resolve image tag
         id: tag
@@ -50,10 +66,15 @@ jobs:
         id: main
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ github.server_url }}/${{ github.repository }}.git#${{ github.sha }}
           file: docker/main/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.value }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/musicdl:${{ steps.tag.outputs.value }}
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/musicdl:latest
@@ -64,10 +85,15 @@ jobs:
         id: runner
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ github.server_url }}/${{ github.repository }}.git#${{ github.sha }}
           file: docker/plugin/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.value }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/musicdl-plugin-runner:${{ steps.tag.outputs.value }}
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/musicdl-plugin-runner:latest
@@ -93,6 +119,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       - name: Create or update the release for this tag
         shell: bash
         env:
@@ -104,7 +134,6 @@ jobs:
           version="${{ needs.publish.outputs.version }}"
           main_digest="${{ needs.publish.outputs.main }}"
           runner_digest="${{ needs.publish.outputs.runner }}"
-          namespace="${{ env.NAMESPACE }}"
           notes="docs/release-notes/${tag}.md"
 
           if [[ -z "${version}" || -z "${main_digest}" || -z "${runner_digest}" ]]; then
@@ -117,17 +146,10 @@ jobs:
             exit 1
           fi
           body="$(mktemp)"
-          cat "${notes}" > "${body}"
           source_commit="$(git rev-parse HEAD)"
-
-          {
-            printf '\n## Source / 源码\n\n'
-            printf 'Source commit: `%s`\n' "${source_commit}"
-            printf '\n## Docker images / Docker 镜像\n\n'
-            printf -- '- `%s/musicdl:%s` — `%s`\n' "${namespace}" "${version}" "${main_digest}"
-            printf -- '- `%s/musicdl-plugin-runner:%s` — `%s`\n' "${namespace}" "${version}" "${runner_digest}"
-          printf '\nBoth OCI image indexes were built for `linux/amd64` and `linux/arm64` by this workflow. / 此工作流为 `linux/amd64` 和 `linux/arm64` 构建了两个 OCI 镜像索引。\n'
-          } >> "${body}"
+          python scripts/release/verify_release.py body --tag "${tag}" \
+            --source-commit "${source_commit}" --main-digest "${main_digest}" \
+            --runner-digest "${runner_digest}" > "${body}"
 
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" \

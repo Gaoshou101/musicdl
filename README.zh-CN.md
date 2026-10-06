@@ -358,6 +358,10 @@ python -m pytest -q
 cd web
 npm ci --no-audit --no-fund
 npx tsc --noEmit
+npm run check:service-logs
+npm run check:search-probe
+npm run check:source-import
+npm run check:channel-metrics
 npm run build
 ```
 
@@ -379,6 +383,8 @@ python scripts/release/run_gates.py --self-test --dry-run
 ## 发布检查清单
 
 每次发布编号版本时，同步更新包/版本元数据、两份 README、GitHub Release，以及带相同版本标签的主服务和插件运行器 Docker 镜像。所有发布产物应来自同一源码提交并核实其来源；公告发布前确认 CI 已成功完成。
+
+完整步骤见[发布指南](./docs/RELEASE.md)。打标签前执行 `python scripts/release/verify_release.py preflight --json`；发布工作流完成后，在该标签的检出目录执行 `python scripts/release/verify_release.py published --tag v<版本> --json`。后者需要 `gh` 和 Docker Buildx，会核对 Release 正文、两个镜像摘要、平台、源码标签/provenance 和成功的 CI。退出码 0/1/2 分别表示 PASS/FAIL/NOT_RUN，缺少证据不会视为通过。
 
 ## Star 历史
 

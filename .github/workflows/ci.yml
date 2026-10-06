@@ -39,6 +39,8 @@ jobs:
           python -m pip install -e ".[dev]"
       - name: Test suite
         run: python -m pytest -q
+      - name: Release metadata consistency
+        run: python scripts/release/verify_release.py preflight --json
       - name: Release gates and tamper self-test
         # Every gate is reported; a FAIL always fails the build, while a gate
         # that genuinely cannot run here stays NOT_RUN with its reason.
@@ -76,6 +78,15 @@ jobs:
       - name: Service log cursor regression
         working-directory: web
         run: npm run check:service-logs
+      - name: Search probe regression
+        working-directory: web
+        run: npm run check:search-probe
+      - name: Source import regression
+        working-directory: web
+        run: npm run check:source-import
+      - name: Channel metrics regression
+        working-directory: web
+        run: npm run check:channel-metrics
       - name: Build the service the deployment file describes, console included
         # The production file, not the development one: it is what a host runs,
         # and it layers on nothing -- combining the two would merge their

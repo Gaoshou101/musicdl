@@ -359,6 +359,10 @@ Build the administration panel:
 cd web
 npm ci --no-audit --no-fund
 npx tsc --noEmit
+npm run check:service-logs
+npm run check:search-probe
+npm run check:source-import
+npm run check:channel-metrics
 npm run build
 ```
 
@@ -380,6 +384,8 @@ Some acceptance gates require real WeCom, Redis, Telegram, or Docker deployment 
 ## Release Checklist
 
 For each numbered release, synchronize package/version metadata, both README files, the GitHub Release, and matching version-tagged main and plugin-runner Docker images. Publish the release outputs from the same source commit and verify their provenance; confirm CI has completed successfully before announcing the release.
+
+Follow [the release guide](./docs/RELEASE.md). Run `python scripts/release/verify_release.py preflight --json` before tagging, then `python scripts/release/verify_release.py published --tag v<version> --json` from that tag's checkout after the publish workflow completes. The latter requires `gh` and Docker Buildx and verifies the Release body, both image digests, platforms, source labels/provenance, and successful CI. Exit codes 0/1/2 mean PASS/FAIL/NOT_RUN; unavailable evidence is never a pass.
 
 ## Star History
 
