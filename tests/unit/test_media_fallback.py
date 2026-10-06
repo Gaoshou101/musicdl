@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from musicdl.media import DownloadMetadata, MediaError, download_with_fallback
-from musicdl.media.fallback import replacement_candidates, replacement_channel_rows
+from musicdl.media.fallback import CONTENT_FAILURE_CODES, replacement_candidates, replacement_channel_rows
 from musicdl.media.models import ArtifactRecord
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
@@ -121,6 +121,76 @@ def test_content_failure_switches_channels_and_prefers_known_lossless_source(tmp
     assert [event.source_id for event in events if event.stage == "download" and event.status == "failed"] == [
         "primary"]
     assert outcome.download.requested_quality == "flac"
+
+
+def test_initial_download_failed_switches_to_a_successful_channel(tmp_path):
+    primary = candidate("primary")
+    backup = candidate("backup")
+    events = []
+
+    async def refresh(query, excluded):
+        assert excluded == frozenset({"primary"})
+        return result((backup,))
+
+    outcome = asyncio.run(download_with_fallback(
+        primary, {"primary": Source(fail=True), "backup": Source()}, tmp_path,
+        request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        refresh=refresh, record=events.append))
+
+    assert outcome.download is not None
+    assert outcome.download_source_id == "backup"
+    assert outcome.channel_switches == 1
+    assert any(event.stage == "channel_switch" for event in events)
+
+
+def test_download_failed_after_switch_continues_to_next_channel(tmp_path):
+    class Invalid(Source):
+        async def download(self, item, *, quality=None):
+            raise MediaError("media_response_invalid")
+
+    primary = candidate("primary")
+    failed = candidate("failed")
+    backup = candidate("backup")
+    events = []
+
+    async def refresh(query, excluded):
+        assert excluded == frozenset({"primary"})
+        return result((failed, backup))
+
+    outcome = asyncio.run(download_with_fallback(
+        primary, {"primary": Invalid(), "failed": Source(fail=True), "backup": Source()}, tmp_path,
+        request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        refresh=refresh, record=events.append))
+
+    assert outcome.download is not None
+    assert outcome.download_source_id == "backup"
+    assert outcome.channel_switches == 2
+    assert set(outcome.attempted_source_ids) == {"primary", "failed", "backup"}
+
+
+def test_download_failed_replacements_still_obey_switch_budget(tmp_path):
+    max_channel_switches = 2
+    primary = candidate("primary")
+    replacements = (candidate("failed-1"), candidate("failed-2"), candidate("not-attempted"))
+
+    async def refresh(query, excluded):
+        assert excluded == frozenset({"primary"})
+        return result(replacements)
+
+    outcome = asyncio.run(download_with_fallback(
+        primary,
+        {"primary": Source(fail=True), "failed-1": Source(fail=True),
+         "failed-2": Source(fail=True), "not-attempted": Source(fail=True)},
+        tmp_path, request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        max_channel_switches=max_channel_switches, refresh=refresh))
+
+    assert outcome.download is None
+    assert outcome.channel_switches == max_channel_switches
+    assert set(outcome.attempted_source_ids) == {"primary", "failed-1", "failed-2"}
+
+
+def test_download_failed_is_not_a_content_failure_code():
+    assert "download_failed" not in CONTENT_FAILURE_CODES
 
 
 def test_damaged_flac_is_refused_then_fallback_delivers_backup(tmp_path):

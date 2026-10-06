@@ -31,6 +31,13 @@ CONTENT_FAILURE_CODES = frozenset({
     "media_response_invalid", "signature_mismatch", "mime_mismatch",
     "extension_mismatch", "size_mismatch", "incomplete_audio",
 })
+# ``download_failed`` is raised when a channel's own resolver or transport
+# raised something unexpected.  That says this channel could not deliver
+# right now; it says nothing about whether the next channel can, so the
+# switch loop must not treat it as final.  The content codes are included
+# because a bad payload on one channel is likewise not the recording's
+# verdict.
+RECOVERABLE_CHANNEL_CODES = CONTENT_FAILURE_CODES | {"download_failed"}
 
 
 def _budget(value: float | None, *, default: float | None = None) -> float | None:
@@ -376,7 +383,7 @@ async def download_with_fallback(
             download_error = exc.code if exc.code in _DOWNLOAD_CODES else "download_failed"
 
     if (quality_policy == "lossless_first" and is_lossless(quality)
-            and download_error in CONTENT_FAILURE_CODES and switch_count < max_channel_switches):
+            and download_error in RECOVERABLE_CHANNEL_CODES and switch_count < max_channel_switches):
         content_refresh_attempted = quality_refreshed is None
         try:
             if quality_refreshed is not None:
@@ -454,7 +461,7 @@ async def download_with_fallback(
             except MediaError as exc:
                 download_error = exc.code if exc.code in _DOWNLOAD_CODES else "download_failed"
                 finish_attempt_failure(download_error)
-                if download_error not in CONTENT_FAILURE_CODES:
+                if download_error not in RECOVERABLE_CHANNEL_CODES:
                     break
             else:
                 return FallbackResult(download=downloaded, download_source_id=successful_source,
