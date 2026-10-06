@@ -24,6 +24,7 @@
 |---|---|
 | Multi-source search and download | Search installed sources from one interface and retry another channel when a source fails. |
 | Built-in administration panel | Manage sources, Telegram bots, runtime settings, health status, downloads, events, audits, and service logs in Simplified Chinese. |
+| Persistent download history | Reopen panel and WeCom download records after a new search, page refresh, or service restart, including source attempts, failures, timing, files, and requested/actual quality. |
 | Importable JavaScript sources | Analyze and import compatible LX Music source scripts without baking third-party scripts into the image. |
 | WeCom and Telegram integration | Use song names in WeCom conversations or register Telegram music bots as additional channels. |
 | Isolated plugin execution | JavaScript plugins run in a separate non-root container with a read-only filesystem, no Linux capabilities, and bounded resources. |
@@ -58,6 +59,14 @@
 ```
 
 The administration panel is built into the main image. Only the plugin runner remains a separate container because it executes imported code.
+
+### Download history
+
+Open **下载历史** in the panel to inspect running and completed downloads. Records start before the panel downloads a file. Download/validation and resolver spans carry measured elapsed time; other events show a timestamp and leave unknown duration empty. The existing synchronous download and bounded fallback behavior is retained: this history is not a new queue, automatic retry, or resume feature. Closing a page may leave the existing server request running; cancellation is recorded as interrupted. On application startup, unfinished records become `interrupted` with `service_restarted`, never a guessed success. WeCom records cover the media-download effect, not message delivery, and Redis still controls its existing replay and artifact recovery.
+
+History uses standard-library SQLite at `download-history.sqlite3` beside the configured admin state file (`MUSICDL_ADMIN__STATE_PATH`), or under the plugin app-data directory when that setting is absent. Existing Compose data mounts retain it in both full and Lite mode; no new service or volume is needed. Keep this file when upgrading or rolling back. The newest 1,000 terminal records and 200 events per record are retained; active records are never pruned and at most 128 can be tracked concurrently. Older downloaded media is not deleted when history expires. File links require the original media file to remain on disk.
+
+A journal unavailable before a panel download starts refuses that request. If history writing fails after a file has already succeeded, the response keeps the successful artifact and explicitly warns that history could not be saved. WeCom journal failures are logged without changing Redis effect outcomes. All history APIs require the existing administrator session. Only bounded metadata and fixed error codes are stored; media paths are relative, and the journal is excluded from the media-serving route.
 
 ### Which Compose file should I use?
 

@@ -27,6 +27,7 @@ from musicdl.media.fallback import (
 from musicdl.media.language import resolve_language
 from musicdl.media.probe import ProbeCache, probe_candidates
 from musicdl.media.models import DownloadEvent, MediaError, emit_event
+from musicdl.media.history import DownloadHistoryStore, DownloadJournal, HistoryCapacity, HistoryUnavailable
 from musicdl.admin.source_fetch import (
     SOURCE_FETCH_CONCURRENCY,
     SOURCE_FETCH_DEADLINE,
@@ -190,6 +191,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                         audit: EventLogStore | None = None,
                         config: ConfigManager | None = None,
                         source_health: SourceHealthStore | None = None,
+                        history: DownloadHistoryStore | None = None,
                         logs: LogBuffer | None = None,
                         plugins: Callable[[], Any] | None = None,
                         runtime: Callable[[], Any] | None = None,
@@ -203,6 +205,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     bots, audit = bots or BotManager(), audit or EventLogStore()
     config = config or ConfigManager(AppSettings())
     source_health = source_health or SourceHealthStore()
+    history = history or DownloadHistoryStore()
     logs = logs or LogBuffer()
     if verify_duration not in {"lenient", "strict"}:
         raise ValueError("invalid_verify_duration")
@@ -733,9 +736,68 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         service = active_runtime()
         return await probe_candidates(candidates, getattr(service, "resolvers", {}) or {}, cache=probe_cache)
 
+    @router.get("/downloads")
+    async def download_history(request: Request, offset: int = 0, limit: int = 20):
+        require(request)
+        try:
+            return history.list(offset=offset, limit=limit)
+        except ValueError:
+            raise HTTPException(422, "invalid history pagination") from None
+        except HistoryUnavailable:
+            raise HTTPException(503, "history_unavailable") from None
+
+    @router.get("/downloads/{task_id}")
+    async def download_history_detail(task_id: str, request: Request):
+        require(request)
+        try:
+            result = history.get(task_id)
+        except HistoryUnavailable:
+            raise HTTPException(503, "history_unavailable") from None
+        if result is None:
+            raise HTTPException(404, "download not found")
+        return result
+
     @router.post("/download")
     @uses_runtime
     async def download(body: dict, request: Request):
+        mutate(request)
+        active_runtime()
+        if media_root is None:
+            raise HTTPException(503, "media root is unavailable")
+        try:
+            candidate = Candidate.model_validate(body.get("candidate"))
+        except ValidationError:
+            raise HTTPException(422, "invalid candidate") from None
+        handed = body.get("query")
+        query = handed.strip() if isinstance(handed, str) and handed.strip() else candidate.title
+        if len(query) > 500:
+            raise HTTPException(422, "query too long")
+        request_id = secrets.token_hex(16)
+        try:
+            journal = DownloadJournal(history, request_id, candidate, origin="panel", query=query,
+                                      quality=tier_for(candidate))
+        except HistoryCapacity:
+            raise HTTPException(503, "history_capacity") from None
+        except HistoryUnavailable:
+            raise HTTPException(503, "history_unavailable") from None
+        with journal.activate():
+            try:
+                result = await perform_download(body, request, request_id)
+            except asyncio.CancelledError:
+                journal.finish("interrupted", error_code="download_cancelled")
+                raise
+            except HTTPException as exc:
+                journal.finish("failed", error_code="source_unavailable"
+                               if exc.detail == "source cannot resolve media" else exc.detail)
+                raise
+            except Exception:
+                journal.finish("failed", error_code="download_failed")
+                raise
+            if journal.finish("succeeded", result=result):
+                result["history_warning"] = "history_unavailable"
+            return result
+
+    async def perform_download(body: dict, request: Request, request_id: str):
         """Download one candidate the search just listed, into the media root.
 
         The body carries the candidate itself rather than an id the server has
@@ -761,7 +823,6 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         language = await resolve_language(candidate, getattr(service, "language_advisor", None))
         resolvers = getattr(service, "resolvers", None) or {}
         refresh = getattr(service, "refresh", None)
-        request_id = secrets.token_hex(16)
         # The operator searched for something; the retry has to search for the
         # same thing rather than for whatever the candidate happens to be
         # titled on the channel that failed.
@@ -911,7 +972,13 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         require(request)
         if media_root is None:
             raise HTTPException(503, "media root is unavailable")
-        return FileResponse(_media_target(media_root, relative_path))
+        target = _media_target(media_root, relative_path)
+        if history.path is not None:
+            journal_path = history.path.resolve(strict=False)
+            if target == journal_path or (target.parent == journal_path.parent and
+                    target.name in {journal_path.name + suffix for suffix in ("-journal", "-wal", "-shm")}):
+                raise HTTPException(404, "media not found")
+        return FileResponse(target)
 
     @router.get("/bots")
     async def list_bots(request: Request):

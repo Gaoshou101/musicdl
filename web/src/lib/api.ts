@@ -156,6 +156,55 @@ export type DownloadReport = {
   /** The tier the download asked for, and the tier the bytes turned out to be. */
   requested_quality?: string | null
   actual_quality?: string | null
+  history_warning?: string | null
+}
+
+export type DownloadHistoryStatus = 'running' | 'succeeded' | 'failed' | 'interrupted'
+
+export type DownloadHistoryResult = {
+  [Key in keyof DownloadReport]: DownloadReport[Key] | null
+}
+
+export type DownloadHistorySummary = {
+  id: string
+  origin: 'panel' | 'wecom'
+  title: string
+  artist: string
+  query: string | null
+  source_id: string
+  status: DownloadHistoryStatus
+  created_at: string
+  updated_at: string
+  finished_at: string | null
+  elapsed_ms: number | null
+  error_code: string | null
+  requested_quality: string | null
+  actual_quality: string | null
+  result: DownloadHistoryResult | null
+  history_warning?: string | null
+}
+
+export type DownloadHistoryEvent = DownloadEvent & {
+  created_at: string
+  elapsed_ms: number | null
+  requested_quality?: string | null
+  actual_quality?: string | null
+  from_source_id?: string | null
+  to_source_id?: string | null
+  reason?: string | null
+  skipped_sources?: Record<string, string> | null
+}
+
+export type DownloadHistoryDetail = DownloadHistorySummary & {
+  events: DownloadHistoryEvent[]
+  events_truncated?: boolean
+}
+
+export type DownloadHistoryPage = {
+  items: DownloadHistorySummary[]
+  total: number
+  offset: number
+  limit: number
 }
 
 export type CheckState = 'ok' | 'failed' | 'unavailable' | 'not_required'
@@ -433,6 +482,15 @@ const DETAIL_TEXT: Record<string, string> = {
   media_redirect_denied: '跳转后的地址被出口策略拒绝',
   media_response_invalid: '音频服务器返回了无法识别的响应',
   source_unavailable: '音源当前不可用',
+  history_unavailable: '下载历史暂时无法保存，请检查应用数据目录',
+  'download not found': '这条下载记录不存在，或已超过历史保留范围',
+  service_restarted: '服务重启，未能确认这次下载的最终结果',
+  download_interrupted: '下载执行已中断，最终结果未确认',
+  download_cancelled: '下载执行已取消',
+  download_uncertain: '下载结果未确认，重新下载前请先检查媒体目录',
+  download_deferred: '下载暂未执行，请稍后查看任务结果',
+  history_capacity: '同时进行的下载已达上限，请稍后再试',
+  'invalid history pagination': '下载历史分页参数无效',
 }
 
 const DETAIL_PREFIX_TEXT: [string, string][] = [
@@ -459,6 +517,11 @@ export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message
   if (error instanceof Error && error.message) return error.message
   return '发生未知错误'
+}
+
+/** A saved media error uses the same wording as a live download response. */
+export function downloadErrorMessage(code: string): string {
+  return describeDetail(code) ?? '下载结果未确认'
 }
 
 /** The backend's one error envelope is `{"detail": ...}`; unpack it. */
@@ -779,6 +842,14 @@ export function downloadCandidate(candidate: Candidate, query?: string): Promise
     method: 'POST',
     body: query ? { candidate, query } : { candidate },
   })
+}
+
+export function listDownloadHistory(offset = 0, limit = 20, signal?: AbortSignal): Promise<DownloadHistoryPage> {
+  return request<DownloadHistoryPage>('/downloads', { query: { offset, limit }, signal })
+}
+
+export function readDownloadHistory(id: string, signal?: AbortSignal): Promise<DownloadHistoryDetail> {
+  return request<DownloadHistoryDetail>(`/downloads/${encodeURIComponent(id)}`, { signal })
 }
 
 export function readHealth(signal?: AbortSignal): Promise<HealthReport> {

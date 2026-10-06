@@ -290,6 +290,8 @@ class MediaError(ValueError):
 
 
 def emit_event(record: Callable[[DownloadEvent], None] | None, event: DownloadEvent) -> None:
+    from .history import record_history_event
+    record_history_event(event)
     if record is None:
         return
     try:

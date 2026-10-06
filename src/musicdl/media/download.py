@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from musicdl.contracts.plugin import has_expired
 from musicdl.sources.models import Candidate
 from musicdl.sources.quality import served_quality
+from .history import trace_download_stage
 
 from .models import (
     MAX_MEDIA_BYTES,
@@ -416,6 +417,7 @@ async def _resume_reservation(
     raise MediaError("artifact_uncertain")
 
 
+@trace_download_stage("resolve")
 async def source_download(source: DownloadSource, candidate: Candidate, *,
                           quality: str | None = None) -> DownloadMetadata:
     """Omit the optional keyword for old resolvers without masking their errors."""
@@ -427,6 +429,7 @@ async def source_download(source: DownloadSource, candidate: Candidate, *,
     return await source.download(candidate)
 
 
+@trace_download_stage("transfer")
 async def download_candidate(
     candidate: Candidate,
     source: DownloadSource,

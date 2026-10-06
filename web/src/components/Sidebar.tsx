@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation'
 import { useEffect } from 'react'
 import {
   House,
+  ClockCounterClockwise,
   MusicNotes,
   Robot,
   Pulse,
@@ -19,6 +20,7 @@ import { THEMES, themeSwatch, useThemeStore } from '@/lib/store'
 
 const navItems = [
   { href: '/dashboard', icon: House, label: '仪表板' },
+  { href: '/dashboard/downloads', icon: ClockCounterClockwise, label: '下载历史' },
   { href: '/dashboard/sources', icon: MusicNotes, label: '音源管理' },
   { href: '/dashboard/bots', icon: Robot, label: 'Bot 管理' },
   { href: '/dashboard/config', icon: Sliders, label: '运行配置' },
@@ -61,6 +63,8 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              aria-label={item.label}
+              title={item.label}
               className={`flex items-center gap-3 px-4 py-3 max-sm:justify-center max-sm:px-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-950 ${
                 isActive
                   ? 'bg-accent-500/15 text-accent-300'

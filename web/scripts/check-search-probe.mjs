@@ -54,6 +54,7 @@ vm.runInNewContext(code, {
   exports, AbortController, URLSearchParams, window: { location: { search: '' } },
   require(name) {
     if (name === 'react') return hooks
+    if (name === 'next/link') return { default: 'a' }
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }
     if (name === '@phosphor-icons/react') return {}
     if (name === '@/lib/api') return api
