@@ -100,7 +100,7 @@ The digests in the release body must equal the ones the registry reports, and th
 release body's `Source commit` must equal `git rev-parse v<version>^{commit}`.
 The read-only checker requires authenticated `gh` and `docker buildx`. It checks
 the exact committed release body, both versioned index digests, amd64/arm64 image
-configs and labels, each platform's SLSA v0.2 primary Git input and source material,
+configs and labels, each platform's SLSA v0.2 or v1 primary Git input and source dependency,
 attestation reference annotations, and the latest matching completed/successful CI
 and tag-publish runs. Reads after resolving the version tag are pinned to its digest.
 Buildx exposes predicates, not raw in-toto subjects or signatures; this is source
@@ -109,6 +109,15 @@ labels or attestations will fail; do not rebuild historical images to make them 
 Tagged checks also require version/recommendation metadata to match HEAD, including
 staged changes; local edits cannot mask drift in the release commit. Ordinary no-tag
 preflight may run while preparing an uncommitted version bump.
+
+For already published tags, a newer checker can inspect a separate clean checkout:
+`python scripts/release/verify_release.py published --tag v<version> --source-root <tag-checkout> --json`.
+All metadata and Git checks use that directory. Keep a record of both the checker
+commit and the release source commit; a tooling correction does not require moving
+the release tag or rebuilding its images. SLSA v1 uses the explicit primary
+`buildDefinition.externalParameters.configSource` and `resolvedDependencies`
+fields; v0.2 uses `invocation.configSource` and `materials`. A malformed v1 predicate
+cannot fall back to older fields to pass.
 
 Every mode returns `PASS`, `FAIL`, or `NOT_RUN` with individual evidence in JSON.
 Exit codes are 0 (all checks pass), 1 (a definite mismatch), and 2 (only unavailable
