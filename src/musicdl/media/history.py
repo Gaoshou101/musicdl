@@ -24,7 +24,8 @@ _LOG = logging.getLogger("musicdl.history")
 _ACTIVE: ContextVar[DownloadJournal | None] = ContextVar("download_history", default=None)
 _SPANS: ContextVar[tuple] = ContextVar("download_history_spans", default=())
 _EXTRA_CODES = frozenset({"download_cancelled", "service_restarted", "download_uncertain",
-    "download_deferred", "source_unavailable", "refresh_failed", "health_failed",
+    "download_deferred", "download_admission_timeout", "download_admission_blocked",
+    "source_unavailable", "refresh_failed", "health_failed",
     "refresh_included_failed_source", "cleanup_failed", "resolve_failed", "history_unavailable", "duration_unverified"})
 _STAGES = frozenset({"download", "resolve", "transfer", "refresh", "health", "duration",
                      "cleanup", "channel_switch", "quality_downgraded", "task"})
@@ -307,6 +308,11 @@ def record_history_event(event):
     journal = _ACTIVE.get()
     if journal is not None:
         journal.record(event)
+
+
+def current_download_journal():
+    """Return the active request journal for a local admission outcome."""
+    return _ACTIVE.get()
 
 
 def trace_download_stage(stage):

@@ -118,7 +118,6 @@ def test_lite_mode_hot_batch_is_reported_as_http_422_without_persisting(tmp_path
     settings.admin.state_path = str(state_path)
     app = create_app(settings)
     app.state.admin.auth.change_credentials("admin", "operator", "correct-horse-battery")
-    original = state_path.read_bytes()
 
     async def scenario():
         async with httpx.AsyncClient(
@@ -128,15 +127,17 @@ def test_lite_mode_hot_batch_is_reported_as_http_422_without_persisting(tmp_path
                 "/admin/login",
                 json={"username": "operator", "password": "correct-horse-battery"},
             )
+            assert login.status_code == 200
+            original = state_path.read_bytes()
             token = login.json()["csrf_token"]
             response = await client.patch(
                 "/admin/config",
                 json={"values": {"ai.model": "must-not-apply", "wecom.enabled": True}},
                 headers={"x-csrf-token": token},
             )
-            return login, response
+            return login, response, original
 
-    login, response = run(scenario())
+    login, response, original = run(scenario())
 
     assert login.status_code == 200
     assert response.status_code == 422

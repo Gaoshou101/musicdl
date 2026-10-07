@@ -69,6 +69,7 @@ def login_page(*, error: str = "") -> str:
     body = (f'{alert}<form method="post" action="/admin/login-form">'
             '<label>用户名<input name="username" autocomplete="username" required autofocus></label>'
             '<label>密码<input name="password" type="password" autocomplete="current-password" required></label>'
+            '<label class="remember"><input name="remember" type="checkbox" value="1">保持登录 30 天</label>'
             '<button type="submit">登录</button></form>'
             '<p class="hint">musicdl 管理后台 · 仅供个人使用</p>')
     return page(title="musicdl 管理后台 · 登录", body=f'<h1>musicdl 管理后台</h1>'

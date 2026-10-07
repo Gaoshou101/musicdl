@@ -87,6 +87,9 @@ jobs:
       - name: Channel metrics regression
         working-directory: web
         run: npm run check:channel-metrics
+      - name: Source diagnostic polling regression
+        working-directory: web
+        run: npm run check:diagnostic-polling
       - name: Build the service the deployment file describes, console included
         # The production file, not the development one: it is what a host runs,
         # and it layers on nothing -- combining the two would merge their

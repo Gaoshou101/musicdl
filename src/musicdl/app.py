@@ -28,9 +28,11 @@ from .ai.service import advise_language, advise_ranking
 from .admin import (DEFAULT_BOTS, AdminAuth, AdminStateStore, AuditLogStore, BotManager,
                     ConfigManager, EventLogStore, HealthAggregator, LogBuffer, RateLimiter,
                     SourceHealthStore, SourceManager)
+from .admin.diagnostics import DiagnosticResultStore, SourceDiagnosticManager
 from .admin.csrf import CSRFMiddleware
-from .admin.portal import create_admin_router
+from .admin.portal import PanelDownloadCoordinator, create_admin_router
 from .media import classify_language
+from .media.admission import DownloadAdmission
 from .media.history import DownloadHistoryStore, HistoryUnavailable
 from .telegram.connector import TelegramConnector, telethon_client_factory
 from .telegram.models import TelegramStatus
@@ -64,6 +66,13 @@ class _AdminState:
     def __init__(self, settings: AppSettings, app: FastAPI, history: DownloadHistoryStore) -> None:
         self.settings = settings
         self.store = AdminStateStore(settings.admin.state_path)
+        self.download_admission = app.state.download_admission
+        self.panel_downloads = PanelDownloadCoordinator(self.download_admission)
+        diagnostic_path = (Path(settings.admin.state_path).with_name("source-diagnostics.json")
+                           if settings.admin.state_path
+                           else Path(settings.plugin.app_data_root) / "source-diagnostics.json")
+        self.diagnostics = SourceDiagnosticManager(DiagnosticResultStore(diagnostic_path),
+                                                   self.download_admission)
         self.auth = AdminAuth(on_change=self.persist)
         self.sources = SourceManager(on_change=self.persist)
         self.bots = BotManager(on_change=self.persist)
@@ -92,6 +101,9 @@ class _AdminState:
                                                config=self.config,
                                                source_health=self.source_health,
                                                history=self.history,
+                                               diagnostics=self.diagnostics,
+                                               download_admission=self.download_admission,
+                                               panel_downloads=self.panel_downloads,
                                                logs=self.logs,
                                                plugins=self.plugin_store,
                                                runtime=lambda: getattr(app.state, "runtime", None),
@@ -134,12 +146,14 @@ class _AdminState:
             return
         self.config.load(payload)
         self.auth.restore(payload.get("credentials"))
+        self.auth.restore_sessions(payload.get("sessions"))
         self.sources.restore(payload.get("sources"))
         self.bots.restore(payload.get("bots"))
 
     def persist(self) -> None:
         self.store.save(credentials=self.auth.snapshot(), sources=self.sources.snapshot(),
-                        bots=self.bots.snapshot(), settings=self.config.snapshot())
+                        bots=self.bots.snapshot(), settings=self.config.snapshot(),
+                        sessions=self.auth.sessions_snapshot())
 
     def publish_sources(self, registry: Any) -> None:
         """Expose the sources the runtime actually assembled.
@@ -361,7 +375,7 @@ def _search_adapter(stored, source: PluginSource, platform_search: PlatformSearc
 
 def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                    telegram_client_factory=None, preference=None, source_health=None, event_log=None,
-                   history=None):
+                   history=None, download_admission: DownloadAdmission | None = None):
     """Build one runtime.
 
     ``bots`` and ``sources`` are the definitions the portal owns.  A stored
@@ -536,6 +550,7 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                                lossless_capability=lossless_capability,
                                history=history,
                                record=record_download if event_log is not None or source_health is not None else None,
+                               download_admission=download_admission,
                                selection_ttl=settings.wecom.selection_ttl)
     return _Runtime(redis=redis, state=state, service=service, wecom=wecom,
                     plugin_client=plugin_client, transport=transport, registry=registry,
@@ -573,6 +588,10 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
     history_path = (Path(settings.admin.state_path).with_name("download-history.sqlite3")
                     if settings.admin.state_path else Path(settings.plugin.app_data_root) / "download-history.sqlite3")
     history = DownloadHistoryStore(history_path)
+    app_download_admission = DownloadAdmission()
+    # The portal diagnostics and all download workers share one budget across
+    # runtime reloads. Keeping the manager on app.state also makes the process
+    # boundary explicit for injected runtime factories and tests.
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -590,6 +609,9 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
         # half-stopped one.
         reload_lock = asyncio.Lock()
         live: dict[str, Any] = {"runtime": None, "tasks": [], "retired": set(), "shutting_down": False}
+        if admin is not None:
+            app.state.source_diagnostics = admin.diagnostics
+            app.state.panel_downloads = admin.panel_downloads
         if admin is not None:
             # Installed before anything else the lifespan does, so a start-up
             # that goes wrong is itself readable from the panel afterwards.
@@ -625,7 +647,8 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                                                sources=source_definitions,
                                                preference=preference, source_health=source_health,
                                                event_log=None if admin is None else admin.events,
-                                               history=history))
+                                               history=history,
+                                               download_admission=app.state.download_admission))
             built = factory(settings)
             if inspect.isawaitable(built):
                 built = await built
@@ -718,7 +741,13 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                     return {"status": "failed", "error": str(error)}
                 try:
                     await stop_workers(tasks)
+                    if admin is not None and previous is not None:
+                        await admin.panel_downloads.cancel_runtime(previous)
+                        await admin.diagnostics.cancel_runtime(previous)
                 except BaseException:
+                    if admin is not None and previous is not None:
+                        admin.panel_downloads.release_runtime(previous)
+                        admin.diagnostics.release_runtime(previous)
                     retire(built)
                     adopt(previous, start_workers(previous))
                     raise
@@ -731,6 +760,9 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 if previous is not None:
                     try:
                         await asyncio.shield(retire(previous))
+                        if admin is not None:
+                            admin.panel_downloads.release_runtime(previous)
+                            admin.diagnostics.release_runtime(previous)
                     except Exception:
                         cleanup_failed = True
                         logger.warning("previous runtime cleanup failed after replacement")
@@ -785,6 +817,9 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                 async with reload_lock:
                     await stop_workers(live["tasks"])
                     live["tasks"] = []
+                    if admin is not None:
+                        await admin.panel_downloads.close()
+                        await admin.diagnostics.close()
                     if live["runtime"] is not None:
                         await _maybe_close(live["runtime"])
             finally:
@@ -799,6 +834,7 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
                     history.close()
 
     app = FastAPI(title="musicdl", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app.state.download_admission = app_download_admission
     admin = _AdminState(settings, app, history) if settings.admin.enabled else None
     app.state.download_history = history
     app.state.admin = admin

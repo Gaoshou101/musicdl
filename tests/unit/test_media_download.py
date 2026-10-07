@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 
 from musicdl.media import DownloadEvent, DownloadMetadata, MediaError, download_candidate
-from musicdl.media.models import _CloseOnce
+from musicdl.media.download import _MEDIA_SUBMISSIONS, _MEDIA_WORKERS, _offload, _offload_duration
+from musicdl.media.models import ArtifactRecord, _CloseOnce
 
 ID3 = b"ID3\x04\x00\x00\x00\x00\x00\x00"
 M4A = b"\x00\x00\x00\x14ftypM4A \x00\x00\x00\x00M4A "
@@ -180,6 +181,188 @@ def test_download_cancellation_cleans_temp(tmp_path):
         with pytest.raises(asyncio.CancelledError): await task
     asyncio.run(run())
     assert not list(tmp_path.glob(".musicdl-*.part"))
+
+
+def test_offload_submission_queue_is_bounded_and_cancelled_waiters_are_removed(monkeypatch):
+    started = 0
+    started_lock = threading.Lock()
+    finish = threading.Event()
+    submit_count = 0
+    original_submit = _MEDIA_WORKERS.submit
+
+    def counted_submit(*args, **kwargs):
+        nonlocal submit_count
+        submit_count += 1
+        return original_submit(*args, **kwargs)
+
+    def blocked(value):
+        nonlocal started
+        with started_lock:
+            started += 1
+        if not finish.wait(5):
+            raise AssertionError("test did not release offloaded work")
+        return value
+
+    monkeypatch.setattr(_MEDIA_WORKERS, "submit", counted_submit)
+
+    async def run():
+        tasks = [asyncio.create_task(_offload(blocked, index)) for index in range(8)]
+        try:
+            for _ in range(1000):
+                inflight, waiting = _MEDIA_SUBMISSIONS.snapshot()
+                with started_lock:
+                    running = started
+                if inflight == 4 and waiting == 4 and running == 2:
+                    break
+                await asyncio.sleep(0.001)
+            assert _MEDIA_SUBMISSIONS.snapshot() == (4, 4)
+            assert submit_count == 4
+            tasks[-1].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tasks[-1]
+            assert _MEDIA_SUBMISSIONS.snapshot() == (4, 3)
+        finally:
+            finish.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert await asyncio.gather(*tasks[:-1]) == list(range(7))
+        assert _MEDIA_SUBMISSIONS.snapshot() == (0, 0)
+
+    asyncio.run(run())
+
+
+def test_offload_cancellation_drains_fsync_before_closing_or_removing_staging(tmp_path, monkeypatch):
+    started = threading.Event()
+    finish = threading.Event()
+    fsync_fd = []
+
+    def slow_fsync(fd):
+        fsync_fd.append(fd)
+        started.set()
+        if not finish.wait(5):
+            raise AssertionError("test did not release fsync")
+        os.fstat(fd)
+
+    monkeypatch.setattr(os, "fsync", slow_fsync)
+
+    async def run():
+        task = asyncio.create_task(download_candidate(
+            candidate(), Source(DownloadMetadata(chunks(ID3), extension="mp3")),
+            tmp_path, request_id="cancel-fsync",
+        ))
+        try:
+            for _ in range(1000):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.001)
+            assert started.is_set()
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # Repeated cancellation must not abandon the running thread.
+            await asyncio.sleep(0)
+            assert not task.done()
+            assert len(fsync_fd) == 1
+            os.fstat(fsync_fd[0])
+            assert len(list(tmp_path.glob(".musicdl-*.part"))) == 1
+        finally:
+            finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not list(tmp_path.glob(".musicdl-*.part"))
+        assert not list(tmp_path.rglob("*.mp3"))
+
+    asyncio.run(run())
+
+
+def test_reserved_publish_cancellation_finishes_fenced_transition_before_staging_cleanup(tmp_path, monkeypatch):
+    from musicdl.media.download import _publish_reserved
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    target_relative = Path("category") / "Song.mp3"
+    staging_relative = Path(".musicdl-staging") / "Song.part"
+    target = tmp_path / target_relative
+    staging = tmp_path / staging_relative
+    staging.parent.mkdir(parents=True)
+    staging.write_bytes(ID3)
+    monkeypatch.setattr("musicdl.media.download.os.link", lambda source, destination: Path(destination).write_bytes(Path(source).read_bytes()))
+
+    class ArtifactStore:
+        async def claim_artifact_publish(self, *args, **kwargs):
+            return None
+
+        async def mark_artifact_published(self, *args, **kwargs):
+            started.set()
+            await release.wait()
+
+    reservation = ArtifactRecord(
+        job_id="job", candidate_id="item", temporary_relative_path=staging_relative.as_posix(),
+        target_relative_path=target_relative.as_posix(), allocation_slot=1, extension=".mp3",
+        media_type="audio/mpeg", owner="owner", fence=1, state="publishing",
+    )
+
+    async def run():
+        task = asyncio.create_task(_publish_reserved(
+            staging, target, reservation, ArtifactStore(), owner="owner", fence=1, ttl=60,
+        ))
+        try:
+            await started.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            assert target.read_bytes() == ID3
+            assert staging.exists()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert target.read_bytes() == ID3
+        assert staging.exists()  # The caller may now safely clean the staging path.
+
+    asyncio.run(run())
+
+
+def test_duration_event_is_replayed_on_loop_after_offload_cancellation(monkeypatch, tmp_path):
+    from musicdl.media.download import _emit_media_event
+
+    started = threading.Event()
+    finish = threading.Event()
+    events = []
+    event = DownloadEvent("request", "item", "source", "v1",
+                          "duration", "unverified", error_code="duration_unverified")
+    loop_thread = threading.get_ident()
+
+    def measure(*args, **kwargs):
+        _emit_media_event(args[4], event)
+        started.set()
+        if not finish.wait(5):
+            raise AssertionError("test did not release duration check")
+        return None
+
+    monkeypatch.setattr("musicdl.media.download._verified_duration", measure)
+
+    async def run():
+        task = asyncio.create_task(_offload_duration(candidate(), tmp_path / "media.mp3",
+                                                    "lenient", "request", events.append))
+        try:
+            for _ in range(1000):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.001)
+            assert started.is_set() and events == []
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done() and events == []
+        finally:
+            finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert events == [event]
+        assert threading.get_ident() == loop_thread
+
+    asyncio.run(run())
 
 
 def test_candidate_size_is_not_authoritative(tmp_path):
