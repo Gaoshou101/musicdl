@@ -138,7 +138,7 @@ jobs:
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3999/admin/sources)" = "401" || fail
           echo "one container answered /healthz, served the console, and kept /admin behind a session"
 
-  # The published 1.1.0 images support lite. Build both services from this
+  # The published 1.1.1 images support lite. Build both services from this
   # checkout to test this commit's manifest and lite support without relying
   # on published images or a moving latest tag.
   lite-mode-source-image:
@@ -314,10 +314,10 @@ jobs:
           }
           trap cleanup EXIT
 
-          # The candidate 1.1.0 images do not exist until the release tag is
+          # The candidate 1.1.1 images do not exist until the release tag is
           # published. Smoke the last published pair before that tag is pushed.
-          # After publication, verify the manifest's 1.1.0 default separately.
-          export MUSICDL_IMAGE_TAG=1.0.9
+          # After publication, verify the manifest's 1.1.1 default separately.
+          export MUSICDL_IMAGE_TAG=1.1.0
           compose pull || fail
           compose up --detach --wait --wait-timeout 120 || fail
 
