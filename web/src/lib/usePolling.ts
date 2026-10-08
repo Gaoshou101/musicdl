@@ -7,6 +7,7 @@ export function usePolling(
   callback: (signal: AbortSignal) => Promise<void>,
   intervalMs: number,
   enabled = true,
+  runImmediately = true,
 ) {
   const refreshRef = useRef<(restart?: boolean) => Promise<void>>(async () => {})
   const refresh = useCallback((restart = false) => refreshRef.current(restart), [])
@@ -50,7 +51,10 @@ export function usePolling(
       else if (enabled) void run(true).catch(() => {})
     }
     refreshRef.current = run
-    if (enabled && !document.hidden) void run().catch(() => {})
+    if (enabled && !document.hidden) {
+      if (runImmediately) void run().catch(() => {})
+      else schedule()
+    }
     document.addEventListener('visibilitychange', visibilityChanged)
     return () => {
       stopped = true
@@ -59,7 +63,7 @@ export function usePolling(
       refreshRef.current = async () => {}
       document.removeEventListener('visibilitychange', visibilityChanged)
     }
-  }, [callback, intervalMs, enabled])
+  }, [callback, intervalMs, enabled, runImmediately])
 
   return refresh
 }

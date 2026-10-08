@@ -16,6 +16,11 @@ def metrics(store, source="primary"):
     return next(row["metrics"] for row in store.snapshot([{"id": source}])["sources"] if row["id"] == source)
 
 
+def recent_requests(store, source="primary"):
+    return next(row["recent_requests"] for row in store.snapshot([{"id": source}])["sources"]
+                if row["id"] == source)
+
+
 def test_search_traffic_cannot_improve_download_reliability_or_displace_its_window():
     store = SourceHealthStore()
     for i in range(5):
@@ -169,3 +174,58 @@ def test_new_catalogue_observations_do_not_change_legacy_preference_inputs():
     assert metrics(store)["search"]["samples"] == 20
     assert store.preference("primary") == legacy_score
     assert store.fallback_health("primary") is False
+
+
+def test_recent_requests_are_empty_until_observed_and_search_outcomes_keep_order_and_cap():
+    store = SourceHealthStore()
+    assert recent_requests(store) == []
+
+    statuses = ["ok", "timeout", "invalid", "unrecognized_status"] * 3
+    for status in statuses:
+        store.observe_catalogue("primary", status, count=0, source_version="1")
+
+    requests = recent_requests(store)
+    assert len(requests) == 10
+    assert [item["kind"] for item in requests] == ["search"] * 10
+    assert [item["status"] for item in requests] == [
+        "failure", "unknown", "success", "failure", "failure",
+        "unknown", "success", "failure", "failure", "unknown",
+    ]
+    assert all(isinstance(item["timestamp"], (int, float)) for item in requests)
+    assert [item["timestamp"] for item in requests] == sorted(item["timestamp"] for item in requests)
+    # The visible history has its own cap and does not change metric windows.
+    assert metrics(store)["search"]["samples"] == 12
+
+
+def test_recent_download_replacements_deduplicate_and_exclusions_are_distinct():
+    store = SourceHealthStore()
+    store.observe_event(terminal("same", status="success"))
+    store.observe_event(terminal("same", status="failed", error="media_timeout"))
+    requests = recent_requests(store)
+    assert len(requests) == 1
+    assert {key: value for key, value in requests[0].items() if key != "timestamp"} == {
+        "kind": "download", "status": "failure",
+    }
+    assert metrics(store)["download"]["failures"] == 1
+
+    store.observe_event(terminal("same", status="failed", error="path_escape"))
+    store.observe_event(terminal("cancelled", status="failed", error="download_cancelled"))
+    requests = recent_requests(store)
+    assert [item["status"] for item in requests] == ["excluded", "excluded"]
+    assert metrics(store)["download"] == {
+        "samples": 0, "successes": 0, "failures": 0, "excluded": 2, "rate": None,
+    }
+
+
+def test_recent_history_resets_for_a_new_source_version_and_ignores_retired_events():
+    store = SourceHealthStore()
+    store.bind_source_version("primary", "1")
+    store.observe_search("primary", "ok", source_version="1")
+    store.observe_event(terminal("old", version="1"))
+    store.bind_source_version("primary", "2")
+    store.observe_search("primary", "timeout", source_version="1")
+    store.observe_event(terminal("late", version="1"))
+    assert recent_requests(store) == []
+
+    store.observe_search("primary", "ok", source_version="2")
+    assert [item["status"] for item in recent_requests(store)] == ["success"]

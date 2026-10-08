@@ -1,6 +1,7 @@
 import asyncio, json, time, pytest
 from types import SimpleNamespace
 from test_wecom_state import ID3, ScriptRedis, Source, playable_metadata
+from musicdl.media.admission import AdmissionQueueFull, DownloadAdmission
 from musicdl.media.models import DownloadEvent, DownloadMetadata, FallbackResult, DownloadResult
 from musicdl.sources.models import Candidate
 from musicdl.sources.search import SearchResult
@@ -436,6 +437,46 @@ def test_job_claims_the_download_effect_and_reserves_before_the_source_call(monk
     record=effect(st,"1-0","download")
     assert (seen["owner"],seen["fence"])==(record["owner"],int(record["fence"])) and record["status"]=="done"
 
+
+def test_download_admission_defers_before_claiming_the_download_effect():
+    st = State()
+    admission = DownloadAdmission(active_limit=1, pending_limit=0,
+                                  per_source_limit=1, per_user_limit=1)
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=st,
+                       refresh=lambda *args: None, download_admission=admission)
+
+    async def run():
+        async with admission.acquire(source_id="src", user_id="u"):
+            with pytest.raises(JobDeferred, match="download capacity"):
+                await worker.handle_job(job_payload(), job_id="1-0")
+
+    asyncio.run(run())
+    assert effect(st, "1-0", "download") is None
+    assert admission.snapshot()["active"] == 0
+    assert admission.snapshot()["pending"] == 0
+
+
+def test_source_admission_rejection_without_history_stays_pending_and_replayable(monkeypatch, tmp_path):
+    state = State()
+    admission = DownloadAdmission()
+
+    async def reject_before_source(*args, **kwargs):
+        raise AdmissionQueueFull("source transition queue is full", admission.snapshot())
+
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", reject_before_source)
+    payload = json.dumps(job_payload()).encode()
+    redis = Redis(messages=[("1-0", {b"payload": payload})])
+    worker = JobWorker(redis, WeCom(), {}, str(tmp_path), state=state,
+                       refresh=lambda *args: None, quality_policy="best_available",
+                       download_admission=admission)
+
+    assert run(worker.run_once()) == 0
+    assert redis.acks == []
+    record = effect(state, "1-0", "download")
+    assert record["status"] == "running"
+    assert record["stage"] == "claimed"
+    assert "result" not in record
+
 def test_message_worker_records_channel_switches_with_the_artifact_fence(monkeypatch, tmp_path):
     st = State()
     seen = {}
@@ -717,6 +758,21 @@ def test_hanging_notice_is_bounded_and_never_resent(monkeypatch):
     replay=run(worker.handle_job(job_payload(),job_id="1-0"))
     assert replay.download.relative_path=="Song.mp3" and wc.calls==1
     assert effect(st,"1-0","success_notice")["status"]=="uncertain"
+
+
+def test_job_deadline_covers_success_notice_after_download(monkeypatch):
+    async def download(candidate, sources, root, **kwargs):
+        return ok_download()
+
+    async def slow_notice(*args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("musicdl.worker.workers.download_with_fallback", download)
+    worker = JobWorker(Redis(), WeCom(), {}, "/tmp", state=State(),
+                       refresh=lambda *args: None, job_timeout=0.05)
+    monkeypatch.setattr(worker, "_notify", slow_notice)
+    with pytest.raises(TimeoutError):
+        run(worker.handle_job(job_payload(), job_id="1-0"))
 
 def test_health_and_refresh_are_claimed_as_their_own_fenced_effects(monkeypatch):
     st=State(); seen={}

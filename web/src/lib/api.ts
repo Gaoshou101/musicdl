@@ -102,6 +102,12 @@ export type SourceMetrics = {
   ranking: { eligible: boolean; minimum_samples: number; score: number }
 }
 
+export type RecentRequest = {
+  timestamp: number
+  kind: 'search' | 'download'
+  status: 'success' | 'failure' | 'unknown' | 'excluded'
+}
+
 export type SourceHealthRow = {
   id: string
   name: string | null
@@ -127,6 +133,12 @@ export type SourceHealthRow = {
   last_error_stage: string | null
   last_health: boolean | null
   last_health_status: string | null
+  /** Recent panel requests in epoch seconds, newest entry last. */
+  recent_requests?: Array<{
+    timestamp: number
+    kind: 'search' | 'download'
+    status: 'success' | 'failure' | 'unknown' | 'excluded'
+  }>
   /** The measured capability: true or false when probed, null when unknown. */
   lossless: boolean | null
   /** The probe's verdict for this channel, as the roll-up recorded it. */
@@ -144,6 +156,74 @@ export type SourceHealthReport = {
   /** How many recent outcomes the rate is computed from. */
   window: number
   total: number
+}
+
+export type SourceDiagnosticStatus =
+  | 'ok' | 'unsupported_flac' | 'empty_search' | 'search_failed' | 'resolve_failed'
+  | 'resolve_unavailable' | 'search_only' | 'timeout' | 'auth_required'
+  | 'resolve_unknown' | 'rate_limited' | 'busy' | 'cancelled' | 'source_unavailable'
+
+export type SourceDiagnosticResult = {
+  source_id: string
+  source_version: string
+  fingerprint: string | null
+  status: SourceDiagnosticStatus
+  stage: 'queue' | 'admission' | 'search' | 'resolve'
+  message: string
+  query: string
+  actual_query: string
+  queries_tried: string[]
+  tested_at: number
+  search_ms: number | null
+  resolve_ms: number | null
+  extension: string | null
+  quality: string | null
+  download_verified: false
+  stale?: boolean
+}
+
+export type SourceDiagnosticJob = {
+  job_id: string
+  source_id: string
+  source_version: string
+  fingerprint: string | null
+  status: 'queued' | 'running' | 'complete' | 'cancelled' | 'not_started'
+  stage: string
+  query: string
+  submitted_at: number
+  deadline_at: number
+  batch_id: string | null
+  result?: SourceDiagnosticResult
+}
+
+export type SourceDiagnosticJobRequest = {
+  mode: 'scheduled' | 'deduplicated' | 'cooldown' | 'not_started'
+  source_id: string
+  source_version?: string
+  job_id: string | null
+  status: string
+  actual_query?: string
+  retry_after?: number
+  result?: SourceDiagnosticResult
+}
+
+export type SourceDiagnosticBatchRequest = {
+  batch_id: string
+  requested: number
+  scheduled: number
+  deduplicated: number
+  cooldown: number
+  not_started: number
+  items: SourceDiagnosticJobRequest[]
+}
+
+export type SourceDiagnosticSnapshot = {
+  results: Array<SourceDiagnosticResult & { stale: boolean }>
+  jobs: SourceDiagnosticJob[]
+  active_limit: number
+  pending_limit: number
+  active: number
+  pending: number
 }
 
 export type SearchReport = {
@@ -397,6 +477,12 @@ export function reloadNote(report?: ReloadReport): string {
 }
 
 export type LoginReport = { ok: boolean; must_change: boolean; csrf_token: string }
+export type AdminSessionReport = {
+  authenticated: boolean
+  user_id?: string
+  must_change?: boolean
+  csrf_token?: string
+}
 
 const CSRF_HEADER = 'x-csrf-token'
 const CSRF_COOKIE = 'csrf_token'
@@ -427,6 +513,11 @@ function configuredBase(): string {
 const DETAIL_TEXT: Record<string, string> = {
   'invalid credentials': '用户名或密码不正确',
   'authentication required': '登录状态已失效，请重新登录',
+  'administrator password verification is busy': '登录服务繁忙，请稍后重试',
+  'administrator session capacity reached': '当前登录会话已达上限，请稍后重试',
+  runtime_reloading: '运行时正在切换，请稍后重试下载',
+  download_queue_full: '下载队列已满，请稍后重试',
+  download_queue_timeout: '等待下载容量超时，请稍后重试',
   'credential change required': '请先修改默认密码',
   // Refreshing does not help: the token half of the pair only ever comes back
   // with a login reply, so a page that lost it (a second tab, a cleared
@@ -560,6 +651,23 @@ function describeDetail(detail: unknown): string | null {
       .map((item) => (item && typeof item === 'object' && 'msg' in item ? String((item as { msg: unknown }).msg) : null))
       .filter((item): item is string => Boolean(item))
     return parts.length ? parts.join('；') : null
+  }
+  if (detail && typeof detail === 'object' && 'code' in detail) {
+    const envelope = detail as { code: unknown; admission?: unknown }
+    if (typeof envelope.code === 'string') {
+      const known = DETAIL_TEXT[envelope.code]
+      if (known) {
+        const admission = envelope.admission
+        if (admission && typeof admission === 'object') {
+          const counts = admission as Record<string, unknown>
+          if (typeof counts.active === 'number' && typeof counts.active_limit === 'number'
+              && typeof counts.pending === 'number' && typeof counts.pending_limit === 'number') {
+            return `${known}（活动 ${counts.active}/${counts.active_limit}，等待 ${counts.pending}/${counts.pending_limit}）`
+          }
+        }
+        return known
+      }
+    }
   }
   if (detail && typeof detail === 'object' && 'msg' in detail) return String((detail as { msg: unknown }).msg)
   return null
@@ -727,14 +835,28 @@ function redirectIfSignedOut(status: number, message: string): void {
   }
 }
 
-export async function login(username: string, password: string): Promise<LoginReport> {
+export async function login(username: string, password: string, remember = false): Promise<LoginReport> {
   const report = await request<LoginReport>('/login', {
     method: 'POST',
-    body: { username, password },
+    body: { username, password, remember },
     anonymous: true,
   })
   rememberCsrf(report.csrf_token)
   return report
+}
+
+/** Restore the existing session and current CSRF token without rotating either. */
+export async function bootstrapAdminSession(): Promise<AdminSessionReport> {
+  const report = await request<AdminSessionReport>('/session')
+  if (report.authenticated) rememberCsrf(report.csrf_token)
+  else forgetCsrf()
+  return report
+}
+
+/** Revoke this browser session and forget the tab's CSRF cache. */
+export async function logoutAdmin(): Promise<void> {
+  await request<{ ok: boolean }>('/logout', { method: 'POST' })
+  forgetCsrf()
 }
 
 /** Change the administrator's own credentials; the reply carries a new token. */
@@ -752,6 +874,35 @@ export async function changeCredentials(input: {
 
 export function listSources(): Promise<{ items: SourceItem[] }> {
   return request<{ items: SourceItem[] }>('/sources')
+}
+
+export function sourceDiagnostics(signal?: AbortSignal): Promise<SourceDiagnosticSnapshot> {
+  return request<SourceDiagnosticSnapshot>('/sources/diagnostics', { signal })
+}
+
+export function startSourceDiagnostic(
+  id: string,
+  query = '',
+): Promise<SourceDiagnosticJobRequest> {
+  return request<SourceDiagnosticJobRequest>(`/sources/${encodeURIComponent(id)}/diagnostics`, {
+    method: 'POST', body: { query },
+  })
+}
+
+export function startSourceDiagnosticBatch(query = ''): Promise<SourceDiagnosticBatchRequest> {
+  return request<SourceDiagnosticBatchRequest>('/sources/diagnostics', {
+    method: 'POST', body: { query },
+  })
+}
+
+export function sourceDiagnosticJob(id: string): Promise<SourceDiagnosticJob> {
+  return request<SourceDiagnosticJob>(`/sources/diagnostics/jobs/${encodeURIComponent(id)}`)
+}
+
+export function cancelSourceDiagnosticJob(id: string): Promise<{ cancelled: boolean; status: string }> {
+  return request<{ cancelled: boolean; status: string }>(
+    `/sources/diagnostics/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' },
+  )
 }
 
 export function analyzeSource(source: SourceImport): Promise<ImportPreview> {

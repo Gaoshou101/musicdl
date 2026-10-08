@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   MusicNote,
   Plus,
@@ -21,19 +21,27 @@ import {
   LosslessStatus,
   SourceHealthRow,
   SourceHealthVerdict,
+  SourceDiagnosticJob,
+  SourceDiagnosticResult,
+  SourceDiagnosticSnapshot,
   analyzeSource,
   checkSourceLossless,
-  fetchSource,
+  cancelSourceDiagnosticJob,
   deleteSource,
+  fetchSource,
   errorMessage,
   installSource,
   listSourceHealth,
   listSources,
+  sourceDiagnostics,
   reloadNote,
   updateSource,
+  startSourceDiagnostic,
+  startSourceDiagnosticBatch,
 } from '@/lib/api'
 import type { SourceItem } from '@/lib/api'
 import { formatBytes } from '@/lib/format'
+import { usePolling } from '@/lib/usePolling'
 import ChannelMetrics from '@/components/ChannelMetrics'
 import {
   cloneImportGrants,
@@ -121,6 +129,67 @@ const VERDICT_CLASS: Record<SourceHealthVerdict, string> = {
   degraded: 'bg-warning/15 text-warning',
   failing: 'bg-danger/15 text-danger',
   unknown: 'bg-neutral-800 text-neutral-500',
+}
+
+const DIAGNOSTIC_TEXT: Record<string, string> = {
+  ok: '搜索与 FLAC 解析响应正常',
+  unsupported_flac: '可搜索，但未能提供 FLAC',
+  empty_search: '搜索没有结果',
+  search_failed: '搜索阶段失败',
+  resolve_failed: '解析阶段失败',
+  resolve_unknown: '解析有响应，但无法确认音质',
+  resolve_unavailable: '未能安全执行解析',
+  search_only: '只检查了搜索；未下载文件',
+  timeout: '检查超时',
+  auth_required: '上游需要授权',
+  rate_limited: '上游正在限流',
+  busy: '检查容量已满',
+  cancelled: '检查已取消',
+  source_unavailable: '当前运行时没有这个音源',
+}
+const DIAGNOSTIC_SEEN_RESULT_LIMIT = 512
+
+function diagnosticResultKey(result: SourceDiagnosticResult): string {
+  return `${result.source_id}\u0000${result.source_version}\u0000${result.fingerprint ?? ''}\u0000${result.tested_at}\u0000${result.status}`
+}
+
+function DiagnosticSummary({ result }: { result: SourceDiagnosticResult }) {
+  return (
+    <div className="mt-3 rounded-lg border border-neutral-800 bg-neutral-950/40 px-3 py-2 text-xs text-neutral-400">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={result.stale ? 'text-warning' : result.status === 'ok' ? 'text-success' : 'text-neutral-300'}>
+          {result.stale ? '结果已过期 · ' : ''}{DIAGNOSTIC_TEXT[result.status] ?? result.message}
+        </span>
+        <span>搜索 {result.search_ms == null ? '—' : `${result.search_ms} ms`}</span>
+        <span>解析 {result.resolve_ms == null ? '—' : `${result.resolve_ms} ms`}</span>
+        {result.extension && <span>{result.extension.toUpperCase()}{result.quality ? ` · ${result.quality}` : ''}</span>}
+        <span>{new Date(result.tested_at * 1000).toLocaleString('zh-CN')}</span>
+      </div>
+      <p className="mt-1 truncate font-mono text-neutral-500" title={result.actual_query}>
+        实际查询：{result.actual_query}
+      </p>
+      <p className="mt-1 text-neutral-600">仅完成搜索与元数据解析，没有下载文件。</p>
+    </div>
+  )
+}
+
+function DiagnosticJobLine({
+  job,
+  onCancel,
+}: {
+  job: SourceDiagnosticJob
+  onCancel: (job: SourceDiagnosticJob) => void
+}) {
+  const elapsed = Math.max(0, Math.floor(Date.now() / 1000 - job.submitted_at))
+  return (
+    <div className="mt-3 rounded-lg border border-accent-500/20 bg-accent-500/5 px-3 py-2 text-xs text-neutral-300">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span>{job.status === 'queued' ? '等待检查' : `正在检查：${job.stage}`} · 已等待 {elapsed}s</span>
+        <button type="button" onClick={() => onCancel(job)} className="text-neutral-400 hover:text-neutral-100">取消</button>
+      </div>
+      <p className="mt-1 truncate font-mono text-neutral-500" title={job.query}>查询：{job.query}</p>
+    </div>
+  )
 }
 
 /**
@@ -738,12 +807,56 @@ function ImportDialog({
 export default function SourcesPage() {
   const [sources, setSources] = useState<SourceItem[]>([])
   const [channels, setChannels] = useState<Record<string, SourceHealthRow>>({})
+  const [diagnostics, setDiagnostics] = useState<SourceDiagnosticSnapshot | null>(null)
+  const [diagnosticQuery, setDiagnosticQuery] = useState('')
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState<Notice>(null)
   const [showImport, setShowImport] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [checking, setChecking] = useState<Record<string, boolean>>({})
   const [form, setForm] = useState({ name: '', priority: '0', timeout: '10' })
+  const seenDiagnosticResults = useRef<Set<string> | null>(null)
+  const pageLoadSignal = useRef<AbortSignal | null>(null)
+
+  const rememberDiagnosticResult = useCallback((result: SourceDiagnosticResult) => {
+    const known = seenDiagnosticResults.current ?? new Set<string>()
+    known.add(diagnosticResultKey(result))
+    seenDiagnosticResults.current = known
+  }, [])
+
+  const applyDiagnosticSnapshot = useCallback((snapshot: SourceDiagnosticSnapshot) => {
+    const previous = seenDiagnosticResults.current
+    const known = previous ?? new Set<string>()
+    let terminalNotice: SourceDiagnosticResult | null = null
+    for (const result of snapshot.results) {
+      const key = diagnosticResultKey(result)
+      if (previous && !known.has(key)
+          && ['busy', 'auth_required', 'rate_limited', 'timeout'].includes(result.status)
+          && (!terminalNotice || terminalNotice.tested_at <= result.tested_at)) {
+        terminalNotice = result
+      }
+      known.add(key)
+    }
+    while (known.size > DIAGNOSTIC_SEEN_RESULT_LIMIT) {
+      known.delete(known.values().next().value!)
+    }
+    seenDiagnosticResults.current = known
+    setDiagnostics(snapshot)
+    if (terminalNotice) {
+      setNotice({
+        tone: 'error',
+        text: terminalNotice.status === 'busy'
+          ? `${terminalNotice.source_id} 未检查：下载容量已满，请稍后重试。`
+          : `${terminalNotice.source_id}：${DIAGNOSTIC_TEXT[terminalNotice.status] ?? terminalNotice.message}`,
+      })
+    }
+  }, [])
+
+  const diagnosticRefresh = usePolling(useCallback(async (signal: AbortSignal) => {
+    const snapshot = await sourceDiagnostics(signal)
+    if (!signal.aborted) applyDiagnosticSnapshot(snapshot)
+  }, [applyDiagnosticSnapshot]), 1500, Boolean(diagnostics?.jobs.length), false)
 
   // The verdict is an addition to this page, not a precondition for it: a
   // deployment that cannot answer the roll-up still gets its source list.
@@ -756,22 +869,110 @@ export default function SourcesPage() {
     }
   }, [])
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal: AbortSignal) => {
     try {
       const report = await listSources()
+      if (signal.aborted) return
       setSources(report.items)
       setNotice(null)
-      await refreshHealth()
+      const [, diagnosticReport] = await Promise.all([
+        refreshHealth(), sourceDiagnostics(signal).catch(() => null),
+      ])
+      if (signal.aborted) return
+      if (diagnosticReport) applyDiagnosticSnapshot(diagnosticReport)
+    } catch (err) {
+      if (signal.aborted) return
+      setNotice({ tone: 'error', text: errorMessage(err) })
+    } finally {
+      if (!signal.aborted) setLoading(false)
+    }
+  }, [applyDiagnosticSnapshot, refreshHealth])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    pageLoadSignal.current = controller.signal
+    void load(controller.signal)
+    return () => {
+      controller.abort()
+      if (pageLoadSignal.current === controller.signal) pageLoadSignal.current = null
+    }
+  }, [load])
+
+  const latestDiagnostics = useMemo(() => {
+    const latest = new Map<string, SourceDiagnosticResult>()
+    for (const result of diagnostics?.results ?? []) {
+      const previous = latest.get(result.source_id)
+      if (!previous
+          || (previous.stale !== false && result.stale === false)
+          || (previous.stale === result.stale && previous.tested_at < result.tested_at)) {
+        latest.set(result.source_id, result)
+      }
+    }
+    return Object.fromEntries(latest)
+  }, [diagnostics?.results])
+  const activeDiagnostics = useMemo(() => Object.fromEntries(
+    [...(diagnostics?.jobs ?? [])].reverse().map((job) => [job.source_id, job]),
+  ), [diagnostics?.jobs])
+
+  const checkOneSource = async (source: SourceItem) => {
+    setDiagnosticBusy(true)
+    try {
+      const result = await startSourceDiagnostic(source.id, diagnosticQuery)
+      if (result.mode === 'scheduled' || result.mode === 'deduplicated') {
+        setNotice({ tone: 'ok', text: `${source.name || source.id} 的诊断已${result.mode === 'deduplicated' ? '合并到现有任务' : '排队'}，可取消。` })
+        await diagnosticRefresh(true)
+      } else if (result.mode === 'cooldown') {
+        setNotice({ tone: 'ok', text: `${source.name || source.id} 最近已检查，${result.retry_after ?? 1} 秒后可重试；本次实际查询：${result.actual_query ?? '—'}` })
+        if (result.result) {
+          rememberDiagnosticResult(result.result)
+          setDiagnostics((current) => current ? {
+            ...current,
+            results: [{ ...result.result!, stale: false }, ...current.results.filter((item) => !(item.source_id === source.id && item.fingerprint === result.result!.fingerprint))],
+          } : current)
+        }
+      } else if (result.mode === 'not_started') {
+        setNotice({ tone: 'error', text: `${source.name || source.id} 未排入诊断队列：${result.status}` })
+      }
     } catch (err) {
       setNotice({ tone: 'error', text: errorMessage(err) })
     } finally {
-      setLoading(false)
+      setDiagnosticBusy(false)
     }
-  }, [refreshHealth])
+  }
 
-  useEffect(() => {
-    void load()
-  }, [load])
+  const checkAllSources = async () => {
+    setDiagnosticBusy(true)
+    try {
+      const report = await startSourceDiagnosticBatch(diagnosticQuery)
+      const queuedJobs = report.items.filter((item) => item.mode === 'scheduled' && item.job_id)
+      if (queuedJobs.length) {
+        setNotice({
+          tone: 'ok',
+          text: `批量诊断已提交：${report.scheduled} 个排队，${report.deduplicated} 个合并，${report.cooldown} 个在冷却，${report.not_started} 个未排队。`,
+        })
+      } else {
+        setNotice({
+          tone: report.not_started ? 'error' : 'ok',
+          text: `批量诊断：0 个排队，${report.deduplicated} 个合并，${report.cooldown} 个在冷却，${report.not_started} 个未排队。`,
+        })
+      }
+      await diagnosticRefresh(true)
+    } catch (err) {
+      setNotice({ tone: 'error', text: errorMessage(err) })
+    } finally {
+      setDiagnosticBusy(false)
+    }
+  }
+
+  const cancelDiagnostic = async (job: SourceDiagnosticJob) => {
+    try {
+      await cancelSourceDiagnosticJob(job.job_id)
+      setNotice({ tone: 'ok', text: `已请求取消 ${job.source_id} 的诊断。` })
+      await diagnosticRefresh(true)
+    } catch (err) {
+      setNotice({ tone: 'error', text: errorMessage(err) })
+    }
+  }
 
   const replace = (item: SourceItem) =>
     setSources((current) => current.map((entry) => (entry.id === item.id ? item : entry)))
@@ -884,6 +1085,29 @@ export default function SourcesPage() {
         </p>
       )}
 
+      <section className="glass rounded-xl p-4 mb-5" aria-label="音源诊断">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-semibold">诊断音源</h2>
+            <p className="text-neutral-500 text-xs mt-1">只运行搜索与元数据解析，不下载音频。每项最多尝试 3 个查询；结果在音源版本变化后标为过期。</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <input
+              aria-label="诊断查询"
+              value={diagnosticQuery}
+              onChange={(event) => setDiagnosticQuery(event.target.value)}
+              placeholder="默认：周杰伦 晴天"
+              maxLength={500}
+              className="w-56 px-3 py-2 rounded-lg bg-neutral-900/50 border border-neutral-800 text-sm focus:border-accent-500 focus:outline-none"
+            />
+            <button type="button" onClick={() => void checkAllSources()} disabled={diagnosticBusy || !sources.some((source) => source.enabled)} className="px-3 py-2 rounded-lg bg-accent-500 hover:bg-accent-600 disabled:opacity-50 text-sm font-medium">
+              {diagnosticBusy ? '提交中…' : '诊断全部启用音源'}
+            </button>
+          </div>
+        </div>
+        {diagnostics && <p className="text-neutral-600 text-xs mt-2">并发 {diagnostics.active}/{diagnostics.active_limit} · 等待 {diagnostics.pending}/{diagnostics.pending_limit}</p>}
+      </section>
+
       <div className="grid gap-4">
         {sources.map((source) => (
           <div key={source.id} className="glass rounded-xl p-6">
@@ -985,10 +1209,26 @@ export default function SourcesPage() {
                       <EgressLine source={source} />
                     </p>
                     <ChannelMetrics row={channels[source.id]} />
+                    {activeDiagnostics[source.id] && (
+                      <DiagnosticJobLine job={activeDiagnostics[source.id]} onCancel={cancelDiagnostic} />
+                    )}
+                    {latestDiagnostics[source.id] && !activeDiagnostics[source.id] && (
+                      <DiagnosticSummary result={latestDiagnostics[source.id]} />
+                    )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => void checkOneSource(source)}
+                    disabled={!source.enabled || diagnosticBusy || Boolean(activeDiagnostics[source.id])}
+                    title="执行有界搜索和元数据解析，不下载文件"
+                    aria-label={`诊断 ${source.name || source.id}`}
+                    className="px-2 py-2 rounded-lg text-xs bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    诊断
+                  </button>
                   <button
                     type="button"
                     onClick={() => void toggleEnabled(source)}
@@ -1058,7 +1298,10 @@ export default function SourcesPage() {
         <ImportDialog
           onClose={() => setShowImport(false)}
           existingIds={new Set(sources.map((source) => source.id))}
-          onBatchChanged={() => void load()}
+          onBatchChanged={() => {
+            const signal = pageLoadSignal.current
+            if (signal && !signal.aborted) void load(signal)
+          }}
         />
       )}
     </div>

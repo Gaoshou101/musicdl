@@ -63,6 +63,7 @@ class AuditLogStore(EventLogStore):
 # The statuses a search can report for one source. ``ok`` is the only one that
 # means the channel answered; an empty result set is still a working channel.
 SEARCH_OK = "ok"
+_SEARCH_FAILURES = frozenset({"timeout", "error", "invalid"})
 
 # The stages of a download attempt that count against a channel, and the counter
 # each one feeds. ``cleanup`` failing is this process failing to remove a
@@ -125,6 +126,7 @@ class SourceHealthStore:
     WINDOW = 20
     LIMIT = 200
     MINIMUM_DOWNLOAD_SAMPLES = 5
+    RECENT_REQUEST_LIMIT = 10
 
     # The lossless roll-up is bounded and expiring like everything else here:
     # the two limits are separate so a deployment that churns through source
@@ -159,9 +161,15 @@ class SourceHealthStore:
         record = self._record(source_id)
         if record is None:
             return
+        search_status = str(status)
         if self._metric_version(record, source_version):
-            record["search_outcomes"].append(str(status) == SEARCH_OK)
-            record["metric_last_search"] = (record["observation_sequence"] + 1, str(status) == SEARCH_OK)
+            succeeded = search_status == SEARCH_OK
+            sequence = record["observation_sequence"] + 1
+            record["search_outcomes"].append(succeeded)
+            record["metric_last_search"] = (sequence, succeeded)
+            outcome = "success" if succeeded else (
+                "failure" if search_status in _SEARCH_FAILURES else "unknown")
+            self._remember_recent(record, ("search", sequence), kind="search", status=outcome)
         record["observation_sequence"] += 1
         if not record_legacy:
             return
@@ -194,6 +202,7 @@ class SourceHealthStore:
         if stage in {"download", "health"} and self._metric_version(record, data.get("source_version")):
             if stage == "download":
                 self._observe_download(record, data)
+                self._observe_recent_download(record, data)
             else:
                 record["metric_last_health"] = (record["observation_sequence"] + 1,
                                                 data.get("status"), data.get("healthy"))
@@ -217,6 +226,18 @@ class SourceHealthStore:
             record["last_error"] = data.get("error_code") or f"{stage}_failed"
             record["last_error_stage"] = stage
 
+    def _observe_recent_download(self, record: dict, data: dict) -> None:
+        status = data.get("status")
+        if status not in {"success", "failed", "cancelled"}:
+            return
+        key = tuple(data.get(name) for name in
+                    ("request_id", "source_id", "source_version", "candidate_id"))
+        if not all(isinstance(value, str) and value for value in key):
+            key = ("anonymous", record["observation_sequence"])
+        excluded = status == "cancelled" or data.get("error_code") in _LOCAL_DOWNLOAD_ERRORS
+        outcome = "excluded" if excluded else ("success" if status == "success" else "failure")
+        self._remember_recent(record, ("download", *key), kind="download", status=outcome)
+
     def _record(self, source_id: str) -> dict | None:
         record = self._records.get(source_id)
         if record is not None:
@@ -234,9 +255,18 @@ class SourceHealthStore:
         record.update(search_outcomes=deque(maxlen=self.window), delivery_outcomes=OrderedDict(),
                       quality_outcomes=OrderedDict(),
                       health_downloads=OrderedDict(),
+                      recent_requests=OrderedDict(),
                       metric_version=None, metric_version_bound=False,
                       metric_last_search=None, metric_last_health=None)
         return record
+
+    def _remember_recent(self, record: dict, key: tuple, *, kind: str, status: str) -> None:
+        """Keep bounded, request-level display evidence outside metric windows."""
+        requests = record["recent_requests"]
+        requests.pop(key, None)
+        requests[key] = {"timestamp": time.time(), "kind": kind, "status": status}
+        while len(requests) > self.RECENT_REQUEST_LIMIT:
+            requests.popitem(last=False)
 
     def bind_source_version(self, source_id: str, source_version: str | None) -> None:
         """Bind live registry versions; late events from retired scripts are ignored.
@@ -253,6 +283,7 @@ class SourceHealthStore:
             record["delivery_outcomes"].clear()
             record["quality_outcomes"].clear()
             record["health_downloads"].clear()
+            record["recent_requests"].clear()
             record["metric_last_search"] = record["metric_last_health"] = None
         record["metric_version"] = version
         record["metric_version_bound"] = True
@@ -268,6 +299,7 @@ class SourceHealthStore:
             record["delivery_outcomes"].clear()
             record["quality_outcomes"].clear()
             record["health_downloads"].clear()
+            record["recent_requests"].clear()
             record["metric_last_search"] = record["metric_last_health"] = None
             record["metric_version"] = version
         return True
@@ -576,6 +608,7 @@ class SourceHealthStore:
                         searches=0, downloads=0, refreshes=0, last_search=None, last_download=None,
                         last_refresh=None, last_count=0, last_error=None, last_error_stage=None,
                         last_health=None, last_health_status=None,
+                        recent_requests=[],
                         **self._lossless_fields(source_id))
         outcomes = list(record["outcomes"])
         successes = sum(1 for ok in outcomes if ok)
@@ -595,6 +628,7 @@ class SourceHealthStore:
                     last_refresh=record["last_refresh"], last_count=record["last_count"],
                     last_error=record["last_error"], last_error_stage=record["last_error_stage"],
                     last_health=record["last_health"], last_health_status=record["last_health_status"],
+                    recent_requests=list(record["recent_requests"].values()),
                     **self._lossless_fields(source_id))
 
 

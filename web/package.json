@@ -8,6 +8,7 @@
     "lint": "next lint",
     "check:service-logs": "node scripts/check-service-logs.mjs",
     "check:channel-metrics": "node scripts/check-channel-metrics.mjs",
+    "check:diagnostic-polling": "node scripts/check-diagnostic-polling.mjs",
     "check:api:build": "tsc src/lib/api.ts --outDir .next/contract --module esnext --moduleResolution bundler --target es2022 --skipLibCheck && node -e \"require('node:fs').renameSync('.next/contract/api.js', '.next/contract/api.mjs')\"",
     "check:search-probe": "npm run check:api:build && node scripts/check-search-probe.mjs",
     "check:source-import": "tsc src/lib/api.ts src/lib/sourceImport.ts --outDir .next/source-import-contract --module esnext --moduleResolution bundler --target es2022 --skipLibCheck && node scripts/check-source-import.mjs",
@@ -20,7 +21,6 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "@phosphor-icons/react": "^2.1.7",
-    "motion": "^11.14.3",
     "zustand": "^5.0.2"
   },
   "devDependencies": {

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import math
 import os
 import secrets
+import time
 from contextlib import nullcontext
 from contextvars import ContextVar
-from dataclasses import replace
+from dataclasses import dataclass, field as dataclass_field, replace
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -18,6 +22,12 @@ from typing import Any, Callable
 from musicdl.config import AppSettings, WorkerSettings
 from musicdl.ai.diagnose import probe_endpoint
 from musicdl.media import download_candidate, download_with_fallback
+from musicdl.media.admission import (
+    AdmissionQueueFull,
+    AdmissionRejected,
+    AdmissionTimeout,
+    DownloadAdmission,
+)
 from musicdl.media.fallback import (
     CONTENT_FAILURE_CODES,
     MAX_CHANNEL_SWITCHES,
@@ -38,24 +48,200 @@ from musicdl.plugins.install import install_source, preview_source
 from musicdl.sources.models import Candidate, normalize_text
 from musicdl.sources.quality import requested_quality
 from musicdl.sources.search import search_sources
-from .auth import AdminAuth, RateLimiter
+from .auth import AdminAuth, AuthBusyError, RateLimiter, StaleCredentialsError
 from .config import EDITABLE, ConfigManager
+from .diagnostics import SourceDiagnosticManager
 from .forms import form_fields
 from .health import EventLogStore, HealthAggregator, SourceHealthStore
 from .logs import LogBuffer
 from .management import BotManager, SourceManager
 from .pages import credentials_form, credentials_page, login_page
+from .sessions import REMEMBERED_SESSION_TTL_SECONDS, SessionCapacityError
 
 
 # The panel's own log lines, which the service-log window reads back. A failed
 # download leaves no event that says why beyond its code, and the operator
 # looking at this window is the person who just clicked the button.
 _LOG = logging.getLogger("musicdl.admin")
+PANEL_DOWNLOAD_QUEUE_WAIT_SECONDS = 10.0
+PANEL_DOWNLOAD_MIN_TIMEOUT_SECONDS = 120.0
+
+
+class PanelDownloadCapacityError(RuntimeError):
+    """The shared download budget could not admit a panel request."""
+
+    def __init__(self, code: str, snapshot: dict[str, int]):
+        super().__init__(code)
+        self.code = code
+        self.snapshot = snapshot
+
+
+class PanelDownloadDeadlineError(RuntimeError):
+    """The shared end-to-end panel download deadline expired."""
+
+
+class PanelRuntimeRetired(RuntimeError):
+    """A runtime reload drained the request before it could finish."""
+
+
+@dataclass
+class _PanelDownloadFlight:
+    runtime: Any
+    task: asyncio.Task | None = None
+    waiters: int = 0
+    closing: bool = False
+    drained: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+
+
+class PanelDownloadCoordinator:
+    """Coalesce matching panel requests and drain work before runtime cleanup."""
+
+    def __init__(self, admission: DownloadAdmission | None = None):
+        self.admission = admission
+        self._lock = asyncio.Lock()
+        self._flights: dict[tuple, _PanelDownloadFlight] = {}
+        self._retired_runtimes: set[int] = set()
+        self._closed = False
+
+    def _capacity_snapshot(self) -> dict[str, int]:
+        snapshot = self.admission.snapshot() if self.admission is not None else {
+            "active": 0, "pending": 0, "active_limit": 0, "pending_limit": 0,
+        }
+        snapshot["panel_flights"] = len(self._flights)
+        snapshot["panel_flight_limit"] = self._flight_limit
+        return snapshot
+
+    @property
+    def _flight_limit(self) -> int:
+        if self.admission is None:
+            return 20
+        return self.admission.active_limit + self.admission.pending_limit
+
+    async def run(self, key: tuple, runtime: Any, operation: Callable[[], Any]):
+        while True:
+            wait_for_drain = None
+            async with self._lock:
+                if self._closed or id(runtime) in self._retired_runtimes:
+                    raise PanelRuntimeRetired()
+                flight = self._flights.get(key)
+                if flight is not None and flight.closing:
+                    wait_for_drain = flight.drained
+                else:
+                    if flight is None or flight.task is None or flight.task.done():
+                        if len(self._flights) >= self._flight_limit:
+                            raise PanelDownloadCapacityError(
+                                "download_queue_full", self._capacity_snapshot(),
+                            )
+                        flight = _PanelDownloadFlight(runtime)
+                        self._flights[key] = flight
+                        flight.task = asyncio.create_task(
+                            self._execute(key, flight, operation),
+                            name="admin-panel-download",
+                        )
+                        flight.task.add_done_callback(
+                            lambda _task, flight_key=key, completed=flight:
+                            self._completed(flight_key, completed)
+                        )
+                    flight.waiters += 1
+                    break
+            await wait_for_drain.wait()
+
+        try:
+            return await asyncio.shield(flight.task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() == 0 and flight.closing:
+                raise PanelRuntimeRetired() from None
+            raise
+        finally:
+            await self._leave(key, flight)
+
+    async def _execute(self, _key: tuple, flight: _PanelDownloadFlight,
+                       operation: Callable[[], Any]):
+        borrow = getattr(flight.runtime, "borrow", None)
+        if callable(borrow):
+            async with borrow():
+                return await operation()
+        return await operation()
+
+    def _completed(self, key: tuple, flight: _PanelDownloadFlight) -> None:
+        # Task callbacks run on this event loop between coroutine steps, so the
+        # identity-checked removal is atomic with respect to coordinator users.
+        if self._flights.get(key) is flight:
+            self._flights.pop(key, None)
+        flight.drained.set()
+
+    async def _leave(self, key: tuple, flight: _PanelDownloadFlight) -> None:
+        cancel = None
+        async with self._lock:
+            flight.waiters = max(0, flight.waiters - 1)
+            if flight.waiters == 0 and flight.task is not None and not flight.task.done():
+                flight.closing = True
+                cancel = flight.task
+        if cancel is not None:
+            cancel.cancel()
+            await _cancel_and_drain((cancel,))
+
+    async def cancel_runtime(self, runtime: Any) -> None:
+        tasks = []
+        async with self._lock:
+            self._retired_runtimes.add(id(runtime))
+            for flight in self._flights.values():
+                if flight.runtime is runtime:
+                    flight.closing = True
+                    if flight.task is not None and not flight.task.done():
+                        tasks.append(flight.task)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await _cancel_and_drain(tasks)
+
+    def release_runtime(self, runtime: Any) -> None:
+        self._retired_runtimes.discard(id(runtime))
+
+    async def close(self) -> None:
+        tasks = []
+        async with self._lock:
+            self._closed = True
+            for flight in self._flights.values():
+                flight.closing = True
+                if flight.task is not None and not flight.task.done():
+                    tasks.append(flight.task)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await _cancel_and_drain(tasks)
+
+
+async def _cancel_and_drain(tasks: tuple[asyncio.Task, ...] | list[asyncio.Task]) -> None:
+    """Finish cancellation cleanup even if the caller receives another cancel."""
+    pending = [task for task in tasks if not task.done()]
+    if not pending:
+        return
+    joined = asyncio.gather(*pending, return_exceptions=True)
+    interrupted = False
+    while not joined.done():
+        try:
+            await asyncio.shield(joined)
+        except asyncio.CancelledError:
+            interrupted = True
+    await joined
+    if interrupted:
+        raise asyncio.CancelledError
+
+
+def panel_download_key(user_id: str, candidate: Candidate, quality: str | None,
+                       query: str, runtime: Any) -> tuple:
+    identity = json.dumps(candidate.model_dump(mode="json"), sort_keys=True,
+                           separators=(",", ":"), ensure_ascii=False)
+    return (id(runtime), user_id, candidate.source_id, candidate.source_version,
+            candidate.item_id, quality, query, hashlib.sha256(identity.encode("utf-8")).hexdigest())
 
 
 def _positive(value: Any, default: float) -> float:
     """A usable positive budget, or the default the portal falls back to."""
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else default
+    return (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0 else default)
 
 
 def _stream_budget(source: Any, fallback: float) -> float:
@@ -69,6 +255,34 @@ def _stream_budget(source: Any, fallback: float) -> float:
     """
     declared = getattr(source, "stream_budget_seconds", None)
     return _positive(declared, fallback)
+
+
+def panel_download_total_timeout(service: Any, *, resolve_timeout: float,
+                                search_timeout: float, health_timeout: float,
+                                queue_wait_seconds: float = PANEL_DOWNLOAD_QUEUE_WAIT_SECONDS) -> float:
+    """Bound a panel flight by its worst-case stream/fallback budgets.
+
+    A request can try the listed source and up to ``MAX_CHANNEL_SWITCHES``
+    replacements. Count one same-source URL refresh per channel attempt and
+    one quality-switch stream as separate bounded phases, plus the maximum two
+    searches and one health check in the fallback path. This conservatively
+    covers the existing fallback without adding retries. The minimum is a
+    safety budget; admission wait is added outside it so queue time cannot
+    consume stream time.
+    """
+    configured_resolvers = getattr(service, "resolvers", None)
+    values = configured_resolvers.values() if isinstance(configured_resolvers, dict) else ()
+    stream_budget = max((_stream_budget(source, resolve_timeout) for source in values),
+                        default=_positive(resolve_timeout, 30.0))
+    channel_attempts = MAX_CHANNEL_SWITCHES + 1
+    stream_phases = channel_attempts * 2 + 1
+    operation_budget = max(
+        PANEL_DOWNLOAD_MIN_TIMEOUT_SECONDS,
+        stream_budget * stream_phases
+        + _positive(search_timeout, 10.0) * 2
+        + _positive(health_timeout, 10.0),
+    )
+    return operation_budget + _positive(queue_wait_seconds, PANEL_DOWNLOAD_QUEUE_WAIT_SECONDS)
 
 
 def _same_recording(wanted: Candidate, other: Candidate) -> bool:
@@ -200,7 +414,10 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                         verify_duration: str = "lenient",
                         worker: Any | None = None,
                         source_broker: Any | None = None,
-                        source_fetcher: Callable[[str], Any] | None = None) -> APIRouter:
+                        source_fetcher: Callable[[str], Any] | None = None,
+                        diagnostics: SourceDiagnosticManager | None = None,
+                        download_admission: DownloadAdmission | None = None,
+                        panel_downloads: PanelDownloadCoordinator | None = None) -> APIRouter:
     auth, sources, health, events, limiter = auth or AdminAuth(), sources or SourceManager(), health or HealthAggregator({}), events or EventLogStore(), limiter or RateLimiter()
     bots, audit = bots or BotManager(), audit or EventLogStore()
     config = config or ConfigManager(AppSettings())
@@ -221,7 +438,14 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     default_worker = WorkerSettings()
     quality_policy = getattr(worker, "quality_policy", None) or default_worker.quality_policy
     quality_preference = getattr(worker, "quality_preference", None)
-    credential_paths = {"/admin/", "/admin/change-credentials", "/admin/change-credentials-form"}
+    panel_downloads = panel_downloads or PanelDownloadCoordinator(download_admission)
+    if (download_admission is not None and panel_downloads.admission is not None
+            and panel_downloads.admission is not download_admission):
+        raise ValueError("panel download coordinator must share the process admission budget")
+    if panel_downloads.admission is None:
+        panel_downloads.admission = download_admission
+    credential_paths = {"/admin/", "/admin/change-credentials", "/admin/change-credentials-form",
+                        "/admin/logout"}
 
     def tier_for(candidate: Candidate) -> str | None:
         """The tier this candidate is asked for, by the worker's own rules.
@@ -232,15 +456,36 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         """
         return requested_quality(candidate, policy=quality_policy, preference=quality_preference)
 
-    def start_session(response: Response) -> str:
-        """Issue a session and bind the CSRF token its forms will carry."""
-        session = auth.issue_session()
-        csrf = secrets.token_urlsafe(24)
-        auth.bind_csrf(session, csrf)
+    def start_session(response: Response, *, remember: bool = False) -> str:
+        """Issue a durable session and its recoverable, session-bound CSRF token."""
+        try:
+            session = auth.issue_session(remember=remember)
+        except SessionCapacityError:
+            raise HTTPException(503, "administrator session capacity reached") from None
+        csrf = auth.session_csrf(session)
+        if csrf is None:
+            auth.revoke_session(session)
+            raise HTTPException(500, "could not initialize administrator session")
         secure = config.settings.admin.cookie_secure
-        response.set_cookie("admin_session", session, httponly=True, secure=secure, samesite="lax")
-        response.set_cookie("csrf_token", csrf, httponly=False, secure=secure, samesite="lax")
+        max_age = REMEMBERED_SESSION_TTL_SECONDS if remember else None
+        response.set_cookie("admin_session", session, max_age=max_age, httponly=True,
+                            secure=secure, samesite="lax", path="/")
+        response.set_cookie("csrf_token", csrf, max_age=max_age, httponly=False,
+                            secure=secure, samesite="lax", path="/")
         return csrf
+
+    def clear_session_cookies(response: Response) -> None:
+        secure = config.settings.admin.cookie_secure
+        response.delete_cookie("admin_session", path="/", httponly=True,
+                               secure=secure, samesite="lax")
+        response.delete_cookie("csrf_token", path="/", httponly=False,
+                               secure=secure, samesite="lax")
+
+    async def verify_password(username: str, password: str):
+        try:
+            return await auth.authenticate_async(username, password)
+        except AuthBusyError:
+            raise HTTPException(503, "administrator password verification is busy") from None
 
     unbound_runtime = object()
     request_runtime = ContextVar("admin_request_runtime", default=unbound_runtime)
@@ -403,11 +648,13 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             audit.append({"action": "login", "status": "rate_limited"})
             raise HTTPException(429, "too many login attempts")
         body = await request.json()
-        result = auth.authenticate(str(body.get("username", "")), str(body.get("password", "")))
+        result = await verify_password(str(body.get("username", "")),
+                                       str(body.get("password", "")))
         if not result.ok:
             audit.append({"action": "login", "status": "failed"})
             raise HTTPException(401, "invalid credentials")
-        csrf = start_session(response)
+        remember = body.get("remember") is True
+        csrf = start_session(response, remember=remember)
         audit.append({"action": "login", "status": "success"})
         return {"ok": True, "must_change": result.must_change, "csrf_token": csrf}
 
@@ -423,25 +670,65 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         if not limiter.allow(request.client.host if request.client else "unknown"):
             audit.append({"action": "login", "status": "rate_limited"})
             return HTMLResponse(login_page(error="登录尝试过于频繁，请稍后再试。"), status_code=429)
-        result = auth.authenticate(str(form.get("username", "")), str(form.get("password", "")))
+        try:
+            result = await auth.authenticate_async(str(form.get("username", "")),
+                                                  str(form.get("password", "")))
+        except AuthBusyError:
+            return HTMLResponse(login_page(error="登录服务繁忙，请稍后重试。"), status_code=503)
         if not result.ok:
             audit.append({"action": "login", "status": "failed"})
             return HTMLResponse(login_page(error="用户名或密码不正确。"), status_code=401)
+        remember = str(form.get("remember", "")) in {"1", "on", "true"}
         response = RedirectResponse("/admin/", status_code=303)
-        start_session(response)
+        try:
+            start_session(response, remember=remember)
+        except HTTPException as exc:
+            return HTMLResponse(login_page(error="当前登录会话已满，请稍后重试。"),
+                                status_code=exc.status_code)
         audit.append({"action": "login", "status": "success"})
         return response
+
+    @router.get("/session")
+    async def session_bootstrap(request: Request, response: Response):
+        """Recover UI auth state and the current CSRF value without rotating it."""
+        response.headers["Cache-Control"] = "no-store"
+        session = request.cookies.get("admin_session")
+        user_id = auth.session_user(session)
+        if user_id is None:
+            clear_session_cookies(response)
+            return {"authenticated": False}
+        csrf = auth.session_csrf(session)
+        expires_at = auth.session_expires_at(session)
+        if csrf is None or expires_at is None:
+            clear_session_cookies(response)
+            return {"authenticated": False}
+        secure = config.settings.admin.cookie_secure
+        max_age = (max(1, int(expires_at - time.time()))
+                   if auth.session_remembered(session) else None)
+        response.set_cookie("csrf_token", csrf, max_age=max_age, httponly=False,
+                            secure=secure, samesite="lax", path="/")
+        return {"authenticated": True, "user_id": user_id,
+                "must_change": auth.session_must_change(session), "csrf_token": csrf}
 
     @router.post("/change-credentials")
     async def change_credentials(request: Request, response: Response):
         session = mutate(request); body = await request.json()
-        result = auth.authenticate(auth.session_user(session) or "", str(body.get("password", "")))
+        remember = auth.session_remembered(session)
+        result = await verify_password(auth.session_user(session) or "",
+                                       str(body.get("password", "")))
         if not result.ok: raise HTTPException(401, "invalid credentials")
         try:
-            auth.change_credentials(result.user_id or "", str(body.get("username", "")), str(body.get("new_password", "")))
+            await auth.change_credentials_async(
+                result.user_id or "", str(body.get("username", "")),
+                str(body.get("new_password", "")),
+                expected_version=result.credential_version)
+        except AuthBusyError:
+            raise HTTPException(503, "administrator password verification is busy") from None
+        except StaleCredentialsError:
+            raise HTTPException(401, "invalid credentials") from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        csrf = start_session(response)
+        csrf = start_session(response, remember=remember)
         audit.append({"action": "change_credentials", "status": "success"})
         return {"ok": True, "csrf_token": csrf}
 
@@ -454,23 +741,55 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         """
         session = require(request)
         form = await form_fields(request)
-        result = auth.authenticate(auth.session_user(session) or "", str(form.get("password", "")))
+        remember = auth.session_remembered(session)
+        try:
+            result = await auth.authenticate_async(auth.session_user(session) or "",
+                                                  str(form.get("password", "")))
+        except AuthBusyError:
+            return HTMLResponse(credentials_page(csrf=auth.session_csrf(session) or "",
+                                                 error="登录服务繁忙，请稍后重试。"), status_code=503)
         if not result.ok:
             audit.append({"action": "change_credentials", "status": "failed"})
             return HTMLResponse(credentials_page(csrf=auth.session_csrf(session) or "",
                                                  error="当前密码不正确。"), status_code=401)
         try:
-            auth.change_credentials(result.user_id or "", str(form.get("username", "")),
-                                    str(form.get("new_password", "")))
+            await auth.change_credentials_async(
+                result.user_id or "", str(form.get("username", "")),
+                str(form.get("new_password", "")),
+                expected_version=result.credential_version)
+        except AuthBusyError:
+            return HTMLResponse(credentials_page(csrf=auth.session_csrf(session) or "",
+                                                 error="登录服务繁忙，请稍后重试。"), status_code=503)
+        except StaleCredentialsError:
+            audit.append({"action": "change_credentials", "status": "failed"})
+            return HTMLResponse(credentials_page(csrf=auth.session_csrf(session) or "",
+                                                 error="当前凭据已变化，请重新登录。"), status_code=401)
         except ValueError:
             audit.append({"action": "change_credentials", "status": "failed"})
             return HTMLResponse(credentials_page(csrf=auth.session_csrf(session) or "",
                                                  error="凭据未被接受：用户名不能为空，新密码至少 8 位，且不能与默认密码相同。"),
                                 status_code=422)
         response = RedirectResponse("/admin/", status_code=303)
-        start_session(response)
+        start_session(response, remember=remember)
         audit.append({"action": "change_credentials", "status": "success"})
         return response
+
+    @router.post("/logout")
+    async def logout(request: Request, response: Response):
+        session = require(request)
+        token = request.headers.get("x-csrf-token")
+        if token is None:
+            token = (await form_fields(request)).get("csrf_token")
+        if not auth.valid_csrf(session, token if isinstance(token, str) else None):
+            raise HTTPException(403, "CSRF validation failed")
+        auth.revoke_session(session)
+        audit.append({"action": "logout", "status": "success"})
+        if "text/html" in request.headers.get("accept", ""):
+            browser_response = RedirectResponse("/admin/", status_code=303)
+            clear_session_cookies(browser_response)
+            return browser_response
+        clear_session_cookies(response)
+        return {"ok": True}
 
     @router.get("/sources")
     async def list_sources(request: Request):
@@ -683,6 +1002,86 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             raise HTTPException(503, "lossless probe is unavailable")
         return await probe.check(source_id, source_version=entry.version)
 
+    def diagnostic_user(request: Request) -> str:
+        token = request.cookies.get("admin_session")
+        return auth.session_user(token) or "admin"
+
+    def diagnostic_runtime():
+        if diagnostics is None:
+            raise HTTPException(503, "source diagnostics are unavailable")
+        service = active_runtime()
+        if getattr(service, "plugin_registry", None) is None:
+            raise HTTPException(503, "source diagnostics are unavailable")
+        return service
+
+    @router.get("/sources/diagnostics")
+    async def read_source_diagnostics(request: Request):
+        require(request)
+        service = diagnostic_runtime()
+        return diagnostics.snapshot(service)
+
+    @router.post("/sources/diagnostics")
+    async def start_source_diagnostics(request: Request):
+        mutate(request)
+        service = diagnostic_runtime()
+        registry = getattr(service, "plugin_registry", None) or service.registry
+        entries = registry.enabled()
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = {}
+        if not isinstance(body, dict):
+            raise HTTPException(422, "invalid diagnostic request")
+        try:
+            report = await diagnostics.submit_many(service, entries,
+                                                  user_id=diagnostic_user(request),
+                                                  query=body.get("query"))
+        except ValueError:
+            raise HTTPException(422, "invalid diagnostic query") from None
+        return report
+
+    @router.post("/sources/{source_id}/diagnostics")
+    async def start_source_diagnostic(source_id: str, request: Request):
+        mutate(request)
+        service = diagnostic_runtime()
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = {}
+        if not isinstance(body, dict):
+            raise HTTPException(422, "invalid diagnostic request")
+        try:
+            return await diagnostics.submit(service, source_id,
+                                            user_id=diagnostic_user(request),
+                                            query=body.get("query"))
+        except ValueError:
+            raise HTTPException(422, "invalid diagnostic query") from None
+
+    @router.get("/sources/diagnostics/jobs/{job_id}")
+    async def read_source_diagnostic_job(job_id: str, request: Request):
+        require(request)
+        if diagnostics is None:
+            raise HTTPException(503, "source diagnostics are unavailable")
+        result = diagnostics.job(job_id)
+        if result is None:
+            raise HTTPException(404, "diagnostic job not found")
+        if not diagnostics.owns_job(job_id, diagnostic_user(request)):
+            raise HTTPException(404, "diagnostic job not found")
+        return result
+
+    @router.post("/sources/diagnostics/jobs/{job_id}/cancel")
+    async def cancel_source_diagnostic_job(job_id: str, request: Request):
+        mutate(request)
+        if diagnostics is None:
+            raise HTTPException(503, "source diagnostics are unavailable")
+        job = diagnostics.job(job_id)
+        if job is None or not diagnostics.owns_job(job_id, diagnostic_user(request)):
+            raise HTTPException(404, "diagnostic job not found")
+        result = await diagnostics.cancel(job_id)
+        if result["status"] == "not_found":
+            raise HTTPException(404, "diagnostic job not found")
+        return result
+
     @router.get("/search")
     @uses_runtime
     async def search(request: Request, q: str = "", limit: int = 50):
@@ -767,8 +1166,8 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
     @router.post("/download")
     @uses_runtime
     async def download(body: dict, request: Request):
-        mutate(request)
-        active_runtime()
+        session = mutate(request)
+        service = active_runtime()
         if media_root is None:
             raise HTTPException(503, "media root is unavailable")
         try:
@@ -779,32 +1178,99 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         query = handed.strip() if isinstance(handed, str) and handed.strip() else candidate.title
         if len(query) > 500:
             raise HTTPException(422, "query too long")
-        request_id = secrets.token_hex(16)
+
+        user_id = auth.session_user(session) or "admin"
+        quality = tier_for(candidate)
+        key = panel_download_key(user_id, candidate, quality, query, service)
+
+        async def operation():
+            return await perform_panel_download(service, candidate, query, quality, user_id)
+
         try:
-            journal = DownloadJournal(history, request_id, candidate, origin="panel", query=query,
-                                      quality=tier_for(candidate))
-        except HistoryCapacity:
-            raise HTTPException(503, "history_capacity") from None
-        except HistoryUnavailable:
-            raise HTTPException(503, "history_unavailable") from None
-        with journal.activate():
+            return await panel_downloads.run(key, service, operation)
+        except PanelDownloadDeadlineError:
+            raise HTTPException(504, "media_timeout") from None
+        except PanelRuntimeRetired:
+            raise HTTPException(503, "runtime_reloading") from None
+        except PanelDownloadCapacityError as exc:
+            raise HTTPException(503, detail={"code": exc.code, "admission": exc.snapshot}) from None
+
+    async def perform_panel_download(service: Any, candidate: Candidate, query: str,
+                                     quality: str | None, user_id: str) -> dict:
+        request_id = secrets.token_hex(16)
+        journal = None
+        loop = asyncio.get_running_loop()
+        total_timeout = panel_download_total_timeout(
+            service, resolve_timeout=resolve_timeout, search_timeout=search_timeout,
+            health_timeout=health_timeout, queue_wait_seconds=PANEL_DOWNLOAD_QUEUE_WAIT_SECONDS,
+        )
+        operation_deadline = loop.time() + total_timeout
+        deadline = asyncio.timeout_at(operation_deadline)
+        admission_permit = None
+
+        async def run_journaled():
+            nonlocal journal
             try:
-                result = await perform_download(body, request, request_id)
-            except asyncio.CancelledError:
-                journal.finish("interrupted", error_code="download_cancelled")
-                raise
-            except HTTPException as exc:
-                journal.finish("failed", error_code="source_unavailable"
-                               if exc.detail == "source cannot resolve media" else exc.detail)
-                raise
-            except Exception:
-                journal.finish("failed", error_code="download_failed")
-                raise
+                journal = DownloadJournal(history, request_id, candidate, origin="panel", query=query,
+                                          quality=quality)
+            except HistoryCapacity:
+                raise HTTPException(503, "history_capacity") from None
+            except HistoryUnavailable:
+                raise HTTPException(503, "history_unavailable") from None
+            with journal.activate():
+                try:
+                    result = await perform_download(candidate, query, service, request_id,
+                                                    admission_permit=admission_permit)
+                except asyncio.CancelledError:
+                    timed_out = deadline.expired()
+                    journal.finish("failed" if timed_out else "interrupted",
+                                   error_code="media_timeout" if timed_out else "download_cancelled")
+                    raise
+                except HTTPException as exc:
+                    journal.finish("failed", error_code="source_unavailable"
+                                   if exc.detail == "source cannot resolve media" else exc.detail)
+                    raise
+                except PanelDownloadCapacityError as exc:
+                    journal.finish("interrupted", error_code=exc.code)
+                    raise
+                except Exception:
+                    journal.finish("failed", error_code="download_failed")
+                    raise
             if journal.finish("succeeded", result=result):
                 result["history_warning"] = "history_unavailable"
             return result
 
-    async def perform_download(body: dict, request: Request, request_id: str):
+        try:
+            async with deadline:
+                if panel_downloads.admission is None:
+                    return await run_journaled()
+                try:
+                    async with panel_downloads.admission.acquire(
+                        source_id=candidate.source_id,
+                        user_id=user_id,
+                        timeout=PANEL_DOWNLOAD_QUEUE_WAIT_SECONDS,
+                        operation_deadline=operation_deadline,
+                        transition_timeout=PANEL_DOWNLOAD_QUEUE_WAIT_SECONDS,
+                    ) as admission_permit:
+                        return await run_journaled()
+                except AdmissionQueueFull as exc:
+                    raise PanelDownloadCapacityError("download_queue_full", exc.snapshot) from None
+                except AdmissionTimeout as exc:
+                    raise PanelDownloadCapacityError("download_queue_timeout", exc.snapshot) from None
+                except AdmissionRejected as exc:
+                    code = ("download_source_timeout" if isinstance(exc, AdmissionTimeout)
+                            else "download_source_capacity")
+                    raise PanelDownloadCapacityError(code, exc.snapshot) from None
+        except TimeoutError:
+            if admission_permit is not None:
+                status = admission_permit.take_source_wait_interruption_status()
+                if status == "admission_wait":
+                    raise PanelDownloadCapacityError("download_source_timeout",
+                                                     admission_permit.snapshot()) from None
+            raise PanelDownloadDeadlineError() from None
+
+    async def perform_download(candidate: Candidate, query: str, service: Any, request_id: str,
+                               *, admission_permit=None):
         """Download one candidate the search just listed, into the media root.
 
         The body carries the candidate itself rather than an id the server has
@@ -819,22 +1285,14 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         and a runtime assembled without the callback keeps the older
         single-channel behaviour.
         """
-        mutate(request)
-        service = active_runtime()
         if media_root is None:
             raise HTTPException(503, "media root is unavailable")
-        try:
-            candidate = Candidate.model_validate(body.get("candidate"))
-        except ValidationError:
-            raise HTTPException(422, "invalid candidate") from None
         language = await resolve_language(candidate, getattr(service, "language_advisor", None))
         resolvers = getattr(service, "resolvers", None) or {}
         refresh = getattr(service, "refresh", None)
         # The operator searched for something; the retry has to search for the
         # same thing rather than for whatever the candidate happens to be
         # titled on the channel that failed.
-        handed = body.get("query")
-        query = handed.strip() if isinstance(handed, str) and handed.strip() else candidate.title
         # What the operator asked for, by the worker's own rules.  In this
         # deployment the listed candidate declares no tiers at all, which under
         # ``lossless_first`` still means "ask for FLAC" and under
@@ -876,9 +1334,14 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                     result = await download_candidate(candidate, source, media_root,
                                                       request_id=request_id, language=language,
                                                       quality=quality,
-                                                      verify_duration=verify_duration, record=recorded)
+                                                      verify_duration=verify_duration, record=recorded,
+                                                      admission_permit=admission_permit)
             except MediaError as exc:
                 raise failed(exc.code) from None
+            except AdmissionRejected as exc:
+                status = ("download_source_timeout" if isinstance(exc, AdmissionTimeout)
+                          else "download_source_capacity")
+                raise PanelDownloadCapacityError(status, exc.snapshot) from None
             except TimeoutError:
                 # asyncio.timeout cancels the inner transfer first. Replace
                 # that cancellation with the timeout verdict for this attempt.
@@ -891,17 +1354,35 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         # Each stage below carries its own budget, which is what bounds the
         # call: one resolve, one refresh, one health probe, and at most one
         # more resolve when the refresh produced another channel's copy.
-        attempt = await download_with_fallback(
-            candidate, resolvers, media_root, request_id=request_id, query=query, refresh=refresh,
-            resolve_stream_timeout=_stream_budget(resolvers.get(candidate.source_id), resolve_timeout),
-            refresh_timeout=search_timeout, language=language, quality=quality,
-            quality_policy=quality_policy,
-            preference=(source_health.delivery_preference if quality_policy == "lossless_first"
-                        else getattr(service, "preference", None)),
-            channel_health=(source_health.delivery_health if quality_policy == "lossless_first"
-                            else source_health.fallback_health),
-            lossless_capability=getattr(service, "lossless_capability", None),
-            health_timeout=health_timeout, verify_duration=verify_duration, record=recorded)
+        try:
+            attempt = await download_with_fallback(
+                candidate, resolvers, media_root, request_id=request_id, query=query, refresh=refresh,
+                resolve_stream_timeout=_stream_budget(resolvers.get(candidate.source_id), resolve_timeout),
+                refresh_timeout=search_timeout, language=language, quality=quality,
+                quality_policy=quality_policy,
+                preference=(source_health.delivery_preference if quality_policy == "lossless_first"
+                            else getattr(service, "preference", None)),
+                channel_health=(source_health.delivery_health if quality_policy == "lossless_first"
+                                else source_health.fallback_health),
+                lossless_capability=getattr(service, "lossless_capability", None),
+                health_timeout=health_timeout, verify_duration=verify_duration, record=recorded,
+                admission_permit=admission_permit)
+        except AdmissionRejected as exc:
+            status = ("download_source_timeout" if isinstance(exc, AdmissionTimeout)
+                      else "download_source_capacity")
+            raise PanelDownloadCapacityError(status, exc.snapshot) from None
+        if admission_permit is not None:
+            interrupted_status = admission_permit.take_source_wait_interruption_status()
+            if interrupted_status == "admission_wait":
+                raise PanelDownloadCapacityError("download_source_timeout",
+                                                 admission_permit.snapshot())
+            if interrupted_status == "global_deadline":
+                raise PanelDownloadDeadlineError()
+        if attempt.download_error in {"download_admission_blocked", "download_admission_timeout"}:
+            status = ("download_source_capacity" if attempt.download_error == "download_admission_blocked"
+                      else "download_source_timeout")
+            raise PanelDownloadCapacityError(status,
+                                             admission_permit.snapshot() if admission_permit else {})
         if attempt.download is not None:
             source_id = attempt.download_source_id or candidate.source_id
             return report(source_id, candidate.source_id if source_id != candidate.source_id else None,
@@ -960,11 +1441,14 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
 
             try:
                 replacement_source = resolvers[replacement.source_id]
+                if admission_permit is not None:
+                    await admission_permit.switch_source(replacement.source_id)
                 async with asyncio.timeout(_stream_budget(replacement_source, resolve_timeout)):
                     result = await download_candidate(replacement, replacement_source, media_root,
                                                       request_id=request_id, language=language,
                                                       quality=replacement_quality,
-                                                      verify_duration=verify_duration, record=record_replacement)
+                                                      verify_duration=verify_duration, record=record_replacement,
+                                                      admission_permit=admission_permit)
             except asyncio.CancelledError:
                 for event in replacement_failures:
                     recorded(event)
@@ -973,8 +1457,18 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                 code = exc.code
                 finish_replacement_failure(code)
             except TimeoutError:
+                if admission_permit is not None:
+                    interrupted = admission_permit.take_source_wait_interruption()
+                    if interrupted is not None:
+                        status = ("download_source_timeout" if isinstance(interrupted, AdmissionTimeout)
+                                  else "download_source_capacity")
+                        raise PanelDownloadCapacityError(status, interrupted.snapshot) from None
                 code = "media_timeout"
                 finish_replacement_failure(code)
+            except AdmissionRejected as exc:
+                status = ("download_source_timeout" if isinstance(exc, AdmissionTimeout)
+                          else "download_source_capacity")
+                raise PanelDownloadCapacityError(status, exc.snapshot) from None
             else:
                 return report(replacement.source_id, candidate.source_id, result)
             may_continue_after_error = code in CONTENT_FAILURE_CODES
@@ -1214,12 +1708,19 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         bot_ids = ''.join(
             f"<li>{escape(item['id'])}{'' if item.get('username') is None else ' (' + escape(item['username']) + ')'}</li>"
             for item in bots.list())
+        csrf = auth.session_csrf(session, request.cookies.get("csrf_token")) or ""
+        logout = ('<form method="post" action="/admin/logout">'
+                  f'<input type="hidden" name="csrf_token" value="{escape(csrf, quote=True)}">'
+                  '<button type="submit">退出登录</button></form>')
         report = await health.check()
         health_html = " ".join(f"<span>{escape(str(k))}: {escape(str(v))}</span>" for k,v in report["checks"].items())
         event_page = events.page(offset=0, limit=1); audit_page = audit.page(offset=0, limit=1)
         recent = escape(str(event_page["items"][0])) if event_page["items"] else "none"
         audit_recent = escape(str(audit_page["items"][0])) if audit_page["items"] else "none"
-        return HTMLResponse(render_dashboard(warning=warning, sources=source_ids, bots=bot_ids, health=health_html, event_total=event_page["total"], recent=recent, audit_total=audit_page["total"], audit_recent=audit_recent))
+        return HTMLResponse(render_dashboard(warning=warning, logout=logout, sources=source_ids,
+                                             bots=bot_ids, health=health_html,
+                                             event_total=event_page["total"], recent=recent,
+                                             audit_total=audit_page["total"], audit_recent=audit_recent))
 
     return router
 
@@ -1230,5 +1731,13 @@ def render_dashboard(*, template_path: str | Path | None = None, **values: objec
         path = Path(template_path) if template_path is not None else Path(__file__).parent.parent / "templates" / "admin_dashboard.html"
         template = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        template = "<html><body><h1>musicdl 管理后台</h1>{{warning}}<div>{{health}}</div><ul>{{sources}}</ul><ul>{{bots}}</ul><div>events={{event_total}} {{recent}}</div><div>audit={{audit_total}} {{audit_recent}}</div></body></html>"
-    return template.replace("{{warning}}", str(values.get("warning", ""))).replace("{{sources}}", str(values.get("sources", ""))).replace("{{bots}}", str(values.get("bots", ""))).replace("{{health}}", str(values.get("health", ""))).replace("{{event_total}}", str(values.get("event_total", 0))).replace("{{recent}}", str(values.get("recent", "none"))).replace("{{audit_total}}", str(values.get("audit_total", 0))).replace("{{audit_recent}}", str(values.get("audit_recent", "none")))
+        template = "<html><body><h1>musicdl 管理后台</h1>{{warning}}{{logout}}<div>{{health}}</div><ul>{{sources}}</ul><ul>{{bots}}</ul><div>events={{event_total}} {{recent}}</div><div>audit={{audit_total}} {{audit_recent}}</div></body></html>"
+    return (template.replace("{{warning}}", str(values.get("warning", "")))
+            .replace("{{logout}}", str(values.get("logout", "")))
+            .replace("{{sources}}", str(values.get("sources", "")))
+            .replace("{{bots}}", str(values.get("bots", "")))
+            .replace("{{health}}", str(values.get("health", "")))
+            .replace("{{event_total}}", str(values.get("event_total", 0)))
+            .replace("{{recent}}", str(values.get("recent", "none")))
+            .replace("{{audit_total}}", str(values.get("audit_total", 0)))
+            .replace("{{audit_recent}}", str(values.get("audit_recent", "none"))))

@@ -181,6 +181,34 @@ curl http://127.0.0.1:8000/readyz
 
 By default, access the panel through an HTTPS reverse proxy. Before using [http://127.0.0.1:8000](http://127.0.0.1:8000) directly, apply the HTTP cookie settings under Configuration below. Sign in with the initial credentials supplied by your deployment. A fresh installation requires the default credentials to be replaced before the rest of the administration API can be used.
 
+Source builds include a **Remember me** option for a 30-day login. Remembered
+sessions survive service restarts when the app-data volume is retained; ordinary
+logins use a browser session cookie with a 12-hour server-side expiry. The panel
+recovers the current session when opened again, and **Log out** revokes it.
+Changing administrator credentials invalidates existing sessions. The browser
+stores a session cookie; the application does not save your password there.
+These additions are pending the next numbered image release.
+
+Source builds also show the latest ten real search/download requests as channel
+health bars with their most recent timestamp. Successes are green, failures are
+red, and unknown or excluded outcomes are neutral; hover or focus a bar for its
+time and result. No requests produces an empty state. The existing three rates
+retain their separate definitions. This recent-request window is process-local
+and resets on restart or a source version change.
+
+On the Sources page, **Test source** and **Test all** run bounded search and
+quality-aware link-resolution diagnostics. You can cancel a running test and
+inspect its last result and timestamp. A resolved link is explicitly marked
+**Download not yet verified**; use the existing real download flow to validate
+the media bytes. Diagnostic probes do not enter real-request health statistics.
+Results are associated with the source version and script fingerprint, so
+replaced scripts show older results as stale.
+
+Downloads share a process-level budget across panel requests and workers:
+four active downloads, sixteen waiting, and at most two active downloads per
+source or user. Runtime reloads retain this budget. Multiple application
+processes each have their own budget.
+
 From the panel you can:
 
 1. Import or manage compatible JavaScript source scripts.

@@ -10,6 +10,7 @@ from musicdl.sources.models import Candidate, normalize_text
 from musicdl.sources.search import SearchResult
 
 from .download import download_candidate, source_download, _close_metadata
+from .admission import AdmissionPermit, AdmissionRejected, AdmissionTimeout
 from musicdl.sources.quality import is_lossless, proven_lossy, requested_quality, quality_rank
 from .models import (
     MAX_MEDIA_BYTES,
@@ -154,7 +155,8 @@ def replacement_channel_rows(
 
 async def _resolve_media(source: DownloadSource, candidate: Candidate, quality: str | None, *,
                          request_id: str,
-                         record: Callable[[DownloadEvent], None] | None) -> DownloadMetadata:
+                         record: Callable[[DownloadEvent], None] | None,
+                         admission_permit: AdmissionPermit | None = None) -> DownloadMetadata:
     """Resolve one descriptor the way ``download_candidate`` reports a dead channel.
 
     The pre-resolve and the re-resolve happen in this module rather than inside
@@ -167,7 +169,10 @@ async def _resolve_media(source: DownloadSource, candidate: Candidate, quality: 
     its own code and the caller's existing classification, with no second event.
     """
     try:
-        return await source_download(source, candidate, quality=quality)
+        return await source_download(source, candidate, quality=quality,
+                                     admission_permit=admission_permit)
+    except AdmissionRejected:
+        raise
     except MediaError as exc:
         error_code = exc.code if exc.code in _DOWNLOAD_CODES else "download_failed"
         emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id,
@@ -209,6 +214,7 @@ async def download_with_fallback(
     max_bytes: int = MAX_MEDIA_BYTES,
     verify_duration: str = "lenient",
     record: Callable[[DownloadEvent], None] | None = None,
+    admission_permit: AdmissionPermit | None = None,
 ) -> FallbackResult:
     if verify_duration not in {"lenient", "strict"}:
         raise ValueError("invalid_verify_duration")
@@ -241,7 +247,8 @@ async def download_with_fallback(
                 common = dict(request_id=request_id, reservation=reservation,
                               artifact_store=artifact_store, owner=owner, fence=fence,
                               language=language, max_bytes=max_bytes, verify_duration=verify_duration,
-                              record=attempt_record, prepare=prepare)
+                              record=attempt_record, prepare=prepare,
+                              admission_permit=admission_permit)
 
                 async def stream(stream_source, stream_target, requested, resolved):
                     nonlocal successful_source
@@ -261,7 +268,8 @@ async def download_with_fallback(
                             raise
                     await _close_metadata(resolved)
                     fresh = await _resolve_media(stream_source, stream_target, requested,
-                                               request_id=request_id, record=attempt_record)
+                                               request_id=request_id, record=attempt_record,
+                                               admission_permit=admission_permit)
                     try:
                         result = await download_candidate(stream_target, stream_source, media_root, quality=requested,
                                                           resolved_metadata=fresh, **common)
@@ -287,7 +295,8 @@ async def download_with_fallback(
                     successful_source = target.source_id
                     return result
                 metadata = await _resolve_media(source_obj, target, target_quality,
-                                               request_id=request_id, record=attempt_record)
+                                               request_id=request_id, record=attempt_record,
+                                               admission_permit=admission_permit)
                 try:
                     downgraded = proven_lossy(metadata.quality)
                     if downgraded:
@@ -315,6 +324,8 @@ async def download_with_fallback(
                                     channel_rows=channel_rows)
                                 if matches:
                                     alternate = matches[0]
+                                    if admission_permit is not None:
+                                        await admission_permit.switch_source(alternate.source_id)
                                     alternate_quality = requested_quality(alternate, policy=quality_policy,
                                                                           preference=target_quality) or target_quality
                                     attempted_sources.add(alternate.source_id)
@@ -326,7 +337,8 @@ async def download_with_fallback(
                                         skipped_sources=skipped))
                                     alternate_metadata = await _resolve_media(
                                         sources[alternate.source_id], alternate, alternate_quality,
-                                        request_id=request_id, record=record)
+                                        request_id=request_id, record=record,
+                                        admission_permit=admission_permit)
                                     try:
                                         lower = (quality_rank(alternate_metadata.quality) > 0 and
                                                  quality_rank(alternate_metadata.quality) < quality_rank(metadata.quality))
@@ -341,7 +353,17 @@ async def download_with_fallback(
                         except MediaError as exc:
                             if exc.code == "artifact_uncertain":
                                 raise
-                        except (TimeoutError, RuntimeError, ValueError):
+                        except AdmissionRejected:
+                            raise
+                        except TimeoutError:
+                            interruption = (None if admission_permit is None else
+                                            admission_permit.take_source_wait_interruption_status())
+                            if interruption == "admission_wait":
+                                raise AdmissionTimeout("download source transition timed out",
+                                                       admission_permit.snapshot()) from None
+                            if interruption == "global_deadline":
+                                raise
+                        except (RuntimeError, ValueError):
                             pass
                     downloaded = await stream(source_obj, target, target_quality, metadata)
                     # The verdict belongs to the bytes that arrive, not to the
@@ -368,10 +390,19 @@ async def download_with_fallback(
         except asyncio.CancelledError:
             raise
         except TimeoutError:
+            interruption = (None if admission_permit is None else
+                            admission_permit.take_source_wait_interruption_status())
+            if interruption == "admission_wait":
+                raise AdmissionTimeout("download source transition timed out",
+                                       admission_permit.snapshot()) from None
+            if interruption == "global_deadline":
+                raise
             # The shared resolve+stream budget expired; the inner attempt already closed its stream.
             download_error = "media_timeout"
             emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                                  "download", "failed", error_code=download_error))
+        except AdmissionRejected:
+            raise
         except MediaError as exc:
             download_error = exc.code if exc.code in _DOWNLOAD_CODES else "download_failed"
 
@@ -404,6 +435,11 @@ async def download_with_fallback(
                 break
             alternate = ranked[0]
             prior_error = download_error
+            if admission_permit is not None:
+                try:
+                    await admission_permit.switch_source(alternate.source_id)
+                except AdmissionRejected:
+                    raise
             attempted_sources.add(alternate.source_id)
             switch_count += 1
             emit_event(record, DownloadEvent(
@@ -448,9 +484,18 @@ async def download_with_fallback(
                     emit_event(record, event)
                 raise
             except TimeoutError:
+                interruption = (None if admission_permit is None else
+                                admission_permit.take_source_wait_interruption_status())
+                if interruption == "admission_wait":
+                    raise AdmissionTimeout("download source transition timed out",
+                                           admission_permit.snapshot()) from None
+                if interruption == "global_deadline":
+                    raise
                 download_error = "media_timeout"
                 finish_attempt_failure(download_error)
                 break
+            except AdmissionRejected:
+                raise
             except MediaError as exc:
                 download_error = exc.code if exc.code in _DOWNLOAD_CODES else "download_failed"
                 finish_attempt_failure(download_error)

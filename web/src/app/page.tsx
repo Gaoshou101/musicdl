@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Lock } from '@phosphor-icons/react'
-import { USERNAME_STORAGE_KEY, errorMessage, login } from '@/lib/api'
+import { USERNAME_STORAGE_KEY, bootstrapAdminSession, errorMessage, login } from '@/lib/api'
 import { ThemeToggle } from '@/components/Sidebar'
 
 export default function LoginPage() {
@@ -12,17 +12,32 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [remember, setRemember] = useState(false)
+  const [restoring, setRestoring] = useState(true)
 
   // Read after mounting rather than in the initial state: the server renders
   // this form too, and it has no localStorage to read from.
   useEffect(() => {
+    let active = true
     try {
       const remembered = window.localStorage.getItem(USERNAME_STORAGE_KEY)
       if (remembered) setUsername(remembered)
     } catch {
       // Storage disabled; the default stands.
     }
-  }, [])
+    void bootstrapAdminSession()
+      .then((session) => {
+        if (!active || !session.authenticated) return
+        router.replace(session.must_change ? '/dashboard/settings?must_change=1' : '/dashboard')
+      })
+      .catch((err) => {
+        if (active) setError(errorMessage(err))
+      })
+      .finally(() => {
+        if (active) setRestoring(false)
+      })
+    return () => { active = false }
+  }, [router])
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -30,7 +45,7 @@ export default function LoginPage() {
     setLoading(true)
 
     try {
-      const report = await login(username.trim(), password)
+      const report = await login(username.trim(), password, remember)
       try {
         window.localStorage.setItem(USERNAME_STORAGE_KEY, username.trim())
       } catch {
@@ -156,6 +171,16 @@ export default function LoginPage() {
                 />
               </div>
 
+              <label className="flex cursor-pointer items-center gap-3 text-sm text-neutral-300">
+                <input
+                  type="checkbox"
+                  checked={remember}
+                  onChange={(e) => setRemember(e.target.checked)}
+                  className="h-4 w-4 rounded border-neutral-700 bg-neutral-950 text-accent-400 focus:ring-accent-400/40"
+                />
+                <span>记住我，保持登录 30 天</span>
+              </label>
+
               {error && (
                 <div
                   role="alert"
@@ -167,11 +192,14 @@ export default function LoginPage() {
 
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || restoring}
                 className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-accent-500 px-4 py-3 font-medium text-neutral-50 shadow-lg shadow-accent-500/15 transition-[background-color,box-shadow,transform] hover:bg-accent-400 hover:shadow-accent-500/25 focus:outline-none focus:ring-4 focus:ring-accent-400/30 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
               >
-                {loading ? (
-                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-50 border-t-transparent" />
+                {loading || restoring ? (
+                  <>
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-neutral-50 border-t-transparent" />
+                    <span>{restoring ? '正在恢复登录…' : '正在登录…'}</span>
+                  </>
                 ) : (
                   <>
                     <Lock size={19} weight="duotone" aria-hidden="true" />
@@ -183,7 +211,7 @@ export default function LoginPage() {
 
             <div className="mt-7 flex items-start gap-2 border-t border-neutral-800/70 pt-5">
               <p className="text-xs leading-5 text-neutral-500">
-                使用部署时设置的管理员账号登录；若仍在使用默认密码，登录后会先要求修改。
+                使用部署时设置的管理员账号登录；若仍在使用默认密码，登录后会先要求修改。未勾选时登录有效期为 12 小时。
               </p>
             </div>
           </div>
