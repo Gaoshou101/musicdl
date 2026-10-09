@@ -380,6 +380,15 @@ export type SourceFetchReport = {
   language: 'javascript' | 'python'
 }
 
+export type SourceListFetchReport = {
+  kind: 'source_list'
+  format: 'musicdl-source-list/v1'
+  sources: Array<{ url: string }>
+}
+
+/** A top-level URL may resolve to one script or an explicit source catalog. */
+export type SourceFetchInputReport = SourceFetchReport | SourceListFetchReport
+
 export type ImportPreview = {
   id: { value: string | null; valid: boolean; reason: string | null; suggested: string }
   install_path: 'lx' | 'generic'
@@ -909,8 +918,15 @@ export function analyzeSource(source: SourceImport): Promise<ImportPreview> {
   return request<ImportPreview>('/sources/analyze', { method: 'POST', body: source })
 }
 
-export function fetchSource(url: string): Promise<SourceFetchReport> {
-  return request<SourceFetchReport>('/sources/fetch', { method: 'POST', body: { url } })
+export function fetchSource(url: string, signal?: AbortSignal): Promise<SourceFetchReport> {
+  return request<SourceFetchReport>('/sources/fetch', { method: 'POST', body: { url }, signal })
+}
+
+/** Opt in to expanding a top-level source catalog; child fetches use fetchSource. */
+export function fetchSourceInput(url: string, signal?: AbortSignal): Promise<SourceFetchInputReport> {
+  return request<SourceFetchInputReport>('/sources/fetch', {
+    method: 'POST', body: { url, allow_source_list: true }, signal,
+  })
 }
 
 export function installSource(source: SourceImport): Promise<MutationReport<SourceItem>> {

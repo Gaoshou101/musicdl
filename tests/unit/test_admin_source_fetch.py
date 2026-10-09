@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import socket
 import threading
 from io import BytesIO
@@ -12,7 +13,13 @@ from fastapi import FastAPI
 from musicdl.admin.auth import AdminAuth
 from musicdl.admin.health import EventLogStore
 from musicdl.admin.portal import create_admin_router
-from musicdl.admin.source_fetch import SourceFetchError, _guarded_resolver, fetch_source
+from musicdl.admin.source_fetch import (
+    SOURCE_LIST_FORMAT,
+    SourceFetchError,
+    _guarded_resolver,
+    fetch_source,
+    normalize_source_import,
+)
 from musicdl.plugins.broker import ActionDenied, HttpsActionBroker
 from musicdl.plugins.store import PluginStore
 
@@ -87,6 +94,109 @@ def test_fetch_source_decodes_bom_and_derives_only_the_path_filename():
     assert policy.allowed_hosts == ("example.com",)
     assert policy.allowed_ports == (443,) and policy.allow_insecure_http is False
     assert timeout == 10.0
+
+
+def test_fetch_source_keeps_legacy_direct_http_imports():
+    broker = FakeBroker(observation(b"print('legacy')"))
+
+    result = fetch_source("http://example.com/legacy.py", broker=broker)
+
+    assert result == {"script": "print('legacy')", "filename": "legacy.py", "language": "python"}
+    _action, policy, _timeout = broker.calls[0]
+    assert policy.allowed_hosts == ("example.com",)
+    assert policy.allowed_ports == (80,) and policy.allow_insecure_http is True
+
+
+def test_source_list_expands_only_after_explicit_opt_in_and_keeps_the_script_shape():
+    urls = ["https://sources.example/one.py", "https://sources.example/two.js"]
+    source = {"script": json.dumps({"format": SOURCE_LIST_FORMAT,
+                                   "sources": [{"url": url} for url in urls]}),
+              "filename": "catalog.json", "language": "javascript"}
+
+    with pytest.raises(SourceFetchError) as exc:
+        normalize_source_import(source, "https://catalog.example/catalog.json")
+    assert exc.value.code == "source_list_nested"
+
+    assert normalize_source_import(source, "https://catalog.example/catalog.json",
+                                   allow_source_list=True, content_type="application/json") == {
+        "kind": "source_list", "format": SOURCE_LIST_FORMAT,
+        "sources": [{"url": url} for url in urls],
+    }
+    assert normalize_source_import({"script": "export default {format: 'ordinary'}",
+                                   "filename": "source.js", "language": "javascript"},
+                                  "http://example.com/source.js") == {
+        "script": "export default {format: 'ordinary'}",
+        "filename": "source.js", "language": "javascript",
+    }
+
+
+@pytest.mark.parametrize("document", [
+    {"format": SOURCE_LIST_FORMAT, "sources": []},
+    {"format": SOURCE_LIST_FORMAT, "sources": [{"url": "https://a.example/a"}] * 21},
+    {"format": SOURCE_LIST_FORMAT, "sources": [{"url": "https://a.example/a", "grant": True}]},
+    {"format": SOURCE_LIST_FORMAT, "sources": [{"url": "https://a.example/a"}], "grants": []},
+    {"format": SOURCE_LIST_FORMAT, "sources": [{"url": "https://a.example/a"},
+                                                 {"url": "https://A.example/a"}]},
+])
+def test_source_list_rejects_bad_count_duplicates_and_extra_schema_fields(document):
+    source = {"script": json.dumps(document), "filename": "catalog.json", "language": "javascript"}
+
+    with pytest.raises(SourceFetchError) as exc:
+        normalize_source_import(source, "https://catalog.example/catalog.json", allow_source_list=True)
+
+    assert exc.value.code == "source_list_invalid"
+
+
+@pytest.mark.parametrize("url", [
+    "http://sources.example/a.py",
+    "https://127.0.0.1/a.py",
+    "https://2130706433/a.py",
+    "https://user@sources.example/a.py",
+    "https://sources.example:8443/a.py",
+    "https://sources.example/a.py#fragment",
+    "https://sources.example/a.py#",
+    "https://bad_host.example/a.py",
+])
+def test_source_list_rejects_non_https_non_dns_or_ambiguous_entry_urls(url):
+    source = {"script": json.dumps({"format": SOURCE_LIST_FORMAT, "sources": [{"url": url}]}),
+              "filename": "catalog.json", "language": "javascript"}
+
+    with pytest.raises(SourceFetchError) as exc:
+        normalize_source_import(source, "https://catalog.example/catalog.json", allow_source_list=True)
+
+    assert exc.value.code == "source_list_url_invalid"
+
+
+def test_source_list_requires_an_https_root_url():
+    source = {"script": json.dumps({"format": SOURCE_LIST_FORMAT,
+                                   "sources": [{"url": "https://sources.example/a.py"}]}),
+              "filename": "catalog.json", "language": "javascript"}
+
+    with pytest.raises(SourceFetchError) as exc:
+        normalize_source_import(source, "http://catalog.example/catalog.json", allow_source_list=True)
+
+    assert exc.value.code == "source_list_url_invalid"
+
+
+@pytest.mark.parametrize(("script", "filename", "content_type", "code"), [
+    ('{"format":"musicdl-source-list/v1",', "catalog.json", "application/json", "source_list_invalid"),
+    (json.dumps({"format": "musicdl-source-list/v2", "sources": []}),
+     "catalog.json", "application/json", "source_list_unsupported"),
+    (json.dumps({"sources": [{"url": "https://a.example/"}]}),
+     "catalog.json", "application/json", "source_list_invalid"),
+    ('{"format":"musicdl-source-list/v1","sources":[],"sources":[]}',
+     "source.js", "application/json", "source_list_invalid"),
+])
+def test_source_list_reports_stable_errors_for_malformed_or_unsupported_catalogs(
+        script, filename, content_type, code):
+    source = {"script": script, "filename": filename, "language": "javascript"}
+
+    with pytest.raises(SourceFetchError) as exc:
+        normalize_source_import(source, "https://catalog.example/catalog.json",
+                                allow_source_list=True, content_type=content_type)
+
+    assert exc.value.code == code
+    assert "catalog.example" not in str(exc.value)
 
 
 @pytest.mark.parametrize("url", [
@@ -196,11 +306,12 @@ def test_guarded_resolver_rejects_private_multicast_and_reserved_answers(ip):
     assert exc.value.code == "address_denied"
 
 
-def _client(tmp_path, *, source_fetcher, audit):
+def _client(tmp_path, *, source_fetcher=None, source_broker=None, audit):
     app = FastAPI()
     auth = AdminAuth()
     auth.change_credentials("admin", "operator", "new-password")
     app.include_router(create_admin_router(auth=auth, audit=audit, source_fetcher=source_fetcher,
+                                           source_broker=source_broker,
                                            plugins=lambda: PluginStore(tmp_path)))
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test")
 
@@ -237,6 +348,103 @@ def test_fetch_route_is_csrf_bound_and_has_no_storage_or_audit_side_effect(tmp_p
     assert sources.json()["items"] == []
     assert calls == ["https://example.com/source.py"]
     assert all(item.get("action") != "fetch_source" for item in audit.page()["items"])
+
+
+def test_fetch_route_source_list_opt_in_returns_urls_without_fetching_children(tmp_path):
+    root_url = "https://catalog.example/catalog.json"
+    child_urls = ["https://sources.example/one.py", "https://sources.example/two.js"]
+    calls = []
+
+    def fetcher(url):
+        calls.append(url)
+        return {"script": json.dumps({"format": SOURCE_LIST_FORMAT,
+                                     "sources": [{"url": child} for child in child_urls]}),
+                "filename": "catalog.json", "language": "javascript"}
+
+    async def run():
+        async with _client(tmp_path, source_fetcher=fetcher, audit=EventLogStore()) as client:
+            csrf = await _login(client)
+            disabled = await client.post("/admin/sources/fetch", headers={"x-csrf-token": csrf},
+                                         json={"url": root_url})
+            enabled = await client.post("/admin/sources/fetch", headers={"x-csrf-token": csrf},
+                                        json={"url": root_url, "allow_source_list": True})
+        return disabled, enabled
+
+    disabled, enabled = asyncio.run(run())
+
+    assert disabled.status_code == 422
+    assert disabled.json() == {"detail": "source_list_nested"}
+    assert enabled.status_code == 200
+    assert enabled.json() == {"kind": "source_list", "format": SOURCE_LIST_FORMAT,
+                              "sources": [{"url": child} for child in child_urls]}
+    assert calls == [root_url, root_url]
+
+
+def test_fetch_route_broker_reads_only_the_root_manifest(tmp_path):
+    root_url = "https://catalog.example/catalog.json"
+    child_urls = ["https://sources.example/one.py", "https://sources.example/two.js"]
+    broker = FakeBroker(observation(json.dumps({"format": SOURCE_LIST_FORMAT,
+                                               "sources": [{"url": child} for child in child_urls]})
+                                    .encode(), content_type="application/json"))
+
+    async def run():
+        async with _client(tmp_path, source_broker=broker, audit=EventLogStore()) as client:
+            csrf = await _login(client)
+            response = await client.post("/admin/sources/fetch", headers={"x-csrf-token": csrf},
+                                         json={"url": root_url, "allow_source_list": True})
+        return response
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 200
+    assert response.json() == {"kind": "source_list", "format": SOURCE_LIST_FORMAT,
+                              "sources": [{"url": child} for child in child_urls]}
+    assert len(broker.calls) == 1
+    action, policy, _timeout = broker.calls[0]
+    assert action.url == root_url and action.method == "GET"
+    assert policy.allowed_hosts == ("catalog.example",) and policy.allowed_ports == (443,)
+
+
+def test_fetch_route_malformed_catalog_error_does_not_leak_response_body(tmp_path):
+    secret_body = b'{"format":"musicdl-source-list/v1","sources": ["secret-value"'
+    broker = FakeBroker(observation(secret_body, content_type="application/json"))
+
+    async def run():
+        async with _client(tmp_path, source_broker=broker, audit=EventLogStore()) as client:
+            csrf = await _login(client)
+            response = await client.post("/admin/sources/fetch", headers={"x-csrf-token": csrf},
+                                         json={"url": "https://catalog.example/catalog.json",
+                                               "allow_source_list": True})
+        return response
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "source_list_invalid"}
+    assert "secret-value" not in response.text and "catalog.example" not in response.text
+    assert len(broker.calls) == 1
+
+
+@pytest.mark.parametrize("value", ["true", 1, None, [], {}])
+def test_fetch_route_requires_a_strict_boolean_source_list_opt_in(tmp_path, value):
+    calls = []
+
+    def fetcher(url):
+        calls.append(url)
+        return {"script": "print('ok')", "filename": "source.py", "language": "python"}
+
+    async def run():
+        async with _client(tmp_path, source_fetcher=fetcher, audit=EventLogStore()) as client:
+            csrf = await _login(client)
+            return await client.post("/admin/sources/fetch", headers={"x-csrf-token": csrf},
+                                     json={"url": "https://example.com/source.py",
+                                           "allow_source_list": value})
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid_allow_source_list"}
+    assert calls == []
 
 
 def test_fetch_route_enforces_the_credential_change_gate_before_fetch(tmp_path):

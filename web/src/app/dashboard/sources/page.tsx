@@ -29,6 +29,7 @@ import {
   cancelSourceDiagnosticJob,
   deleteSource,
   fetchSource,
+  fetchSourceInput,
   errorMessage,
   installSource,
   listSourceHealth,
@@ -53,6 +54,7 @@ import {
   NO_IMPORT_GRANTS,
   parseSourceUrlLines,
   requiredGrantKeys,
+  runSourceImportUrlBatch,
   sourceImportDraft,
   SOURCE_IMPORT_MAX_BYTES,
   SOURCE_IMPORT_MAX_URLS,
@@ -285,26 +287,40 @@ function ImportDialog({
   const [urlText, setUrlText] = useState('')
   const [batch, setBatch] = useState<SourceImportRow[]>([])
   const [batchBusy, setBatchBusy] = useState(false)
+  const [canCancelBatch, setCanCancelBatch] = useState(false)
   const analysisTokens = useRef<Record<string, number>>({})
   const batchGeneration = useRef(0)
+  const activeFetchController = useRef<AbortController | null>(null)
+
+  useEffect(() => () => {
+    batchGeneration.current += 1
+    activeFetchController.current?.abort()
+  }, [])
+
+  const cancelAndClose = () => {
+    batchGeneration.current += 1
+    activeFetchController.current?.abort()
+    activeFetchController.current = null
+    onClose()
+  }
 
   const updateBatchRow = (key: string, update: (row: SourceImportRow) => SourceImportRow) => {
     setBatch((current) => current.map((row) => (row.key === key ? update(row) : row)))
   }
 
-  const analyzeBatchRow = async (candidate: SourceImportRow) => {
+  const analyzeBatchRow = async (candidate: SourceImportRow, isCurrent: () => boolean = () => true) => {
     const token = (analysisTokens.current[candidate.key] ?? 0) + 1
     analysisTokens.current[candidate.key] = token
     updateBatchRow(candidate.key, (row) => ({ ...row, status: 'analyzing', error: null, preview: null }))
     try {
       const draft = sourceImportDraft(candidate)
       const first = await analyzeSource(draft)
-      if (analysisTokens.current[candidate.key] !== token) return
+      if (!isCurrent() || analysisTokens.current[candidate.key] !== token) return
       const suggested = candidate.id.trim() || first.id.suggested
       const final = !candidate.id.trim() && suggested
         ? await analyzeSource({ ...draft, id: suggested })
         : first
-      if (analysisTokens.current[candidate.key] !== token) return
+      if (!isCurrent() || analysisTokens.current[candidate.key] !== token) return
       updateBatchRow(candidate.key, (row) => ({
         ...row,
         id: suggested,
@@ -314,7 +330,7 @@ function ImportDialog({
         existing: existingIds.has(suggested),
       }))
     } catch (err) {
-      if (analysisTokens.current[candidate.key] !== token) return
+      if (!isCurrent() || analysisTokens.current[candidate.key] !== token) return
       updateBatchRow(candidate.key, (row) => ({ ...row, status: 'failed', error: errorMessage(err) }))
     }
   }
@@ -322,7 +338,9 @@ function ImportDialog({
   const analyzeFetchedRow = async (
     empty: SourceImportRow,
     fetched: { script: string; filename: string; language: 'javascript' | 'python' },
+    isCurrent: () => boolean = () => true,
   ) => {
+    if (!isCurrent()) return
     const candidate: SourceImportRow = {
       ...empty,
       script: fetched.script,
@@ -331,7 +349,7 @@ function ImportDialog({
       status: 'analyzing',
     }
     updateBatchRow(empty.key, () => candidate)
-    await analyzeBatchRow(candidate)
+    await analyzeBatchRow(candidate, isCurrent)
   }
 
   const handleBatchUrls = async () => {
@@ -341,45 +359,70 @@ function ImportDialog({
       setError(`导入队列最多保留 ${SOURCE_IMPORT_MAX_URLS} 项，请先安装或清理已有项目。`)
       return
     }
-    const urls = parseSourceUrlLines(urlText, remaining)
+    const urls = parseSourceUrlLines(urlText)
     if (!urls.length) {
       setError('请先输入音源 URL，每行一个。')
       return
     }
     const generation = batchGeneration.current + 1
     batchGeneration.current = generation
+    const controller = new AbortController()
+    activeFetchController.current = controller
+    const isCurrent = () => batchGeneration.current === generation && !controller.signal.aborted
     setBatchBusy(true)
+    setCanCancelBatch(true)
     setError('')
-    setUrlText('')
-    for (const [index, url] of urls.entries()) {
-      if (batchGeneration.current !== generation) break
-      const key = 'url-' + generation + '-' + index
-      const empty: SourceImportRow = {
-        key,
-        url,
-        script: '',
-        filename: '',
-        language: sourceLanguageForFilename(url),
-        id: '',
-        grants: cloneImportGrants(NO_GRANTS),
-        preview: null,
-        status: 'fetching',
-        error: null,
-        result: null,
-        reload: null,
-        existing: false,
+    const plannedRows: SourceImportRow[] = []
+    const status = await runSourceImportUrlBatch(
+      urls,
+      batch.length,
+      (url) => fetchSourceInput(url, controller.signal),
+      async (item, index) => {
+        const row = plannedRows[index]
+        if (!row || !isCurrent()) return
+        // The explicit opt-in applies only to the user-entered URL. Catalog
+        // children always use the legacy script-only fetch path.
+        const fetched = item.report ?? await fetchSource(item.url, controller.signal)
+        if (!isCurrent()) return
+        await analyzeFetchedRow(row, fetched, isCurrent)
+      },
+      isCurrent,
+      (items) => {
+        if (!isCurrent()) return
+        setUrlText('')
+        const rows = items.map((item, index): SourceImportRow => ({
+          key: 'url-' + generation + '-' + index,
+          url: item.url,
+          topLevelInput: item.topLevelInput,
+          script: '',
+          filename: '',
+          language: sourceLanguageForFilename(item.url),
+          id: '',
+          grants: cloneImportGrants(NO_GRANTS),
+          preview: null,
+          status: item.error ? 'failed' : 'fetching',
+          error: item.error ? errorMessage(item.error) : null,
+          result: null,
+          reload: null,
+          existing: false,
+        }))
+        plannedRows.push(...rows)
+        setBatch((current) => [...current, ...rows])
+      },
+      (_item, index, err) => {
+        if (!isCurrent()) return
+        const row = plannedRows[index]
+        if (row) updateBatchRow(row.key, (current) => ({ ...current, status: 'failed', error: errorMessage(err) }))
+      },
+    )
+    if (batchGeneration.current === generation) {
+      if (status === 'overflow') {
+        setError(`展开后将超过 ${SOURCE_IMPORT_MAX_URLS} 项队列上限；本次没有加入任何项目。`)
       }
-      setBatch((current) => [...current, empty])
-      try {
-        const fetched = await fetchSource(url)
-        if (batchGeneration.current !== generation) break
-        await analyzeFetchedRow(empty, fetched)
-      } catch (err) {
-        if (batchGeneration.current !== generation) break
-        updateBatchRow(key, (row) => ({ ...row, status: 'failed', error: errorMessage(err) }))
-      }
+      setBatchBusy(false)
+      setCanCancelBatch(false)
+      activeFetchController.current = null
     }
-    if (batchGeneration.current === generation) setBatchBusy(false)
   }
 
   const handleFiles = async (fileList: FileList | null) => {
@@ -393,6 +436,7 @@ function ImportDialog({
     const generation = batchGeneration.current + 1
     batchGeneration.current = generation
     setBatchBusy(true)
+    setCanCancelBatch(true)
     setError('')
     for (const [index, file] of files.entries()) {
       if (batchGeneration.current !== generation) break
@@ -427,7 +471,7 @@ function ImportDialog({
           script,
           filename: file.name,
           language: sourceLanguageForFilename(file.name),
-        })
+        }, () => batchGeneration.current === generation)
       } catch (err) {
         if (batchGeneration.current !== generation) break
         updateBatchRow(key, (row) => ({
@@ -437,7 +481,10 @@ function ImportDialog({
         }))
       }
     }
-    if (batchGeneration.current === generation) setBatchBusy(false)
+    if (batchGeneration.current === generation) {
+      setBatchBusy(false)
+      setCanCancelBatch(false)
+    }
   }
 
   const editBatchRow = (row: SourceImportRow, changes: Partial<SourceImportRow>) => {
@@ -457,31 +504,100 @@ function ImportDialog({
 
   const retryBatchRow = async (row: SourceImportRow) => {
     if (batchBusy || row.status === 'installing') return
-    updateBatchRow(row.key, (current) => ({
-      ...current,
-      status: 'fetching',
-      error: null,
-      preview: null,
-      result: null,
-      reload: null,
-    }))
+    const generation = batchGeneration.current + 1
+    batchGeneration.current = generation
+    const controller = new AbortController()
+    activeFetchController.current = controller
+    const isCurrent = () => batchGeneration.current === generation && !controller.signal.aborted
+    setBatchBusy(true)
+    setCanCancelBatch(true)
+    setError('')
     try {
-      const fetched = row.file
-        ? {
-            script: await row.file.text(),
-            filename: row.file.name,
-            language: sourceLanguageForFilename(row.file.name),
-          }
-        : await fetchSource(row.url)
-      await analyzeFetchedRow({
-        ...row,
-        error: null,
-        preview: null,
-        result: null,
-        reload: null,
-      }, fetched)
+      if (row.topLevelInput) {
+        let replacementRows: SourceImportRow[] = []
+        const status = await runSourceImportUrlBatch(
+          [row.url],
+          batch.length - 1,
+          (url) => fetchSourceInput(url, controller.signal),
+          async (item, index) => {
+            const target = replacementRows[index]
+            if (!target || !isCurrent()) return
+            const fetched = item.report ?? await fetchSource(item.url, controller.signal)
+            if (!isCurrent()) return
+            await analyzeFetchedRow(target, fetched, isCurrent)
+          },
+          isCurrent,
+          (items) => {
+            if (!isCurrent()) return
+            replacementRows = items.map((item, index): SourceImportRow => {
+              const preserveEdits = items.length === 1 && item.topLevelInput && item.url === row.url
+              return {
+                key: preserveEdits ? row.key : `retry-url-${generation}-${index}`,
+                url: item.url,
+                topLevelInput: item.topLevelInput,
+                script: '',
+                filename: '',
+                language: sourceLanguageForFilename(item.url),
+                id: preserveEdits ? row.id : '',
+                grants: cloneImportGrants(preserveEdits ? row.grants : NO_GRANTS),
+                preview: null,
+                status: item.error ? 'failed' : 'fetching',
+                error: item.error ? errorMessage(item.error) : null,
+                result: null,
+                reload: null,
+                existing: preserveEdits ? row.existing : false,
+              }
+            })
+            setBatch((current) => {
+              const index = current.findIndex((item) => item.key === row.key)
+              return index < 0
+                ? current
+                : [...current.slice(0, index), ...replacementRows, ...current.slice(index + 1)]
+            })
+          },
+          (_item, index, error) => {
+            if (!isCurrent()) return
+            const target = replacementRows[index]
+            if (target) updateBatchRow(target.key, (current) => ({ ...current, status: 'failed', error: errorMessage(error) }))
+          },
+        )
+        if (status === 'overflow' && isCurrent()) {
+          setError(`重试展开后将超过 ${SOURCE_IMPORT_MAX_URLS} 项队列上限；原项目已保留。`)
+        }
+      } else {
+        updateBatchRow(row.key, (current) => ({
+          ...current,
+          status: 'fetching',
+          error: null,
+          preview: null,
+          result: null,
+          reload: null,
+        }))
+        const fetched = row.file
+          ? {
+              script: await row.file.text(),
+              filename: row.file.name,
+              language: sourceLanguageForFilename(row.file.name),
+            }
+          : await fetchSource(row.url, controller.signal)
+        if (isCurrent()) {
+          await analyzeFetchedRow({
+            ...row,
+            error: null,
+            preview: null,
+            result: null,
+            reload: null,
+          }, fetched, isCurrent)
+        }
+      }
     } catch (err) {
-      updateBatchRow(row.key, (current) => ({ ...current, status: 'failed', error: errorMessage(err) }))
+      if (isCurrent()) updateBatchRow(row.key, (current) => ({ ...current, status: 'failed', error: errorMessage(err) }))
+    } finally {
+      if (batchGeneration.current === generation) {
+        setBatchBusy(false)
+        setCanCancelBatch(false)
+        activeFetchController.current = null
+      }
     }
   }
 
@@ -508,6 +624,7 @@ function ImportDialog({
       return
     }
     setBatchBusy(true)
+    setCanCancelBatch(false)
     setError('')
     await installSourceQueueSequentially(
       batch,
@@ -525,6 +642,7 @@ function ImportDialog({
       errorMessage,
     )
     setBatchBusy(false)
+    setCanCancelBatch(false)
   }
 
   const batchDuplicates = duplicateSourceIds(batch)
@@ -566,6 +684,15 @@ function ImportDialog({
               <h3 className="font-medium">从 URL 批量获取</h3>
               <p className="text-neutral-400 text-sm mt-1">
                 每行输入一个音源脚本 URL，服务会按顺序获取并逐个分析，最多 {SOURCE_IMPORT_MAX_URLS} 个。
+              </p>
+              <p className="text-neutral-400 text-sm mt-2">
+                musicdl 1.1.3 及以上版本可粘贴单个{' '}
+                <a
+                  href="https://raw.githubusercontent.com/Gaoshou101/musicdl/main/sources/catalog.json"
+                  className="text-accent-300 underline underline-offset-2"
+                  target="_blank"
+                  rel="noreferrer"
+                >聚合音源目录 Raw URL</a>{' '}展开并预览目录中的脚本。
               </p>
             </div>
           </div>
@@ -783,11 +910,11 @@ function ImportDialog({
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={onClose}
-            disabled={importBusy}
+            onClick={cancelAndClose}
+            disabled={importBusy && !canCancelBatch}
             className="flex-1 px-4 py-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
           >
-            取消
+            {importBusy && canCancelBatch ? '取消获取并关闭' : '关闭'}
           </button>
           <button
             type="button"

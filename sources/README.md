@@ -2,9 +2,9 @@
 
 These JavaScript files were supplied for publication and are preserved with their original filenames and bytes. They are optional downloads and are not included in musicdl release images.
 
-To install one, open **Sources → Import Sources** in the administration panel. Select a local `.js` file or paste the HTTPS link from the table. Review the analyzer result and requested network access before installing.
+For the full catalog, copy the aggregate [Raw URL](https://raw.githubusercontent.com/Gaoshou101/musicdl/main/sources/catalog.json) into **Sources → Import Sources** on musicdl 1.1.3 or later. The panel expands the list, fetches and previews each script, and lets you review its requested network access before installing. The individual links below remain available for one-at-a-time imports.
 
-使用方法：在管理面板打开「音源 → 导入音源」，选择本地 `.js` 文件，或粘贴下表中的 HTTPS 链接。安装前请检查分析结果和所需出网权限。
+批量导入目录：musicdl 1.1.3 及以上版本可在管理面板「音源 → 导入音源」中粘贴[聚合目录 Raw URL](https://raw.githubusercontent.com/Gaoshou101/musicdl/main/sources/catalog.json)。面板会展开目录，逐个获取并预览脚本，安装前请检查分析结果和所需出网权限。下表的单项链接仍可单独导入。
 
 | File / 文件 | Version / 版本 | License stated in file / 文件声明的许可证 |
 |---|---|---|
@@ -29,6 +29,6 @@ To install one, open **Sources → Import Sources** in the administration panel.
 
 ## Contributing / 社区共建
 
-Submit a pull request to `main` for a new source or an update. Preserve author notices and original filenames, describe the upstream origin and available license terms, and update this catalog and `SHA256SUMS`. Include the musicdl version and verification result if you tested the source; listing a script here does not verify that its provider is available.
+Submit a pull request to `main` for a new source or an update. Preserve author notices and original filenames, describe the upstream origin and available license terms, and update this catalog, `catalog.json`, and `SHA256SUMS` together. Keep the Raw URLs in `catalog.json` in the same order as the table above. Include the musicdl version and verification result if you tested the source; listing a script here does not verify that its provider is available.
 
-新增或更新音源请向 `main` 提交 PR，保留作者声明和原文件名，说明上游来源及已知许可条款，并同步更新目录和 `SHA256SUMS`。如果已测试，请注明 musicdl 版本和验证结果；收录本身不表示音源当前可用。
+新增或更新音源请向 `main` 提交 PR，保留作者声明和原文件名，说明上游来源及已知许可条款，并同步更新本目录、`catalog.json` 和 `SHA256SUMS`。`catalog.json` 中的 Raw URL 顺序应与上表一致。如果已测试，请注明 musicdl 版本和验证结果；收录本身不表示音源当前可用。
