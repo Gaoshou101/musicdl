@@ -1,4 +1,5 @@
-import type { SourceHealthRow } from '@/lib/api'
+import type { RecentRequest, SourceHealthRow } from '@/lib/api'
+import RecentRequests from '@/components/RecentRequests'
 
 function rate(value: number | null): string {
   return value === null ? '—' : `${Math.round(value * 100)}%`
@@ -7,9 +8,15 @@ function rate(value: number | null): string {
 /** Keep independent denominators visible, including when no evidence exists. */
 export default function ChannelMetrics({ row }: { row: SourceHealthRow | undefined }) {
   if (!row) return null
+  const recentRequests = row?.recent_requests
   const metrics = row.metrics
   if (!metrics) {
-    return <p className="text-xs text-neutral-500">后端尚未提供分项统计</p>
+    return (
+      <>
+        <p className="text-xs text-neutral-500">后端尚未提供分项统计</p>
+        <RecentRequests requests={recentRequests} />
+      </>
+    )
   }
   return (
     <div className="text-xs text-neutral-400 space-y-1 mt-2">
@@ -31,6 +38,7 @@ export default function ChannelMetrics({ row }: { row: SourceHealthRow | undefin
           ? '下载样本已用于选源排序'
           : `下载样本不足 ${metrics.ranking.minimum_samples} 次，统计不参与选源排序`}</span>
       </div>
+      <RecentRequests requests={recentRequests} />
     </div>
   )
 }

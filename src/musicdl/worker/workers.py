@@ -11,6 +11,12 @@ from typing import Any, Callable
 
 from musicdl.ai.models import AIRankResult
 from musicdl.config import REDIS_OVERHEAD_SECONDS, WECOM_NOTICE_TIMEOUT_SECONDS
+from musicdl.media.admission import (
+    ADMISSION_FAILURE_CODES,
+    AdmissionRejected,
+    AdmissionTimeout,
+    DownloadAdmission,
+)
 from musicdl.media.fallback import download_with_fallback
 from musicdl.media.download import source_download
 from musicdl.media.history import DownloadJournal, HistoryUnavailable, download_report
@@ -98,6 +104,11 @@ class _EffectGuard:
         await self.state.renew_job_effect(self.job_id, self.effect, self.owner, lease.fence,
                                           lease_ms=self.lease_ms())
         await self.state.begin_external_effect(self.job_id, self.effect, self.owner, lease.fence, ttl=self.ttl)
+
+    async def refresh_external(self, lease: EffectLease) -> None:
+        """Renew a long-running effect without changing its established external status."""
+        await self.state.renew_job_effect(self.job_id, self.effect, self.owner, lease.fence,
+                                          lease_ms=self.lease_ms())
 
     async def complete(self, lease: EffectLease, result: dict[str, Any]) -> None:
         await self.state.complete_job_effect(self.job_id, self.effect, self.owner, lease.fence, result, ttl=self.ttl)
@@ -348,12 +359,14 @@ class JobWorker(_StreamWorker):
                  redis_overhead_seconds: float = REDIS_OVERHEAD_SECONDS,
                  wecom_notice_timeout: float = WECOM_NOTICE_TIMEOUT_SECONDS,
                  quality_policy: str = "lossless_first", quality_preference: str | None = None,
-                 preference=None, channel_health=None, lossless_capability=None, record=None, history=None):
+                 preference=None, channel_health=None, lossless_capability=None, record=None, history=None,
+                 download_admission: DownloadAdmission | None = None):
         self.quality_policy, self.quality_preference = quality_policy, quality_preference
         self.preference, self.channel_health = preference, channel_health
         self.lossless_capability = lossless_capability
         self.record = record
         self.history = history
+        self.download_admission = download_admission
         self.redis, self.wecom, self.sources, self.media_root = redis, wecom, sources, media_root
         self.state, self.refresh, self.language_advisor = state or RedisStateStore(redis), refresh, language_advisor
         if not isinstance(selection_ttl, int) or isinstance(selection_ttl, bool) or not 60 <= selection_ttl <= 86400:
@@ -536,15 +549,57 @@ class JobWorker(_StreamWorker):
         if self.refresh is None: raise RuntimeError("refresh callback is required")
         deadline = self._deadline()
         owner = f"{self.consumer}:{secrets.token_hex(16)}"
-        async with asyncio.timeout_at(deadline):
-            result = await self._run_download_effect(job_id, payload, candidate, owner, deadline)
-            user = str(payload.get("from_user") or payload.get("user") or "")
-            if result.download is not None:
-                await self._notify(job_id, "success_notice", owner, deadline, user,
-                                   _success_text(result.download))
-                return result
-            await self._finish_failure(job_id, payload, candidate, owner, deadline, result, user)
-            return result
+        admission_acquired = False
+        async def run_download():
+            nonlocal admission_acquired
+            if self.download_admission is None:
+                return await self._run_download_effect(job_id, payload, candidate, owner, deadline)
+            user_id = payload.get("from_user") or payload.get("user")
+            if not isinstance(user_id, str) or not user_id:
+                user_id = None
+            remaining = max(0.0, deadline - self._clock())
+            # Leave a small margin for the enclosing handler timeout so a
+            # capacity wait is classified as a deferral before any effect
+            # lease is claimed.
+            queue_timeout = max(0.0, min(1.0, remaining - 0.01))
+            try:
+                context = self.download_admission.acquire(
+                    source_id=candidate.source_id, user_id=user_id, timeout=queue_timeout,
+                    operation_deadline=deadline,
+                    transition_timeout=queue_timeout,
+                )
+                permit = await context.__aenter__()
+            except AdmissionRejected as exc:
+                raise JobDeferred("download capacity deferred") from exc
+            admission_acquired = True
+            try:
+                try:
+                    return await self._run_download_effect(job_id, payload, candidate, owner, deadline,
+                                                           admission_permit=permit)
+                except AdmissionRejected as exc:
+                    raise JobDeferred("download source capacity deferred") from exc
+            finally:
+                await permit.release()
+
+        try:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    result = await run_download()
+                    user = str(payload.get("from_user") or payload.get("user") or "")
+                    if result.download is not None:
+                        await self._notify(job_id, "success_notice", owner, deadline, user,
+                                           _success_text(result.download))
+                        return result
+                    await self._finish_failure(job_id, payload, candidate, owner, deadline, result, user)
+                    return result
+            except TimeoutError as exc:
+                if self.download_admission is not None and not admission_acquired:
+                    raise JobDeferred("download capacity deferred") from exc
+                raise
+        except TimeoutError as exc:
+            if self.download_admission is not None and not admission_acquired:
+                raise JobDeferred("download capacity deferred") from exc
+            raise
 
     def _clock(self) -> float:
         return asyncio.get_running_loop().time()
@@ -612,9 +667,13 @@ class JobWorker(_StreamWorker):
         return record
 
     async def _run_download_effect(self, job_id: str, payload: dict[str, Any], candidate: Candidate,
-                                   owner: str, deadline: float):
+                                   owner: str, deadline: float, *, admission_permit=None):
         if self.history is None:
-            return await self._run_download_effect_tracked(job_id, payload, candidate, owner, deadline)
+            try:
+                return await self._run_download_effect_tracked(
+                    job_id, payload, candidate, owner, deadline, admission_permit=admission_permit)
+            except AdmissionRejected as exc:
+                raise JobDeferred("download source capacity deferred") from exc
         # Namespace and job identity, not the message request id: a selection can
         # create more than one download, and Redis replay must not create rows.
         task_id = "wecom-" + hashlib.sha256(f"{self.state.namespace}:{job_id}".encode()).hexdigest()[:32]
@@ -627,16 +686,26 @@ class JobWorker(_StreamWorker):
             # History is observational: a Redis delivery/effect must never be
             # retried just because its independent journal is unavailable.
             self.history.warn(task_id)
-            return await self._run_download_effect_tracked(job_id, payload, candidate, owner, deadline)
+            try:
+                return await self._run_download_effect_tracked(
+                    job_id, payload, candidate, owner, deadline, admission_permit=admission_permit)
+            except AdmissionRejected as exc:
+                raise JobDeferred("download source capacity deferred") from exc
         with journal.activate():
             try:
-                result = await self._run_download_effect_tracked(job_id, payload, candidate, owner, deadline)
+                result = await self._run_download_effect_tracked(
+                    job_id, payload, candidate, owner, deadline, admission_permit=admission_permit)
             except asyncio.CancelledError:
                 journal.finish("interrupted", error_code="download_cancelled")
                 raise
             except JobDeferred:
                 journal.finish("interrupted", error_code="download_deferred")
                 raise
+            except AdmissionRejected as exc:
+                journal.finish("interrupted", error_code=
+                               "download_admission_timeout" if isinstance(exc, AdmissionTimeout)
+                               else "download_admission_blocked")
+                raise JobDeferred("download source capacity deferred") from exc
             except EffectUncertain:
                 journal.finish("interrupted", error_code="download_uncertain")
                 raise
@@ -648,11 +717,13 @@ class JobWorker(_StreamWorker):
                 journal.finish("succeeded", result=download_report(str(payload["request_id"]), source_id,
                                candidate.source_id if source_id != candidate.source_id else None, result.download))
             else:
-                journal.finish("failed", error_code=result.download_error or "download_failed")
+                code = result.download_error or "download_failed"
+                journal.finish("interrupted" if code in ADMISSION_FAILURE_CODES else "failed",
+                               error_code=code)
             return result
 
     async def _run_download_effect_tracked(self, job_id: str, payload: dict[str, Any], candidate: Candidate,
-                                   owner: str, deadline: float):
+                                   owner: str, deadline: float, *, admission_permit=None):
         guard = self._guard(job_id, "download", owner, deadline)
         lease, record = await guard.claim()
         if lease is None:
@@ -674,7 +745,34 @@ class JobWorker(_StreamWorker):
         language = _recorded_language(reservation) or language
         reserved = {} if reservation is None else {
             "reservation": reservation, "artifact_store": self.state, "owner": owner, "fence": lease.fence}
-        await guard.external(lease)
+        class DownloadStageAdmissionPermit:
+            def __init__(self, permit):
+                self.permit = permit
+                self.external_started = False
+
+            async def switch_source(self, source_id):
+                await self.permit.switch_source(source_id)
+                if not self.external_started:
+                    await guard.external(lease)
+                    self.external_started = True
+                else:
+                    await guard.refresh_external(lease)
+
+            def take_source_wait_interruption(self):
+                return self.permit.take_source_wait_interruption()
+
+            def take_source_wait_interruption_status(self):
+                return self.permit.take_source_wait_interruption_status()
+
+            def snapshot(self):
+                return self.permit.snapshot()
+
+        stage_permit = (None if admission_permit is None
+                        else DownloadStageAdmissionPermit(admission_permit))
+        if stage_permit is None:
+            # Preserve the effect boundary for runtimes without the shared
+            # admission budget; no permit callback will mark it later.
+            await guard.external(lease)
         try:
             result = await download_with_fallback(
                 candidate, self._guarded_sources(job_id, owner, deadline), self.media_root,
@@ -688,12 +786,23 @@ class JobWorker(_StreamWorker):
                 lossless_capability=self.lossless_capability,
                 verify_duration=self.verify_duration,
                 record=self.record,
+                admission_permit=stage_permit,
                 prepare=prepare if quality is not None and reservation is None else None,
                 **({"artifact_store": self.state, "owner": owner, "fence": lease.fence}
                    if quality is not None and reservation is None else reserved))
         except asyncio.CancelledError:
-            await guard.uncertain_quietly(lease, "download_cancelled")
+            if stage_permit is None or stage_permit.external_started:
+                await guard.uncertain_quietly(lease, "download_cancelled")
             raise
+        except AdmissionRejected as exc:
+            if stage_permit is not None and not stage_permit.external_started:
+                # Keep this claimed-stage effect replayable after capacity
+                # deferral; a completed marker would make it terminal.
+                raise
+            code = ("download_admission_timeout" if isinstance(exc, AdmissionTimeout)
+                    else "download_admission_blocked")
+            await guard.complete_quietly(lease, {"ok": False, "code": code})
+            return FallbackResult(download=None, download_error=code)
         except (TimeoutError, MediaError) as exc:
             code = exc.code if isinstance(exc, MediaError) else "media_timeout"
             await guard.complete_quietly(lease, {"ok": False, "code": code})
@@ -707,6 +816,9 @@ class JobWorker(_StreamWorker):
             raise
         if result.download is None:
             code = result.download_error or "download_failed"
+            if code in ADMISSION_FAILURE_CODES:
+                await guard.complete_quietly(lease, {"ok": False, "code": code})
+                return result
             await guard.complete_quietly(lease, {"ok": False, "code": code})
             if code == "artifact_uncertain":
                 raise EffectUncertain(code)

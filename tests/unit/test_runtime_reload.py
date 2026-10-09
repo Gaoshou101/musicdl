@@ -98,13 +98,16 @@ def test_a_runtime_setting_is_adopted_without_a_restart(tmp_path):
         async with app.router.lifespan_context(app):
             assert len(factory.built) == 1
             first = factory.built[0]
+            admission = app.state.download_admission
+            assert app.state.admin.panel_downloads.admission is admission
+            assert app.state.admin.diagnostics.admission is admission
             async with client_for(app) as client:
                 token = await login(client)
                 response = await client.patch("/admin/config", headers={"x-csrf-token": token},
                                               json={"values": {"worker.max_attempts": 5}})
-            return response, first, app
+            return response, first, admission, app
 
-    response, first, app = run(scenario())
+    response, first, admission, app = run(scenario())
     assert response.status_code == 200
     assert response.json()["reload"]["status"] == "reloaded"
     assert response.json()["reload"]["generation"] == 1
@@ -114,6 +117,9 @@ def test_a_runtime_setting_is_adopted_without_a_restart(tmp_path):
     assert app.state.runtime is not first
     assert first.closed is True
     assert app.state.runtime.message_worker is not first.message_worker
+    assert app.state.download_admission is admission
+    assert app.state.admin.panel_downloads.admission is admission
+    assert app.state.admin.diagnostics.admission is admission
     assert app.state.worker_error is None
 
 

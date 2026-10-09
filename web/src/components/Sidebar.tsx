@@ -1,8 +1,8 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
-import { useEffect } from 'react'
+import { usePathname, useRouter } from 'next/navigation'
+import { useEffect, useState } from 'react'
 import {
   House,
   ClockCounterClockwise,
@@ -14,9 +14,11 @@ import {
   Moon,
   Palette,
   Sliders,
+  SignOut,
   Sun,
 } from '@phosphor-icons/react'
 import { THEMES, themeSwatch, useThemeStore } from '@/lib/store'
+import { errorMessage, logoutAdmin } from '@/lib/api'
 
 const navItems = [
   { href: '/dashboard', icon: House, label: '仪表板' },
@@ -31,8 +33,24 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname()
+  const router = useRouter()
   const theme = useThemeStore((state) => state.theme)
   const setTheme = useThemeStore((state) => state.setTheme)
+  const [loggingOut, setLoggingOut] = useState(false)
+  const [logoutError, setLogoutError] = useState('')
+
+  const handleLogout = async () => {
+    if (loggingOut) return
+    setLoggingOut(true)
+    setLogoutError('')
+    try {
+      await logoutAdmin()
+      router.replace('/')
+    } catch (error) {
+      setLogoutError(errorMessage(error))
+      setLoggingOut(false)
+    }
+  }
 
   return (
     <aside aria-label="主导航" className="w-64 max-sm:w-[4.75rem] h-screen shrink-0 glass border-r border-neutral-800 flex flex-col">
@@ -109,13 +127,18 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* The service keeps sessions in its own memory and exposes no sign-out
-          route, so the panel says how a session ends instead of offering a
-          button that would only pretend to end it. */}
-      <div className="p-4 border-t border-neutral-800 max-sm:hidden">
-        <p className="text-xs text-neutral-500 leading-relaxed">
-          登录状态保存在服务进程内：服务重启后需要重新登录，关闭浏览器也会结束本次登录。
-        </p>
+      <div className="p-4 border-t border-neutral-800 max-sm:p-2">
+        {logoutError && <p role="alert" className="mb-2 text-xs text-danger max-sm:hidden">{logoutError}</p>}
+        <button
+          type="button"
+          onClick={() => void handleLogout()}
+          disabled={loggingOut}
+          aria-label="退出登录"
+          className="flex w-full items-center justify-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/40 px-3 py-2.5 text-sm text-neutral-300 transition-colors hover:bg-neutral-800/70 hover:text-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400/70 disabled:opacity-50"
+        >
+          <SignOut size={17} />
+          <span className="max-sm:hidden">{loggingOut ? '正在退出…' : '退出登录'}</span>
+        </button>
       </div>
     </aside>
   )

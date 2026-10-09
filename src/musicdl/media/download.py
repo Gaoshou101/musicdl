@@ -2,17 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import functools
 import hashlib
 import inspect
 import os
 import stat
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 
 from musicdl.contracts.plugin import has_expired
 from musicdl.sources.models import Candidate
 from musicdl.sources.quality import served_quality
+from .admission import (
+    ADMISSION_BLOCKED_CODE,
+    ADMISSION_TIMEOUT_CODE,
+    AdmissionPermit,
+    AdmissionRejected,
+    AdmissionTimeout,
+)
 from .history import trace_download_stage
 
 from .models import (
@@ -42,6 +53,169 @@ _DURATION_POLICIES = frozenset({"lenient", "strict"})
 # "This call has no measurement to hand over yet", which is not the same as a
 # measurement of ``None`` -- that one says the container could not be read.
 _UNSET = object()
+_MEDIA_WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="musicdl-media")
+_MEDIA_SUBMISSION_LIMIT = 4  # Two running jobs plus at most two queued in the executor.
+
+
+class _OffloadWaiter:
+    __slots__ = ("loop", "future", "permit", "abandoned")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop):
+        self.loop = loop
+        self.future: asyncio.Future[_OffloadPermit] = loop.create_future()
+        self.permit: _OffloadPermit | None = None
+        self.abandoned = False
+
+
+class _OffloadPermit:
+    __slots__ = ("_owner", "_released")
+
+    def __init__(self, owner: "_MediaSubmissionGate"):
+        self._owner = owner
+        self._released = False
+
+    def release(self) -> None:
+        self._owner.release(self)
+
+
+class _MediaSubmissionGate:
+    """Bound executor submissions across event loops without blocking them."""
+
+    def __init__(self, limit: int):
+        self._limit = limit
+        self._active = 0
+        self._waiters: list[_OffloadWaiter] = []
+        self._lock = threading.Lock()
+
+    async def acquire(self, *, max_waiters: int = 64) -> _OffloadPermit:
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            if self._active < self._limit:
+                self._active += 1
+                return _OffloadPermit(self)
+            if len(self._waiters) >= max_waiters:
+                raise RuntimeError("media work queue is full")
+            waiter = _OffloadWaiter(loop)
+            self._waiters.append(waiter)
+        try:
+            return await asyncio.shield(waiter.future)
+        except BaseException:
+            with self._lock:
+                waiter.abandoned = True
+                try:
+                    self._waiters.remove(waiter)
+                except ValueError:
+                    if waiter.permit is not None:
+                        self._release_locked(waiter.permit)
+                        waiter.permit = None
+                self._promote_locked()
+            try:
+                loop.call_soon_threadsafe(waiter.future.cancel)
+            except RuntimeError:
+                pass
+            raise
+
+    def release(self, permit: _OffloadPermit) -> None:
+        with self._lock:
+            self._release_locked(permit)
+            self._promote_locked()
+
+    def snapshot(self) -> tuple[int, int]:
+        """Return submitted and waiting counts for bounded-work tests/diagnostics."""
+        with self._lock:
+            return self._active, len(self._waiters)
+
+    def _release_locked(self, permit: _OffloadPermit) -> None:
+        if permit._owner is not self or permit._released:
+            return
+        permit._released = True
+        self._active -= 1
+
+    def _promote_locked(self) -> None:
+        while self._active < self._limit and self._waiters:
+            waiter = self._waiters.pop(0)
+            permit = _OffloadPermit(self)
+            waiter.permit = permit
+            self._active += 1
+            try:
+                waiter.loop.call_soon_threadsafe(_set_offload_result, waiter, permit)
+            except RuntimeError:  # The waiting loop closed before its task was resumed.
+                self._release_locked(permit)
+
+
+def _set_offload_result(waiter: _OffloadWaiter, permit: _OffloadPermit) -> None:
+    if not waiter.abandoned and not waiter.future.done():
+        waiter.future.set_result(permit)
+    else:
+        permit.release()
+
+
+_MEDIA_SUBMISSIONS = _MediaSubmissionGate(_MEDIA_SUBMISSION_LIMIT)
+_DEFERRED_MEDIA_EVENTS: ContextVar[list[DownloadEvent] | None] = ContextVar(
+    "musicdl_deferred_media_events", default=None)
+
+
+async def _offload(function: Callable, /, *args, **kwargs):
+    """Run bounded synchronous media work and drain it before cancellation returns.
+
+    Cancelling the awaiting coroutine cannot stop a running thread. Shield the
+    executor future and wait for it to finish before the caller closes
+    descriptors or removes staging files. Submitted work is not cancelled while
+    queued so cancelled work items cannot accumulate in the executor's queue.
+    """
+    permit = await _MEDIA_SUBMISSIONS.acquire()
+    try:
+        concurrent = _MEDIA_WORKERS.submit(functools.partial(function, *args, **kwargs))
+        future = asyncio.wrap_future(concurrent)
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError as cancellation:
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if future.done():
+                try:
+                    future.result()
+                except BaseException:
+                    pass
+            raise cancellation
+    finally:
+        permit.release()
+
+
+async def _offload_duration(candidate: Candidate, path: Path, verify_duration: str, request_id: str,
+                            record: Callable[[DownloadEvent], None] | None, *, enforce: bool = True):
+    """Measure media off-loop and replay deferred events on the owning loop."""
+    events: list[DownloadEvent] = []
+
+    def measure():
+        token = _DEFERRED_MEDIA_EVENTS.set(events)
+        try:
+            return _verified_duration(candidate, path, verify_duration, request_id, record, enforce=enforce)
+        finally:
+            _DEFERRED_MEDIA_EVENTS.reset(token)
+
+    try:
+        result = await _offload(measure)
+    except BaseException:
+        for event in events:
+            emit_event(record, event)
+        raise
+    for event in events:
+        emit_event(record, event)
+    return result
+
+
+def _emit_media_event(record: Callable[[DownloadEvent], None] | None, event: DownloadEvent) -> None:
+    deferred = _DEFERRED_MEDIA_EVENTS.get()
+    if deferred is None:
+        emit_event(record, event)
+    else:
+        deferred.append(event)
 
 
 async def _close_metadata(metadata: DownloadMetadata) -> None:
@@ -80,6 +254,17 @@ def _record_failure(
     emit_event(record, DownloadEvent(request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                                      "download", "failed", error_code=code, size_bytes=size or None,
                                      requested_quality=quality))
+
+
+def _record_admission_interruption(record, candidate, request_id, quality, error_code) -> None:
+    """Close only the history row; admission delay is not source telemetry."""
+    from .history import current_download_journal
+
+    journal = current_download_journal()
+    if journal is not None:
+        journal.record({"stage": "task", "status": "interrupted",
+                        "candidate_id": candidate.item_id,
+                        "error_code": error_code})
 
 
 def _path_too_long(error: BaseException) -> bool:
@@ -178,7 +363,7 @@ def _verified_duration(candidate: Candidate, path: Path, verify_duration: str, r
         elif stream_integrity.format in {"flac", "mp4"} and stream_integrity.status == "unverified":
             if stream_integrity.format == "flac" and not diagnostics.flac_duration_trusted:
                 measured = None
-            emit_event(record, DownloadEvent(
+            _emit_media_event(record, DownloadEvent(
                 request_id, candidate.item_id, candidate.source_id, candidate.source_version,
                 "duration", "unverified", error_code="duration_unverified"))
             duration_is_trusted = (
@@ -200,7 +385,7 @@ def _verified_duration(candidate: Candidate, path: Path, verify_duration: str, r
         if enforce and not duration_matches(expected, measured):
             raise MediaError("incomplete_audio")
         return measured
-    emit_event(record, DownloadEvent(
+    _emit_media_event(record, DownloadEvent(
         request_id, candidate.item_id, candidate.source_id, candidate.source_version,
         "duration", "unverified", error_code="duration_unverified"))
     if verify_duration == "strict" and enforce:
@@ -228,16 +413,17 @@ def _replay_checks(candidate: Candidate, reservation: ArtifactRecord,
     return size, digest, extension
 
 
-def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation: ArtifactRecord,
-                     language: str | None, *, verify_duration: str, request_id: str,
-                     record: Callable[[DownloadEvent], None] | None,
-                     allow_format_change: bool = False,
-                     measured: float | None | object = _UNSET,
-                     checked: tuple[int, str, str] | None = None,
-                     enforce_duration: bool = True,
-                     requested_quality: str | None = None) -> DownloadResult:
+async def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation: ArtifactRecord,
+                           language: str | None, *, verify_duration: str, request_id: str,
+                           record: Callable[[DownloadEvent], None] | None,
+                           allow_format_change: bool = False,
+                           measured: float | None | object = _UNSET,
+                           checked: tuple[int, str, str] | None = None,
+                           enforce_duration: bool = True,
+                           requested_quality: str | None = None) -> DownloadResult:
     size, digest, extension = (
-        _replay_checks(candidate, reservation, target, allow_format_change=allow_format_change)
+        await _offload(_replay_checks, candidate, reservation, target,
+                       allow_format_change=allow_format_change)
         if checked is None else checked)
     # The name the bytes are delivered under has to agree with the container the
     # record names, or the two describe different files.
@@ -246,8 +432,8 @@ def _replayed_result(root: Path, target: Path, candidate: Candidate, reservation
     # A replay hands over an artifact this job already wrote, so it answers to
     # the same policy as a fresh download.
     if measured is _UNSET:
-        measured = _verified_duration(candidate, target, verify_duration, request_id, record,
-                                      enforce=enforce_duration)
+        measured = await _offload_duration(candidate, target, verify_duration, request_id, record,
+                                            enforce=enforce_duration)
     # A replay answers the same question a fresh download does, so it names the
     # tier the job asked for as well as the container the bytes prove; the two
     # fields are what the record and the success notice report.
@@ -308,27 +494,49 @@ async def _publish_reserved(
             await artifact_store.claim_artifact_publish(reservation.job_id, owner=owner, fence=fence, ttl=ttl)
         except Exception as exc:
             raise MediaError("artifact_uncertain") from exc
-    if target.exists() or target.is_symlink():
-        raise MediaError("artifact_uncertain")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.link(temporary, target)
-    except (FileExistsError, OSError) as exc:
-        raise MediaError("artifact_uncertain") from exc
-    try:
-        _fsync_path(target)
+    async def publish_and_record() -> None:
+        if target.exists() or target.is_symlink():
+            raise MediaError("artifact_uncertain")
+        target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            _fsync_path(target.parent)
-        except OSError:
-            if os.name != "nt":
-                raise
-    except Exception as exc:
-        raise MediaError("artifact_uncertain") from exc
-    if artifact_store is not None:
+            os.link(temporary, target)
+        except (FileExistsError, OSError) as exc:
+            raise MediaError("artifact_uncertain") from exc
         try:
-            await artifact_store.mark_artifact_published(reservation.job_id, owner=owner, fence=fence, ttl=ttl)
+            await _offload(_fsync_path, target)
+            try:
+                await _offload(_fsync_path, target.parent)
+            except OSError:
+                if os.name != "nt":
+                    raise
         except Exception as exc:
             raise MediaError("artifact_uncertain") from exc
+        if artifact_store is not None:
+            try:
+                await artifact_store.mark_artifact_published(reservation.job_id, owner=owner, fence=fence, ttl=ttl)
+            except Exception as exc:
+                raise MediaError("artifact_uncertain") from exc
+
+    # Once a fenced publish starts, cancellation cannot safely abandon the
+    # interval between creating the destination and recording it as published.
+    # Let that interval settle before the caller cleans its staging path.
+    publish_task = asyncio.create_task(publish_and_record())
+    try:
+        await asyncio.shield(publish_task)
+    except asyncio.CancelledError as cancellation:
+        while not publish_task.done():
+            try:
+                await asyncio.shield(publish_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        if publish_task.done():
+            try:
+                publish_task.result()
+            except BaseException:
+                pass
+        raise cancellation
 
 
 async def _resume_reservation(
@@ -358,10 +566,10 @@ async def _resume_reservation(
         # is therefore measured and reported rather than judged again -- a
         # refusal here would either leave the very bytes it refused or delete
         # library content the delivery may already refer to.
-        return _replayed_result(root, target, candidate, reservation, language,
-                                verify_duration=verify_duration, request_id=request_id, record=record,
-                                allow_format_change=quality is not None,
-                                enforce_duration=False, requested_quality=quality)
+        return await _replayed_result(root, target, candidate, reservation, language,
+                                      verify_duration=verify_duration, request_id=request_id, record=record,
+                                      allow_format_change=quality is not None,
+                                      enforce_duration=False, requested_quality=quality)
     if reservation.state == "prepared":
         if temporary.exists() or temporary.is_symlink() or target.exists() or target.is_symlink():
             raise MediaError("artifact_uncertain")
@@ -373,10 +581,10 @@ async def _resume_reservation(
             # The staged bytes answer to the delivery policy before anything is
             # published, so a refusal here cannot be the reason a new file
             # appeared in the library.
-            checked = _replay_checks(candidate, reservation, temporary,
-                                      allow_format_change=quality is not None)
+            checked = await _offload(_replay_checks, candidate, reservation, temporary,
+                                     allow_format_change=quality is not None)
             try:
-                measured = _verified_duration(candidate, temporary, verify_duration, request_id, record)
+                measured = await _offload_duration(candidate, temporary, verify_duration, request_id, record)
             except MediaError:
                 # Refused before it was published, so the staged bytes are
                 # scratch that failed its own policy rather than library
@@ -392,15 +600,15 @@ async def _resume_reservation(
         else:
             if not target.exists() or target.is_symlink():
                 raise MediaError("artifact_uncertain")
-            checked = _replay_checks(candidate, reservation, target,
-                                      allow_format_change=quality is not None)
+            checked = await _offload(_replay_checks, candidate, reservation, target,
+                                     allow_format_change=quality is not None)
             measured = _UNSET
         _discard(temporary)
         try:
-            return _replayed_result(root, target, candidate, reservation, language,
-                                    verify_duration=verify_duration, request_id=request_id, record=record,
-                                    allow_format_change=quality is not None,
-                                    measured=measured, checked=checked, requested_quality=quality)
+            return await _replayed_result(root, target, candidate, reservation, language,
+                                          verify_duration=verify_duration, request_id=request_id, record=record,
+                                          allow_format_change=quality is not None,
+                                          measured=measured, checked=checked, requested_quality=quality)
         except MediaError as exc:
             if exc.code == "incomplete_audio":
                 # This artifact never reached ``published``, so nothing refers
@@ -419,8 +627,11 @@ async def _resume_reservation(
 
 @trace_download_stage("resolve")
 async def source_download(source: DownloadSource, candidate: Candidate, *,
-                          quality: str | None = None) -> DownloadMetadata:
+                          quality: str | None = None,
+                          admission_permit: AdmissionPermit | None = None) -> DownloadMetadata:
     """Omit the optional keyword for old resolvers without masking their errors."""
+    if admission_permit is not None:
+        await admission_permit.switch_source(candidate.source_id)
     parameters = inspect.signature(source.download).parameters
     supports_quality = "quality" in parameters or any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
@@ -438,6 +649,7 @@ async def download_candidate(
     request_id: str,
     quality: str | None = None,
     resolved_metadata: DownloadMetadata | None = None,
+    admission_permit: AdmissionPermit | None = None,
     prepare: Callable[[str, str], Awaitable[ArtifactRecord | None]] | None = None,
     reservation: ArtifactRecord | None = None,
     artifact_store: ArtifactStore | None = None,
@@ -480,7 +692,8 @@ async def download_candidate(
                 flags |= os.O_BINARY
             fd = os.open(os.fspath(temp_path), flags, 0o600)
             try:
-                metadata = metadata or await source_download(source, candidate, quality=quality)
+                metadata = metadata or await source_download(source, candidate, quality=quality,
+                                                             admission_permit=admission_permit)
             except BaseException:
                 # Close the reserved staging file before the failure unwinds, otherwise the
                 # cleanup unlink cannot remove it and a later retry of the job is refused as
@@ -491,11 +704,16 @@ async def download_candidate(
                     pass
                 raise
         else:
-            metadata = metadata or await source_download(source, candidate, quality=quality)
+            metadata = metadata or await source_download(source, candidate, quality=quality,
+                                                         admission_permit=admission_permit)
             fd, temp_name = tempfile.mkstemp(prefix=".musicdl-", suffix=".part", dir=root)
             temp_path = Path(temp_name)
         header = bytearray()
         try:
+            # A descriptor may have been resolved earlier while fallback tried
+            # another channel. Reacquire its source slot before consuming it.
+            if admission_permit is not None:
+                await admission_permit.switch_source(candidate.source_id)
             async for chunk in metadata.chunks:
                 if not isinstance(chunk, bytes):
                     raise MediaError("invalid_chunk")
@@ -523,8 +741,8 @@ async def download_candidate(
             raise
         else:
             try:
-                os.fsync(fd)
-            except Exception:
+                await _offload(os.fsync, fd)
+            except BaseException:
                 try:
                     os.close(fd)
                 except OSError:
@@ -542,8 +760,7 @@ async def download_candidate(
                                                 None if quality is not None else candidate.format)
         # The bytes are on disk and hashed by now, so this measures the file
         # that would be delivered rather than what any channel said about it.
-        measured = _verified_duration(
-            candidate, temp_path, verify_duration, request_id, record)
+        measured = await _offload_duration(candidate, temp_path, verify_duration, request_id, record)
         bitrate = None if measured is None else bitrate_kbps(size, measured)
 
         if reservation is None and prepare is not None:
@@ -635,6 +852,12 @@ async def download_candidate(
         primary_error = exc
         _record_failure(record, candidate, request_id, size, "download_cancelled", quality=quality)
         raise
+    except AdmissionRejected as exc:
+        # Admission is local capacity control, not a source failure.
+        primary_error = exc
+        code = ADMISSION_TIMEOUT_CODE if isinstance(exc, AdmissionTimeout) else ADMISSION_BLOCKED_CODE
+        _record_admission_interruption(record, candidate, request_id, quality, code)
+        raise
     except MediaError as exc:
         primary_error = exc
         code = exc.code if exc.code in _DOWNLOAD_CODES else "download_failed"
@@ -653,6 +876,11 @@ async def download_candidate(
                 await _close_metadata(metadata)
             except asyncio.CancelledError:
                 if primary_error is None:
+                    raise
+            except AdmissionRejected as exc:
+                if primary_error is None:
+                    code = ADMISSION_TIMEOUT_CODE if isinstance(exc, AdmissionTimeout) else ADMISSION_BLOCKED_CODE
+                    _record_admission_interruption(record, candidate, request_id, quality, code)
                     raise
             except BaseException:
                 if primary_error is None:
