@@ -168,6 +168,42 @@ def test_download_failed_after_switch_continues_to_next_channel(tmp_path):
     assert set(outcome.attempted_source_ids) == {"primary", "failed", "backup"}
 
 
+def test_default_switch_budget_allows_success_after_fourth_switch(tmp_path):
+    class Attempted(Source):
+        def __init__(self, *, fail):
+            super().__init__(fail=fail)
+            self.download_calls = 0
+
+        async def download(self, item, *, quality=None):
+            self.download_calls += 1
+            assert quality == "flac"
+            if self.fail:
+                raise MediaError("download_failed")
+            return DownloadMetadata(chunks(ID3), extension="mp3", media_type="audio/mpeg")
+
+    rows = tuple(candidate(source).model_copy(update={"item_id": f"{source}-item"})
+                 for source in ("primary", "failed-a", "failed-b", "failed-c", "backup"))
+    sources = {row.source_id: Attempted(fail=row.source_id != "backup") for row in rows}
+    refresh_calls = []
+
+    async def refresh(query, excluded):
+        refresh_calls.append((query, excluded))
+        assert excluded == frozenset({"primary"})
+        return result(rows[1:])
+
+    outcome = asyncio.run(download_with_fallback(
+        rows[0], sources, tmp_path,
+        request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        refresh=refresh))
+
+    assert outcome.download is not None
+    assert outcome.download_source_id == "backup"
+    assert outcome.channel_switches == 4
+    assert set(outcome.attempted_source_ids) == {row.source_id for row in rows}
+    assert [source.download_calls for source in sources.values()] == [1, 1, 1, 1, 1]
+    assert refresh_calls == [("Song", frozenset({"primary"}))]
+
+
 def test_download_failed_replacements_still_obey_switch_budget(tmp_path):
     max_channel_switches = 2
     primary = candidate("primary")
@@ -187,6 +223,27 @@ def test_download_failed_replacements_still_obey_switch_budget(tmp_path):
     assert outcome.download is None
     assert outcome.channel_switches == max_channel_switches
     assert set(outcome.attempted_source_ids) == {"primary", "failed-1", "failed-2"}
+
+
+def test_explicit_three_switch_budget_caps_the_larger_default(tmp_path):
+    primary = candidate("primary")
+    replacements = tuple(candidate(source) for source in
+                          ("failed-1", "failed-2", "failed-3", "not-attempted"))
+
+    async def refresh(query, excluded):
+        assert excluded == frozenset({"primary"})
+        return result(replacements)
+
+    outcome = asyncio.run(download_with_fallback(
+        primary,
+        {source: Source(fail=True) for source in
+         ("primary", "failed-1", "failed-2", "failed-3", "not-attempted")},
+        tmp_path, request_id="r", query="Song", quality="flac", quality_policy="lossless_first",
+        max_channel_switches=3, refresh=refresh))
+
+    assert outcome.download is None
+    assert outcome.channel_switches == 3
+    assert set(outcome.attempted_source_ids) == {"primary", "failed-1", "failed-2", "failed-3"}
 
 
 def test_download_failed_is_not_a_content_failure_code():
@@ -370,7 +427,8 @@ def test_content_switch_budget_is_bounded_and_never_retries_a_source(tmp_path):
 
     outcome = asyncio.run(download_with_fallback(
         primary, sources, tmp_path, request_id="r", query="Song", quality="flac",
-        quality_policy="lossless_first", refresh=refresh, record=events.append))
+        quality_policy="lossless_first", max_channel_switches=3,
+        refresh=refresh, record=events.append))
 
     assert outcome.download is None and outcome.download_error == "incomplete_audio"
     assert calls == [frozenset({"primary"})]
@@ -423,11 +481,13 @@ def test_collapsed_search_row_can_switch_through_all_three_alternates(tmp_path):
     rows = tuple(Candidate(source_id=name, source_version="1", item_id=f"{name}-item",
                            title="Song", artist="Artist", format="flac")
                  for name in ("primary", "a", "b", "c"))
+    duplicate_a = rows[1].model_copy(update={"item_id": "a-duplicate-item"})
+    channel_row = (rows[0], rows[1], duplicate_a, rows[2], rows[3])
     sources = {row.source_id: Invalid(row.source_id) for row in rows}
     events = []
 
     async def refresh(query, excluded):
-        return result((rows[0],), (rows,))
+        return result((rows[0],), (channel_row,))
 
     outcome = asyncio.run(download_with_fallback(
         rows[0], sources, tmp_path, request_id="r", query="Song", quality="flac",
@@ -441,6 +501,38 @@ def test_collapsed_search_row_can_switch_through_all_three_alternates(tmp_path):
     assert len(switches) == 3
     assert switches[1].skipped_sources["a"] == "already_attempted"
     assert switches[2].skipped_sources["b"] == "already_attempted"
+
+
+def test_default_switch_budget_attempts_twelve_channels_once(tmp_path):
+    class Failing(Source):
+        def __init__(self):
+            super().__init__(fail=True)
+            self.attempts = []
+
+        async def download(self, item, *, quality=None):
+            self.attempts.append(item.item_id)
+            assert quality == "flac"
+            raise MediaError("download_failed")
+
+    names = ("primary", *(f"backup-{index}" for index in range(1, 12)))
+    rows = tuple(candidate(name).model_copy(update={"item_id": f"{name}-item"}) for name in names)
+    sources = {name: Failing() for name in names}
+    refresh_calls = []
+
+    async def refresh(query, excluded):
+        refresh_calls.append((query, excluded))
+        return result(rows[1:])
+
+    outcome = asyncio.run(download_with_fallback(
+        rows[0], sources, tmp_path, request_id="r", query="Song", quality="flac",
+        quality_policy="lossless_first", refresh=refresh))
+
+    assert outcome.download is None
+    assert outcome.channel_switches == 11
+    assert len(outcome.attempted_source_ids) == 12
+    assert set(outcome.attempted_source_ids) == set(names)
+    assert [source.attempts for source in sources.values()] == [[f"{name}-item"] for name in names]
+    assert refresh_calls == [("Song", frozenset({"primary"}))]
 
 
 def test_refresh_failed_source_membership_checks_the_collapsed_channel_rows(tmp_path):
@@ -830,6 +922,17 @@ def test_invalid_budgets_are_rejected(tmp_path, kwargs):
     with pytest.raises(ValueError, match="invalid_timeout"):
         asyncio.run(download_with_fallback(candidate(), {"a": Source()}, tmp_path, request_id="r",
             query="q", refresh=refresh, **kwargs))
+
+
+@pytest.mark.parametrize("limit", [-1, 12, 1.5, True, False])
+def test_channel_switch_budget_rejects_values_outside_zero_through_eleven(tmp_path, limit):
+    async def refresh(query, excluded):
+        return result()
+
+    with pytest.raises(ValueError, match="invalid_max_channel_switches"):
+        asyncio.run(download_with_fallback(
+            candidate(), {"a": Source()}, tmp_path, request_id="r", query="q",
+            refresh=refresh, max_channel_switches=limit))
 
 
 def test_reservation_owner_and_fence_are_forwarded_to_download(tmp_path, monkeypatch):

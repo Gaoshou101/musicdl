@@ -437,22 +437,20 @@ def test_panel_fallback_keeps_trying_after_download_failed(tmp_path):
 
 def test_panel_retry_budget_includes_switches_already_used_by_shared_fallback(tmp_path):
     primary = BrokenSource("primary", "media_response_invalid")
-    first = BrokenSource("first", "media_response_invalid")
-    second = BrokenSource("second", "media_response_invalid")
-    third = BrokenSource("third", "download_failed")
-    fourth = Source("fourth")
-    fifth = Source("fifth")
-    refreshed = SearchResult((copy_of(first), copy_of(second), copy_of(third),
-                              copy_of(fourth), copy_of(fifth)), (), "v")
-    app, service = fallback_app(tmp_path, [primary, first, second, third, fourth, fifth], refreshed)
+    failed = [BrokenSource(f"failed-{index}", "download_failed") for index in range(1, 12)]
+    untried = Source("untried")
+    sources = [primary, *failed, untried]
+    refreshed = SearchResult(tuple(copy_of(source) for source in [*failed, untried]), (), "v")
+    app, service = fallback_app(tmp_path, sources, refreshed)
 
     response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
 
     assert response.status_code == 502 and response.json()["detail"] == "download_failed"
     assert service.queries == ["稻香 周杰伦"]
     assert primary.downloaded == ["1"]
-    assert first.downloaded == ["1"] and second.downloaded == ["1"] and third.downloaded == ["1"]
-    assert fourth.downloaded == [] and fifth.downloaded == []
+    # The shared fallback spent all 11 switches; the portal must not restart that budget.
+    assert [source.downloaded for source in failed] == [["1"]] * 11
+    assert untried.downloaded == []
 
 
 def test_panel_replacement_timeout_records_one_failure_for_selected_channel(tmp_path):

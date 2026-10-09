@@ -27,7 +27,7 @@ from .models import (
 )
 
 
-MAX_CHANNEL_SWITCHES = 3
+MAX_CHANNEL_SWITCHES = 11
 CONTENT_FAILURE_CODES = frozenset({
     "media_response_invalid", "signature_mismatch", "mime_mismatch",
     "extension_mismatch", "size_mismatch", "incomplete_audio",
