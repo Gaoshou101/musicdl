@@ -34,6 +34,7 @@ htmlcov
 # Runtime state and user-managed uploads are mounted at runtime, not copied into images.
 data
 plugins/uploads
+sources
 *.session
 *.session-journal
 *.part

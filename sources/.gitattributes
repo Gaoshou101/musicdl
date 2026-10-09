@@ -1,0 +1,2 @@
+# Keep upstream bytes and whitespace exactly as supplied.
+scripts/*.js -text -whitespace
