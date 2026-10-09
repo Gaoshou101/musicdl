@@ -349,6 +349,8 @@ Custom Compose files must also add `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADM
 
 musicdl does not bundle third-party music-source scripts in its release images. An administrator may import a compatible script through the panel after reviewing its analysis result and requested network access.
 
+The repository also offers a [downloadable source catalog](./sources/README.md). Scripts listed there are optional and are not part of published images.
+
 ### Importing sources from the panel
 
 Open Sources → Import source and choose one or more local `.js`, `.mjs`, `.cjs`, or `.py` files, or paste one HTTP(S) URL per line. Local files and URLs share a queue of at most 20 items; adding URLs does not replace items already queued. Each local file and fetched source is limited to 256 KiB. URL imports run through the constrained admin fetcher one at a time: it permits one exact DNS host on standard port 80 or 443, rejects private or otherwise non-global DNS answers and redirects, and does not forward browser cookies or proxy headers. Prefer HTTPS and use a public hostname rather than an IP literal.
