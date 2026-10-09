@@ -418,6 +418,23 @@ def test_content_failures_can_switch_through_three_channels(tmp_path):
     assert first.downloaded == ["1"] and second.downloaded == ["1"] and last.downloaded == ["1"]
 
 
+def test_panel_fallback_keeps_trying_after_download_failed(tmp_path):
+    primary = BrokenSource("primary")
+    first = BrokenSource("first")
+    backup = Source("backup")
+    refreshed = SearchResult((copy_of(first), copy_of(backup)), (), "v")
+    app, service = fallback_app(tmp_path, [primary, first, backup], refreshed)
+
+    response = fetch(app, {"candidate": PRIMARY, "query": "稻香 周杰伦"})
+
+    assert response.status_code == 200
+    assert response.json()["source_id"] == "backup"
+    assert primary.downloaded == ["1"]
+    assert first.downloaded == ["1"]
+    assert backup.downloaded == ["1"]
+    assert service.queries == ["稻香 周杰伦"]
+
+
 def test_panel_retry_budget_includes_switches_already_used_by_shared_fallback(tmp_path):
     primary = BrokenSource("primary", "media_response_invalid")
     first = BrokenSource("first", "media_response_invalid")

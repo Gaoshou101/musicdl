@@ -594,10 +594,11 @@ def test_vertical_slice_searches_resolves_streams_and_archives(tmp_path):
 
 
 @pytest.mark.parametrize("mode,expected_error", [
-    ("resolve", "download_failed"),
+    ("resolve", None),
     ("stream", "media_response_invalid"),
 ])
-def test_vertical_slice_failure_reprompts_and_only_content_failures_try_fallback(tmp_path, mode, expected_error):
+def test_vertical_slice_fallback_recovers_resolve_failure_and_reprompts_after_stream_failure(
+        tmp_path, mode, expected_error):
     async def scenario():
         runner = FixtureRunner(fail_resolve={"primary"} if mode == "resolve" else ())
         transport, sock, _seen = (media_transport(status="404 Not Found", body=b"denied")
@@ -619,47 +620,60 @@ def test_vertical_slice_failure_reprompts_and_only_content_failures_try_fallback
     slice_, runner, sock, bound, job, artifact, effect, rebound = asyncio.run(scenario())
 
     # The plugin search advertises no tiers, so backup lossless capability is
-    # unknown and remains eligible. A streaming content failure gets one
-    # bounded replacement resolve; the same mocked 404 makes it fail too.
+    # unknown and remains eligible. Both a failed resolve and a streamed content
+    # failure get one bounded replacement resolve.
     expected_calls = Counter({("primary", "search"): 1, ("backup", "search"): 2,
-                              ("primary", "resolve"): 1, ("primary", "health"): 1})
+                              ("primary", "resolve"): 1, ("backup", "resolve"): 1})
     if mode == "stream":
-        expected_calls[("backup", "resolve")] = 1
-        assert sock.sent.count(b"GET /song.mp3 HTTP/1.1\r\n") == 2
+        expected_calls[("primary", "health")] = 1
+    assert sock.sent.count(b"GET /song.mp3 HTTP/1.1\r\n") == (2 if mode == "stream" else 1)
     assert Counter(runner.calls) == expected_calls
-    if mode == "stream":
-        replacement = next(item["request"] for item in runner.requests
-                           if item["request"]["operation"] == "resolve"
-                           and item["manifest"]["plugin_id"] == "backup")
-        assert replacement["payload"]["quality"] == "flac"
+    replacement = next(item["request"] for item in runner.requests
+                       if item["request"]["operation"] == "resolve"
+                       and item["manifest"]["plugin_id"] == "backup")
+    assert replacement["payload"]["quality"] == "flac"
+    assert replacement["payload"]["candidate"]["item_id"] == "backup-1"
     assert slice_.refresh_calls == [(QUERY, frozenset({"primary"}))]
-    assert effect.status == "done" and effect.result == {"ok": False, "code": expected_error}
 
-    # The refresh replaced the failed source under a new generation and version.
-    # The fallback response is retained for the next selection even though its
-    # own stream also failed, and no incomplete artifact was published.
-    assert rebound["generation"] == 1 and rebound["version"] != bound["version"]
-    assert rebound["candidates"]["1"]["source_id"] == "backup"
-    assert rebound["candidates"]["1"]["item_id"] == "backup-1"
-    # The job asked for a tier the candidate never declared, so the artifact is
-    # reserved from the container the transport measures rather than up front: a
-    # download that never measured one reserved nothing at all.
-    assert artifact is None
-    assert not list(slice_.media_root.rglob("*.mp3"))
-    assert not list(slice_.media_root.rglob("*.part"))
-
-    # WeCom saw the original prompt and exactly one replacement prompt, never a success notice.
-    assert [user for user, _ in slice_.wecom.sent] == [FROM_USER, FROM_USER]
-    # The replacement is the same recording from another channel, so the row is
-    # the same row; what tells the two prompts apart is why the second one came.
-    assert "1. Song — Artist" in slice_.wecom.sent[0][1]
-    assert slice_.wecom.sent[1][1].startswith("上一次的结果下载失败，这里是最新的结果：")
-    assert "1. Song — Artist" in slice_.wecom.sent[1][1] and "回复序号下载。" in slice_.wecom.sent[1][1]
-    assert all("下载成功" not in text for _, text in slice_.wecom.sent)
-
-    # The job message was acknowledged once its fenced effects settled; nothing was dead-lettered.
-    assert len(slice_.redis.acks) == 2
-    assert (slice_.state.message_stream, slice_.message_worker.group, "1-0") in slice_.redis.acks
-    assert (slice_.state.job_stream, slice_.job_worker.group, job.job_id) in slice_.redis.acks
+    assert slice_.redis.acks == [(slice_.state.message_stream, slice_.message_worker.group, "1-0"),
+                                 (slice_.state.job_stream, slice_.job_worker.group, job.job_id)]
     assert slice_.redis.dead_letters == []
+
+    if mode == "resolve":
+        # The resolver failure is channel-local: the backup delivered the same
+        # recording, which was published and reported as a successful job.
+        assert effect.status == "done" and effect.result == {
+            "ok": True, "requested_quality": "flac", "actual_quality": "mp3",
+            "quality_revision": QUALITY_REVISION, "quality_downgraded": True}
+        # Successful recovery does not replace the lookup record or prompt again.
+        assert rebound["generation"] == bound["generation"] == 0
+        assert rebound["version"] == bound["version"]
+        assert rebound["candidates"]["1"]["source_id"] == "primary"
+        assert artifact.state == "published"
+        assert (artifact.candidate_id, artifact.size_bytes, artifact.target_relative_path,
+                artifact.sha256) == (
+            "primary-1", DECLARED_SIZE, EXPECTED_RELATIVE.as_posix(), hashlib.sha256(MEDIA_BYTES).hexdigest())
+        assert (slice_.media_root / EXPECTED_RELATIVE).read_bytes() == MEDIA_BYTES
+        assert not list(slice_.media_root.rglob("*.part"))
+        assert [user for user, _ in slice_.wecom.sent] == [FROM_USER, FROM_USER]
+        assert "1. Song — Artist" in slice_.wecom.sent[0][1]
+        assert slice_.wecom.sent[1][1] == (
+            "下载成功：欧美/Artist/Song - Artist.mp3（MP3 · 13 B · 未取到无损 · 音质 FLAC→MP3）")
+    else:
+        # A streamed 404 still fails, refreshes the selection, and reprompts.
+        assert effect.status == "done" and effect.result == {"ok": False, "code": expected_error}
+        assert rebound["generation"] == 1 and rebound["version"] != bound["version"]
+        assert rebound["candidates"]["1"]["source_id"] == "backup"
+        assert rebound["candidates"]["1"]["item_id"] == "backup-1"
+        # No usable bytes were measured, so no artifact was reserved or published.
+        assert artifact is None
+        assert not list(slice_.media_root.rglob("*.mp3"))
+        assert not list(slice_.media_root.rglob("*.part"))
+
+        assert [user for user, _ in slice_.wecom.sent] == [FROM_USER, FROM_USER]
+        assert "1. Song — Artist" in slice_.wecom.sent[0][1]
+        assert slice_.wecom.sent[1][1].startswith("上一次的结果下载失败，这里是最新的结果：")
+        assert "1. Song — Artist" in slice_.wecom.sent[1][1] and "回复序号下载。" in slice_.wecom.sent[1][1]
+        assert all("下载成功" not in text for _, text in slice_.wecom.sent)
+
     assert_runner_bodies_are_metadata_only(runner)

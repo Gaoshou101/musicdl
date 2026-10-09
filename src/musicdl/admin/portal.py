@@ -29,8 +29,8 @@ from musicdl.media.admission import (
     DownloadAdmission,
 )
 from musicdl.media.fallback import (
-    CONTENT_FAILURE_CODES,
     MAX_CHANNEL_SWITCHES,
+    RECOVERABLE_CHANNEL_CODES,
     replacement_candidates,
     replacement_channel_rows,
 )
@@ -1388,12 +1388,15 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             return report(source_id, candidate.source_id if source_id != candidate.source_id else None,
                           attempt.download)
         code = attempt.download_error or "download_failed"
-        if (code in CONTENT_FAILURE_CODES and quality_policy != "best_available"
+        if (code in RECOVERABLE_CHANNEL_CODES and quality_policy != "best_available"
                 and attempt.channel_switches >= MAX_CHANNEL_SWITCHES):
             raise failed(code)
         attempted_sources = set(attempt.attempted_source_ids or (candidate.source_id,))
         current_candidate = candidate
-        may_continue_after_error = True
+        # Do not restart the panel retry chain after shared fallback spent a switch
+        # and ended on a terminal error from that channel.
+        may_continue_after_error = (
+            attempt.channel_switches == 0 or code in RECOVERABLE_CHANNEL_CODES)
         switch_limit = (1 if quality_policy == "best_available"
                         else max(0, MAX_CHANNEL_SWITCHES - attempt.channel_switches))
         for _ in range(switch_limit):
@@ -1471,7 +1474,7 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
                 raise PanelDownloadCapacityError(status, exc.snapshot) from None
             else:
                 return report(replacement.source_id, candidate.source_id, result)
-            may_continue_after_error = code in CONTENT_FAILURE_CODES
+            may_continue_after_error = code in RECOVERABLE_CHANNEL_CODES
             current_candidate = replacement
         raise failed(code)
 
