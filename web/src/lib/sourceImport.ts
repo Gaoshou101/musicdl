@@ -1,10 +1,18 @@
 /** Pure helpers shared by the URL import dialog and its queue harness. */
 
-import type { ImportPreview, MutationReport, SourceImport, SourceItem } from './api'
+import type {
+  ImportPreview,
+  MutationReport,
+  SourceFetchInputReport,
+  SourceFetchReport,
+  SourceImport,
+  SourceItem,
+} from './api'
 
 export const SOURCE_IMPORT_MAX_URLS = 20
 export const SOURCE_IMPORT_MAX_BYTES = 256 * 1024
 export const SOURCE_IMPORT_EXTENSIONS = ['.js', '.mjs', '.cjs', '.py'] as const
+export const SOURCE_LIST_FORMAT = 'musicdl-source-list/v1'
 
 export type SourceLanguage = 'javascript' | 'python'
 
@@ -33,6 +41,8 @@ export type SourceImportStatus =
 export type SourceImportRow = {
   key: string
   url: string
+  /** Top-level inputs opt in to source-list expansion when retried. */
+  topLevelInput?: boolean
   file?: File
   script: string
   filename: string
@@ -47,17 +57,118 @@ export type SourceImportRow = {
   existing: boolean
 }
 
-/** Parse one URL per non-empty line, preserving order and bounded queue size. */
-export function parseSourceUrlLines(value: string, max = SOURCE_IMPORT_MAX_URLS): string[] {
-  const urls = value
+/** Parse every URL line in order; queue capacity is checked before appending. */
+export function parseSourceUrlLines(value: string): string[] {
+  return value
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-  return urls.slice(0, Math.max(0, max))
 }
 
 export function hasTooManySourceUrls(value: string, max = SOURCE_IMPORT_MAX_URLS): boolean {
   return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length > max
+}
+
+export type SourceImportPlanItem = {
+  url: string
+  /** True only for the user's top-level URL; children must be script-only. */
+  topLevelInput: boolean
+  report: SourceFetchReport | null
+  error: unknown | null
+}
+
+export type SourceImportUrlBatchStatus = 'complete' | 'cancelled' | 'overflow'
+
+function isSourceListReport(value: SourceFetchInputReport): value is Extract<SourceFetchInputReport, { kind: 'source_list' }> {
+  return typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'source_list'
+}
+
+function isSourceFetchReport(value: unknown): value is SourceFetchReport {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<SourceFetchReport>
+  return typeof candidate.script === 'string' && typeof candidate.filename === 'string' &&
+    (candidate.language === 'javascript' || candidate.language === 'python')
+}
+
+function sourceListUrls(value: Extract<SourceFetchInputReport, { kind: 'source_list' }>): string[] {
+  if (value.format !== SOURCE_LIST_FORMAT || !Array.isArray(value.sources)) {
+    throw new Error('音源目录格式不受支持。')
+  }
+  const urls = value.sources.map((source) => {
+    if (!source || typeof source.url !== 'string' || !source.url.trim()) {
+      throw new Error('音源目录包含无效 URL。')
+    }
+    return source.url.trim()
+  })
+  if (!urls.length) throw new Error('音源目录没有可导入的项目。')
+  return urls
+}
+
+/**
+ * Resolve top-level URLs sequentially. Direct scripts are kept in the plan;
+ * list members are represented as script-only children and are not fetched yet.
+ */
+export async function planSourceImportUrls(
+  urls: ReadonlyArray<string>,
+  fetchInput: (url: string) => Promise<SourceFetchInputReport>,
+  isCurrent: () => boolean = () => true,
+): Promise<{ status: 'complete' | 'cancelled'; items: SourceImportPlanItem[] }> {
+  const items: SourceImportPlanItem[] = []
+  for (const url of urls) {
+    if (!isCurrent()) return { status: 'cancelled', items: [] }
+    try {
+      const fetched = await fetchInput(url)
+      if (!isCurrent()) return { status: 'cancelled', items: [] }
+      if (isSourceListReport(fetched)) {
+        for (const childUrl of sourceListUrls(fetched)) {
+          items.push({ url: childUrl, topLevelInput: false, report: null, error: null })
+        }
+      } else if (isSourceFetchReport(fetched)) {
+        items.push({ url, topLevelInput: true, report: fetched, error: null })
+      } else {
+        throw new Error('音源获取服务返回了无效结果。')
+      }
+    } catch (error) {
+      if (!isCurrent()) return { status: 'cancelled', items: [] }
+      // A failed top-level URL remains visible and consumes one queue slot.
+      items.push({ url, topLevelInput: true, report: null, error })
+    }
+  }
+  return isCurrent() ? { status: 'complete', items } : { status: 'cancelled', items: [] }
+}
+
+/**
+ * Plan, reserve queue capacity atomically, then fetch/analyze each child in
+ * order. Processing failures are isolated so later children still run.
+ */
+export async function runSourceImportUrlBatch<T>(
+  urls: ReadonlyArray<string>,
+  existingCount: number,
+  fetchInput: (url: string) => Promise<SourceFetchInputReport>,
+  process: (item: SourceImportPlanItem, index: number) => Promise<T>,
+  isCurrent: () => boolean,
+  onPlanned: (items: ReadonlyArray<SourceImportPlanItem>) => void,
+  onFailed: (item: SourceImportPlanItem, index: number, error: unknown) => void,
+): Promise<SourceImportUrlBatchStatus> {
+  const planned = await planSourceImportUrls(urls, fetchInput, isCurrent)
+  if (planned.status === 'cancelled' || !isCurrent()) return 'cancelled'
+  if (existingCount + planned.items.length > SOURCE_IMPORT_MAX_URLS) return 'overflow'
+
+  onPlanned(planned.items)
+  for (const [index, item] of planned.items.entries()) {
+    if (!isCurrent()) return 'cancelled'
+    if (item.error) {
+      onFailed(item, index, item.error)
+      continue
+    }
+    try {
+      await process(item, index)
+    } catch (error) {
+      if (!isCurrent()) return 'cancelled'
+      onFailed(item, index, error)
+    }
+  }
+  return isCurrent() ? 'complete' : 'cancelled'
 }
 
 export function isSupportedSourceFilename(filename: string): boolean {

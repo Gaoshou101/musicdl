@@ -42,7 +42,8 @@ from musicdl.admin.source_fetch import (
     SOURCE_FETCH_CONCURRENCY,
     SOURCE_FETCH_DEADLINE,
     SourceFetchError,
-    fetch_source,
+    fetch_source_with_metadata,
+    normalize_source_import,
 )
 from musicdl.plugins.install import install_source, preview_source
 from musicdl.sources.models import Candidate, normalize_text
@@ -841,13 +842,14 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
 
     @router.post("/sources/fetch")
     async def fetch_import(request: Request):
-        """Fetch one source URL without storing or auditing anything.
+        """Fetch one source URL or an explicitly enabled source-list catalog.
 
         The browser session is authenticated and CSRF-bound before the request
         body is parsed or the blocking broker is offloaded.  The fetch helper
-        returns the same ``script``/``filename``/``language`` shape consumed by
-        the analyze and install calls, while this endpoint itself has no
-        storage, source-manager, runtime-reload, or audit side effects.
+        keeps its existing ``script``/``filename``/``language`` response for a
+        source. A source list is validated and returned as URLs only; this
+        endpoint never fetches its entries or changes storage, source-manager,
+        runtime-reload, or audit state.
         """
         mutate(request)
         try:
@@ -857,11 +859,14 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         url = body.get("url") if isinstance(body, dict) else None
         if not isinstance(url, str) or not url:
             raise HTTPException(422, "invalid_url")
+        allow_source_list = body.get("allow_source_list", False)
+        if type(allow_source_list) is not bool:
+            raise HTTPException(422, "invalid_allow_source_list")
 
         def run_fetch():
             if source_fetcher is not None:
-                return source_fetcher(url)
-            return fetch_source(url, broker=source_broker)
+                return source_fetcher(url), ""
+            return fetch_source_with_metadata(url, broker=source_broker)
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + SOURCE_FETCH_DEADLINE
@@ -888,13 +893,16 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise asyncio.TimeoutError
-            return await asyncio.wait_for(asyncio.shield(worker), remaining)
+            source, content_type = await asyncio.wait_for(asyncio.shield(worker), remaining)
+            return normalize_source_import(source, url, allow_source_list=allow_source_list,
+                                           content_type=content_type)
         except asyncio.TimeoutError:
             raise HTTPException(504, "timeout") from None
         except SourceFetchError as exc:
             if exc.code in {"url_denied", "scheme_denied", "port_denied", "host_denied",
                             "source_too_large", "source_empty", "source_nul", "source_encoding",
-                            "source_html"}:
+                            "source_html", "source_list_invalid", "source_list_unsupported",
+                            "source_list_url_invalid", "source_list_nested"}:
                 status = 422
             elif exc.code == "timeout":
                 status = 504
