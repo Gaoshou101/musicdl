@@ -115,6 +115,11 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     lossless_bias = ({entry.source_id: _lossless_bias(lossless_capability, entry.source_id) for entry in entries}
                      if quality_policy == "lossless_first" else {})
     ranks: dict[tuple[int, int], tuple[int, ...]] = {}
+    # LxSearchAdapter combines several independent catalogue answers into one
+    # list. Recover each platform's native row position from its provenance
+    # tag instead of treating the concatenation as one ranked stream. Sources
+    # without platform metadata retain their own returned sequence as one rank.
+    native_positions: dict[int, int] = {}
 
     def rank_of(candidate, priority):
         key = (id(candidate), priority)
@@ -137,7 +142,11 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     # back to when the winner cannot serve the bytes.
     offered: dict[tuple, list[tuple[Candidate, SourceEntry]]] = {}
     for entry, (status, candidates) in zip(entries, outcomes):
+        platform_positions: dict[str | None, int] = {}
         for candidate in candidates:
+            position = platform_positions.get(candidate.platform, 0)
+            native_positions[id(candidate)] = position
+            platform_positions[candidate.platform] = position + 1
             key = candidate.canonical_version_key
             offered.setdefault(key, []).append((candidate, entry))
             incumbent = by_identity.get(key)
@@ -157,6 +166,14 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
                 by_identity[key] = (candidate, entry)
     q = _search_key(query)
     retained = [(v[0], v[1]) for v in by_identity.values()]
+    identity_native_positions = {
+        identity: min(native_positions[id(candidate)] for candidate, _ in group)
+        for identity, group in offered.items()
+    }
+    exact_title_artists = {
+        _search_key(candidate.artist) for candidate, _ in retained
+        if q == _search_key(candidate.title)
+    }
 
     def relevance_of(candidate: Candidate) -> int:
         """How close one candidate is to what was typed, separators aside.
@@ -175,7 +192,15 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     def ordering(row):
         relevance, c, entry = row
         quality = rank_of(c, entry.priority)
-        return (relevance, *(-value for value in quality),
+        # For an exact title-only query, preserve the native result order when
+        # the catalogue returned multiple artists for that title. Quality
+        # remains the tie-breaker after native relevance. ``best_available``
+        # retains its historical quality sort exactly.
+        native_position = identity_native_positions.get(c.canonical_version_key)
+        use_native_order = (len(exact_title_artists) > 1 and relevance == 0
+                            and native_position is not None and quality_policy != "best_available")
+        native_order = (native_position,) if use_native_order else ()
+        return (relevance, *native_order, *(-value for value in quality),
                 c.title.casefold(), c.artist.casefold(), c.source_id.casefold(), c.item_id.casefold())
     ranked = ((relevance_of(c), c, entry) for c, entry in retained)
     ordered = tuple(c for _, c, _ in sorted(ranked, key=ordering))

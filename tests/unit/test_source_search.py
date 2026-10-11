@@ -397,6 +397,76 @@ def test_a_request_that_names_nothing_exactly_still_falls_back_to_the_quality_so
     result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "路过"))
 
     assert [c.item_id for c in result.candidates] == ["lossless", "lossy"]
+
+
+def test_exact_title_uses_native_platform_rank_before_quality():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="kw-remix", title="泪海 Remix",
+                      artist="DJ", platform="kw"),
+            Candidate(source_id="a", source_version="1", item_id="kw-cover", title="泪海",
+                      artist="翻唱歌手", platform="kw", format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="wy-original", title="泪海",
+                      artist="许茹芸", platform="wy", format="mp3", bitrate=320),
+        ]
+
+    result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), "泪海"))
+
+    # Platform batches are concatenated (kw before wy), so each provenance
+    # group's native position must restart at zero. The lower-quality original
+    # then outranks the later, louder exact-title cover.
+    assert [candidate.item_id for candidate in result.candidates] == [
+        "wy-original", "kw-cover", "kw-remix"]
+
+
+def test_best_available_keeps_legacy_quality_order_for_exact_title():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="original", title="泪海",
+                      artist="许茹芸", format="mp3", bitrate=320),
+            Candidate(source_id="a", source_version="1", item_id="cover", title="泪海",
+                      artist="翻唱歌手", format="flac", bitrate=1411),
+        ]
+
+    result = asyncio.run(search_sources(
+        SourceRegistry([SourceEntry("a", "1", source)]), "泪海", quality_policy="best_available"))
+
+    assert [candidate.item_id for candidate in result.candidates] == ["cover", "original"]
+
+
+def test_exact_version_title_and_title_prefix_keep_textual_relevance():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="studio", title="泪海",
+                      artist="许茹芸", platform="kw", format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="live", title="泪海 Live",
+                      artist="许茹芸", platform="kw", format="mp3", bitrate=320),
+            Candidate(source_id="a", source_version="1", item_id="prefix", title="泪海之歌",
+                      artist="其他歌手", platform="kw", format="flac", bitrate=1411),
+        ]
+
+    registry = SourceRegistry([SourceEntry("a", "1", source)])
+
+    exact_version = asyncio.run(search_sources(registry, "泪海 Live"))
+    title_prefix = asyncio.run(search_sources(registry, "泪海"))
+
+    assert exact_version.candidates[0].item_id == "live"
+    assert title_prefix.candidates[0].title == "泪海"
+
+
+def test_explicit_artist_request_outranks_a_higher_native_position():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="cover", title="泪海",
+                      artist="翻唱歌手", platform="kw"),
+            Candidate(source_id="a", source_version="1", item_id="original", title="泪海",
+                      artist="许茹芸", platform="kw"),
+        ]
+
+    result = asyncio.run(search_sources(
+        SourceRegistry([SourceEntry("a", "1", source)]), "泪海 许茹芸"))
+
+    assert result.candidates[0].item_id == "original"
 # -- a measured lossless channel, and the order it is allowed to change ------
 #
 # A probe measures whether a channel can serve lossless; that measurement is a
