@@ -167,6 +167,8 @@ try {
   await page.getByRole('button', { name: '安装可用音源', exact: true }).last().click()
   await importQueue.getByText('已安装', { exact: true }).waitFor({ state: 'visible' })
   await page.getByRole('heading', { name: sourceId, exact: true, level: 3 }).waitFor({ state: 'visible' })
+  await page.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('heading', { name: '导入音源脚本', exact: true }).waitFor({ state: 'detached' })
 
   await page.getByLabel('后台导航').getByRole('link', { name: '下载历史' }).click()
   const admission = page.getByRole('region', { name: '下载并发' })
