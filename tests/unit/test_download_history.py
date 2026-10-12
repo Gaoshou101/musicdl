@@ -13,6 +13,7 @@ from musicdl.admin.portal import create_admin_router
 from musicdl.app import create_app
 from musicdl.config import AppSettings
 from musicdl.media.history import DownloadHistoryStore, DownloadJournal, HistoryCapacity, HistoryUnavailable
+from musicdl.media.admission import DownloadAdmission
 from musicdl.media.models import MediaError
 from musicdl.sources import SourceEntry, SourceRegistry
 from musicdl.sources.search import SearchResult
@@ -28,7 +29,7 @@ def candidate():
     return Candidate(source_id="primary", source_version="1", item_id="1", title="Song", artist="Artist", format="mp3")
 
 
-def portal(tmp_path, store, source=None, *, refresh=None, extra=None):
+def portal(tmp_path, store, source=None, *, refresh=None, extra=None, admission=None):
     source = source or Source()
     sources = {"primary": source, **(extra or {})}
     runtime = Runtime(SourceRegistry([SourceEntry(k, "1", v) for k, v in sources.items()]), sources)
@@ -37,7 +38,8 @@ def portal(tmp_path, store, source=None, *, refresh=None, extra=None):
     auth = AdminAuth()
     auth.change_credentials("admin", LOGIN["username"], LOGIN["password"])
     app = FastAPI()
-    app.include_router(create_admin_router(auth=auth, runtime=lambda: runtime, media_root=tmp_path, history=store))
+    app.include_router(create_admin_router(auth=auth, runtime=lambda: runtime, media_root=tmp_path,
+                                           history=store, download_admission=admission))
     app.add_middleware(CSRFMiddleware, auth=auth)
     return app
 
@@ -126,12 +128,48 @@ def test_history_session_csrf_pagination_and_missing_record(tmp_path):
         async with client(app) as c:
             assert (await c.get("/admin/downloads")).status_code == 401
             assert (await c.get("/admin/downloads/missing")).status_code == 401
+            assert (await c.get("/admin/downloads/observability")).status_code == 401
             await login(c)
             assert (await c.get("/admin/downloads?limit=101")).status_code == 422
             assert (await c.get("/admin/downloads?offset=-1")).status_code == 422
             assert (await c.get("/admin/downloads/missing")).status_code == 404
             assert (await c.post("/admin/download", json={"candidate": candidate().model_dump()})).status_code == 403
             assert store.list()["total"] == 0
+    run(scenario())
+
+
+def test_observability_reports_only_in_process_admission_counts(tmp_path):
+    async def scenario():
+        admission = DownloadAdmission(active_limit=1, pending_limit=2, per_source_limit=1, per_user_limit=1)
+        store = DownloadHistoryStore()
+        async with client(portal(tmp_path, store, admission=admission)) as c:
+            headers = await login(c)
+            async with admission.acquire(source_id="active-source", user_id="active-user"):
+                async def wait_for_admission():
+                    async with admission.acquire(source_id="queued-source", user_id="queued-user", timeout=5):
+                        pass
+
+                waiting = asyncio.create_task(wait_for_admission())
+                try:
+                    for _ in range(100):
+                        if admission.snapshot()["pending"] == 1:
+                            break
+                        await asyncio.sleep(0)
+                    result = await c.get("/admin/downloads/observability", headers=headers)
+                    assert result.status_code == 200
+                    data = result.json()
+                    assert data["scope"] == "application_process"
+                    assert data["admission"] == {
+                        "active": 1, "active_limit": 1, "pending": 1, "pending_limit": 2,
+                        "source_pending": 0, "active_limit_reached": True,
+                        "possible_wait_factors": ["active_limit_reached"],
+                    }
+                    assert "history_running" not in data
+                    assert not any("rank" in key or "percent" in key for key in data["admission"])
+                finally:
+                    waiting.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await waiting
     run(scenario())
 
 

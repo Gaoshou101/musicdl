@@ -17,16 +17,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
+import os
 import platform
 import random
 import sys
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from musicdl.media.download import download_candidate
+from musicdl.media.history import DownloadJournal
 from musicdl.media.models import DownloadMetadata
 from musicdl.sources.models import Candidate
 
@@ -54,6 +58,35 @@ class SyntheticLocalSource:
 
         return DownloadMetadata(chunks(), extension="mp3", media_type="audio/mpeg",
                                 declared_size=len(self.payload), quality=quality)
+
+
+class _StageEventSink:
+    """Capture actual journal span events without adding SQLite work."""
+
+    def __init__(self):
+        self.samples = {"resolve": [], "transfer": []}
+
+    def begin(self, *_args, **_kwargs) -> bool:
+        return True
+
+    def append(self, _task_id: str, event: Any) -> None:
+        if not isinstance(event, Mapping):
+            return
+        stage = event.get("stage")
+        elapsed_ms = event.get("elapsed_ms")
+        if (stage not in self.samples or event.get("status") not in
+                {"success", "failed", "cancelled", "interrupted"}):
+            return
+        if (isinstance(elapsed_ms, bool) or not isinstance(elapsed_ms, (int, float))
+                or not math.isfinite(elapsed_ms) or elapsed_ms < 0):
+            return
+        self.samples[stage].append(elapsed_ms / 1000)
+
+    def finish(self, *_args, **_kwargs) -> None:
+        pass
+
+    def warn(self, *_args, **_kwargs) -> None:
+        pass
 
 
 def synthetic_payload(size_mib: int, seed: int) -> tuple[bytes, int, int]:
@@ -112,6 +145,8 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--concurrency", type=_concurrency_values, default=[1, 4, 8, 16],
                         help="comma-separated simultaneous downloads (maximum 16)")
     parser.add_argument("--seed", type=int, default=1_296_671_049, help="fixed payload seed")
+    parser.add_argument("--source-commit", help="source commit or immutable revision label for the measured implementation")
+    parser.add_argument("--snapshot", help="baseline/current label when measuring an exported source snapshot")
     args = parser.parse_args(argv)
     if not 4 <= args.size_mib <= 16:
         parser.error("size-mib must be between 4 and 16")
@@ -134,21 +169,32 @@ async def _lag_monitor(stop: asyncio.Event, samples: list[float], thread_counts:
 
 
 async def _download_one(source: SyntheticLocalSource, payload_size: int, duration: int,
-                        root: Path, *, sequence: int, round_number: int) -> tuple[float, Path, int]:
+                        root: Path, *, sequence: int, round_number: int
+                        ) -> tuple[float, Path, int, dict[str, list[float]]]:
     candidate = Candidate(
         source_id="synthetic-local", source_version="benchmark-v1",
         item_id=f"seed-{sequence}-round-{round_number}", title=f"Bench {sequence} {round_number}",
         artist="Fixed Synthetic Artist", duration=duration, format="mp3", size=payload_size,
     )
+    request_id = f"bench-{sequence}-{round_number}"
+    sink = _StageEventSink()
+    journal = DownloadJournal(sink, request_id, candidate, origin="benchmark", query=candidate.title)
     started = time.perf_counter()
-    result = await download_candidate(candidate, source, root, request_id=f"bench-{sequence}-{round_number}")
+    try:
+        with journal.activate():
+            result = await download_candidate(candidate, source, root, request_id=request_id)
+    except BaseException as exc:
+        journal.finish("failed", error_code=getattr(exc, "code", None))
+        raise
+    journal.finish("succeeded", result=result)
     elapsed = time.perf_counter() - started
-    return elapsed, root / result.relative_path, result.size_bytes
+    return elapsed, root / result.relative_path, result.size_bytes, sink.samples
 
 
 async def _run_level(source: SyntheticLocalSource, payload_size: int, duration: int,
                      root: Path, concurrency: int, rounds: int) -> dict[str, Any]:
     latencies: list[float] = []
+    stage_latencies = {"resolve": [], "transfer": []}
     lag_samples: list[float] = []
     thread_counts = [threading.active_count()]
     stop = asyncio.Event()
@@ -163,14 +209,17 @@ async def _run_level(source: SyntheticLocalSource, payload_size: int, duration: 
             results = await asyncio.gather(*tasks)
             latencies.extend(item[0] for item in results)
             total_bytes += sum(item[2] for item in results)
-            for _, path, _ in results:
+            for _, path, _, samples in results:
                 path.unlink(missing_ok=True)
+                for stage, values in samples.items():
+                    stage_latencies[stage].extend(values)
     finally:
         stop.set()
         await monitor
     elapsed = time.perf_counter() - started
     rss_bytes, rss_source = _rss_bytes()
     return {
+        "phase": "media_download",
         "concurrency": concurrency,
         "rounds": rounds,
         "downloads": len(latencies),
@@ -179,6 +228,14 @@ async def _run_level(source: SyntheticLocalSource, payload_size: int, duration: 
         "throughput_mib_s": total_bytes / MIB / elapsed if elapsed else None,
         "latency_seconds_p50": _percentile(latencies, 0.50),
         "latency_seconds_p95": _percentile(latencies, 0.95),
+        "download_stage_seconds": {
+            stage: {
+                "p50": _percentile(values, 0.50),
+                "p95": _percentile(values, 0.95),
+                "samples": len(values),
+            }
+            for stage, values in stage_latencies.items()
+        },
         "event_loop_lag_seconds_p50": _percentile(lag_samples, 0.50),
         "event_loop_lag_seconds_p95": _percentile(lag_samples, 0.95),
         "event_loop_lag_seconds_max": max(lag_samples, default=0.0),
@@ -206,9 +263,18 @@ async def _main(args: argparse.Namespace) -> None:
         "rounds": args.rounds,
         "concurrency": args.concurrency,
         "scratch_budget_mib": MAX_SCRATCH_MIB,
+        "source_commit": args.source_commit,
+        "snapshot": args.snapshot,
+        "stage_timing_source": "recorded DownloadJournal trace spans",
+        "stage_timing_units": "seconds",
+        "stage_spans_may_overlap": True,
+        "stage_spans_sum_to_full_download_latency": False,
+        "stage_timings_describe": "the controlled synthetic in-process source",
         "implementation_file": str(implementation),
         "python": platform.python_version(),
         "platform": platform.platform(),
+        "processor": platform.processor(),
+        "cpu_count": os.cpu_count(),
     }
     print(json.dumps(metadata, sort_keys=True))
     with tempfile.TemporaryDirectory(prefix="musicdl-media-bench-") as directory:

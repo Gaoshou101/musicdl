@@ -112,3 +112,17 @@
 - `[telegram-runtime] PASS` — the deployed admin health endpoint returned `telegram: ok`, and the enabled `music_v1bot` definition was present in the persisted admin registry. The panel search/download path was also exercised against the deployed runtime.
 
 The release gates are now closed for the 1.0 candidate. A formal tag still requires the release image workflow and final operator sign-off.
+
+## 1.1.x follow-up — download visibility, measurements, and browser regression
+
+**Goal:** Make running downloads easier to diagnose, establish reproducible measurements for future optimization, and protect the main authenticated panel workflows with a real-browser check.
+
+**Download visibility:** The authenticated observability endpoint reads existing admission counters for the current application process. The history detail derives its recent resolve/transfer phase from existing task events and gives actionable failure guidance. Failed counter refreshes clear stale values. This adds no history-table aggregation, schema migration, scheduler change, or cross-process queue claim.
+
+**Measurements:** Search orchestration, global/per-source admission waiting, and media processing have separate deterministic workloads. Media reports contain journal stage p50/p95 and sample counts alongside latency, throughput, event-loop lag, RSS, and thread count. Static JS/CSS reports include raw/per-file gzip bytes; image reports include IDs/digests and local uncompressed size. Reports identify source snapshots and environments. CI reuses its existing image builds for artifact measurements. Commands and limits are in `docs/performance-baseline.md`.
+
+**Browser regression:** The panel exported from the built deployment image runs against a disposable real application fixture. Coverage includes login and cookie restoration after reload, source-list preview/install, search/download/history, controlled resolve-to-transfer-to-completed transitions, and stale-counter removal after an observability failure. CI retains a success screenshot and failure diagnostics.
+
+**Pre-push evidence on 2026-10-12:** The isolated remote backend suite completed with 2,128 passed / 82 skipped, and the real-Redis/live-socket subset with 9 passed. Paired search/admission and media runs completed against the 1.1.4 baseline (`3f6df2bb15cef1d8a5a6c5d3e8cd961582654f91`) and candidate working tree using the same scripts; the 128-result boundary passed. At concurrency 16 the media runs each recorded 320 samples per stage. These controlled measurements establish instrumentation, not a demonstrated speedup. Browser, frontend, and image validation are acceptance gates in the submitted revision's CI; a started run is not a pass.
+
+**Acceptance criteria:** Every CI check required by this change completes successfully, browser assertions confirm the new states with a retained completed-detail screenshot, and artifact JSONL names the tested source/image identities. Synthetic stage spans may overlap and must not be summed. No performance improvement, production deployment, or numbered release is implied by this follow-up.
