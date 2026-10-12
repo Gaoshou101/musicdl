@@ -144,6 +144,12 @@ try {
   await details.getByRole('button', { name: '刷新下载详情' }).click()
   await details.getByText('已完成', { exact: true }).waitFor({ state: 'visible' })
   await details.getByText('最近阶段：正在接收并校验音频', { exact: true }).waitFor({ state: 'detached' })
+  await historyPage.getByRole('button', { name: '刷新列表', exact: true }).click()
+  await historyPage.getByRole('region', { name: '下载记录' })
+    .getByRole('button', { name: '查看 Browser Smoke Track 的下载记录', exact: true })
+    .getByText('已完成', { exact: true }).waitFor({ state: 'visible' })
+  await historyPage.getByRole('region', { name: '下载并发' }).locator('dd').first()
+    .filter({ hasText: /^0\s*\/\s*[1-9]\d*$/ }).waitFor({ state: 'visible' })
   await historyPage.screenshot({ path: successScreenshot, fullPage: true })
   await historyPage.close()
 
@@ -160,7 +166,7 @@ try {
   assert.match(sourceId, /^[a-z][a-z0-9-]{1,63}$/)
   await page.getByRole('button', { name: '安装可用音源', exact: true }).last().click()
   await importQueue.getByText('已安装', { exact: true }).waitFor({ state: 'visible' })
-  await page.getByText(sourceId, { exact: true }).waitFor({ state: 'visible' })
+  await page.getByRole('heading', { name: sourceId, exact: true, level: 3 }).waitFor({ state: 'visible' })
 
   await page.getByLabel('后台导航').getByRole('link', { name: '下载历史' }).click()
   const admission = page.getByRole('region', { name: '下载并发' })
