@@ -8,11 +8,13 @@ import {
   DownloadHistoryEvent,
   DownloadHistoryPage,
   DownloadHistoryStatus,
+  DownloadObservability,
   downloadErrorMessage,
   errorMessage,
   listDownloadHistory,
   mediaUrl,
   readDownloadHistory,
+  readDownloadObservability,
 } from '@/lib/api'
 import { formatBytes } from '@/lib/format'
 import { usePolling } from '@/lib/usePolling'
@@ -34,6 +36,24 @@ const EVENT_STATUS: Record<string, string> = {
   started: '开始', running: '进行中', success: '成功', succeeded: '完成',
   failed: '失败', interrupted: '中断', cancelled: '已取消', skipped: '跳过', warning: '提示',
   selected: '已选择', observed: '已记录', unverified: '未验证',
+}
+const WAIT_FACTOR_LABELS: Record<string, string> = {
+  active_limit_reached: '并发名额已满',
+  source_or_user_limit: '音源或用户限额可能影响等待',
+  source_transition_limit: '目标音源名额可能影响切换',
+}
+const ERROR_ADVICE: Record<string, string> = {
+  download_queue_full: '当前等待名额已满，稍后重试。',
+  download_queue_timeout: '等待并发名额超时，稍后重试或减少同时发起的下载。',
+  download_source_capacity: '目标音源名额暂不可用，稍后重试或尝试其他音源。',
+  download_source_timeout: '等待目标音源名额超时，稍后重试或尝试其他音源。',
+  download_admission_blocked: '下载并发容量暂不可用，稍后重试。',
+  download_admission_timeout: '等待下载并发容量超时，稍后重试。',
+  media_timeout: '音源响应超时；可稍后重试，并在音源状态页检查来源。',
+  source_unavailable: '可在音源状态页检查来源，再尝试其他音源。',
+  incomplete_audio: '本次音源返回的文件不完整，可尝试其他音源。',
+  service_restarted: '服务重启后无法确认最终结果；重新下载前先检查媒体目录。',
+  download_uncertain: '重新下载前先检查媒体目录，避免重复文件。',
 }
 const CONTROL = 'inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-700 px-3 py-2 text-sm hover:bg-neutral-800/60 disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400'
 
@@ -59,6 +79,49 @@ function reasonText(value: string) {
   if (value === 'quality_downgrade') return '当前音源未能提供请求的音质'
   if (value.startsWith('content_error:')) return downloadErrorMessage(value.slice('content_error:'.length))
   return downloadErrorMessage(value)
+}
+
+function currentPhase(events: DownloadHistoryEvent[]) {
+  const open = new Map<string, { event: DownloadHistoryEvent; index: number }>()
+  events.forEach((event, index) => {
+    if (event.stage !== 'resolve' && event.stage !== 'transfer') return
+    const key = `${event.stage}\u0000${event.source_id ?? ''}\u0000${event.candidate_id ?? ''}`
+    if (event.status === 'started') open.set(key, { event, index })
+    else if (['success', 'failed', 'cancelled', 'interrupted'].includes(event.status ?? '')) open.delete(key)
+  })
+  const active = [...open.values()].sort((a, b) => a.index - b.index).at(-1)?.event
+  const latest = events.at(-1) ?? null
+  if (active) return { phase: active.stage ?? 'between_steps', latest }
+  if (!latest) return { phase: 'preparing', latest }
+  if (latest.stage === 'channel_switch' && latest.status === 'selected') {
+    return { phase: 'channel_switch', latest }
+  }
+  return { phase: 'between_steps', latest }
+}
+
+function phaseLabel(phase: string) {
+  if (phase === 'preparing') return '尚无阶段记录'
+  if (phase === 'between_steps') return '等待状态更新'
+  if (phase === 'channel_switch') return '已选择替代音源'
+  if (phase === 'resolve') return '正在解析音源'
+  if (phase === 'transfer') return '正在接收并校验音频'
+  return STAGES[phase] ?? phase
+}
+
+function phaseAdvice(phase: string, latest: DownloadHistoryEvent | null) {
+  if (latest?.error_code) {
+    return `最近事件记录了错误“${downloadErrorMessage(latest.error_code)}”；任务仍标记为进行中，请等待后续事件确认结果。`
+  }
+  if (latest?.reason === 'quality_downgrade') return '最近事件显示当前音源未能提供请求音质；系统可能继续尝试其他音源。'
+  if (latest?.reason === 'content_failure') return '最近事件显示来源内容校验失败；任务仍标记为进行中，请等待后续尝试结果。'
+  if (phase === 'resolve') return '等待音源解析结果；如长时间无更新，可检查音源状态。'
+  if (phase === 'transfer') return '耗时取决于文件大小和音源响应。'
+  if (phase === 'channel_switch') return '已选择替代音源，正在继续尝试。'
+  return '等待后续状态记录。'
+}
+
+function errorAdvice(code: string | null) {
+  return code ? ERROR_ADVICE[code] ?? null : null
 }
 
 function Attempt({ event }: { event: DownloadHistoryEvent }) {
@@ -129,8 +192,18 @@ function TaskDetails({ id }: { id: string }) {
           {detail.status === 'interrupted' && (
             <p className="text-sm text-warning mt-4">这次执行或记录已中断，最终结果未确认。重新下载前，请先检查媒体目录。</p>
           )}
-          {detail.status === 'running' && <p className="text-sm text-neutral-400 mt-4">正在等待下载结果，此页会自动更新。</p>}
-          {detail.error_code && <p className="text-sm text-warning mt-3">{downloadErrorMessage(detail.error_code)}</p>}
+          {detail.status === 'running' && (() => {
+            const phase = currentPhase(detail.events)
+            return <div className="mt-4 rounded-lg border border-neutral-800 bg-neutral-900/40 p-3">
+              <p role="status" className="text-sm text-neutral-200">最近阶段：{phaseLabel(phase.phase)}</p>
+              <p className="text-xs text-neutral-400 mt-1">{phaseAdvice(phase.phase, phase.latest)}</p>
+              <p className="text-xs text-neutral-500 mt-1">按最近记录更新，不代表实时进度。</p>
+            </div>
+          })()}
+          {detail.error_code && <>
+            <p className="text-sm text-warning mt-3">{downloadErrorMessage(detail.error_code)}</p>
+            {errorAdvice(detail.error_code) && <p className="text-xs text-neutral-400 mt-1">{errorAdvice(detail.error_code)}</p>}
+          </>}
           {detail.history_warning && <p className="text-sm text-warning mt-3">历史记录保存不完整，部分过程可能缺失。</p>}
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 mt-5 text-sm">
             <dt className="text-neutral-500">入口</dt><dd>{detail.origin === 'wecom' ? '企业微信' : '管理面板'}</dd>
@@ -167,9 +240,11 @@ function TaskDetails({ id }: { id: string }) {
 
 export default function DownloadHistoryPageView() {
   const [page, setPage] = useState<DownloadHistoryPage | null>(null)
+  const [observability, setObservability] = useState<DownloadObservability | null>(null)
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [observabilityError, setObservabilityError] = useState('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => { setSelected(new URLSearchParams(window.location.search).get('id')) }, [])
@@ -197,6 +272,20 @@ export default function DownloadHistoryPageView() {
     }
   }, [offset])
   const refresh = usePolling(load, 5000)
+  const observe = useCallback(async (signal: AbortSignal) => {
+    try {
+      const report = await readDownloadObservability(signal)
+      if (signal.aborted) return
+      setObservability(report)
+      setObservabilityError('')
+    } catch (err) {
+      if (!signal.aborted) {
+        setObservability(null)
+        setObservabilityError(errorMessage(err))
+      }
+    }
+  }, [])
+  const refreshObservability = usePolling(observe, 3000)
   const choose = (id: string) => {
     setSelected(id)
     const url = new URL(window.location.href)
@@ -215,10 +304,35 @@ export default function DownloadHistoryPageView() {
         </div>
         <div className="flex items-center gap-2">
           <Link href="/dashboard/search" className={CONTROL}>搜索音乐</Link>
-          <button type="button" className={CONTROL} onClick={() => void refresh()}><ArrowClockwise size={16} />刷新列表</button>
+          <button type="button" className={CONTROL} onClick={() => { void refresh(); void refreshObservability() }}><ArrowClockwise size={16} />刷新列表</button>
         </div>
       </header>
       {error && <p role="alert" className="text-danger text-sm rounded-lg border border-danger/20 bg-danger/10 p-3 mb-4">{error}</p>}
+      <section aria-label="下载并发" className="glass rounded-xl border border-neutral-800 p-4 sm:p-5 mb-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-semibold">下载并发</h2>
+            <p className="text-xs text-neutral-500 mt-1">仅统计当前服务进程的瞬时占用，不代表其他进程或部署实例。</p>
+          </div>
+          <button type="button" aria-label="刷新下载并发" className={CONTROL} onClick={() => void refreshObservability()}><ArrowClockwise size={16} />刷新状态</button>
+        </div>
+        {observabilityError && <p role="alert" className="text-danger text-sm mt-3">{observabilityError}</p>}
+        {!observability && !observabilityError && <p role="status" className="text-sm text-neutral-400 mt-3">正在读取瞬时状态…</p>}
+        {observability && (observability.admission ? (
+          <>
+            <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 text-sm">
+              <div><dt className="text-neutral-500">占用名额</dt><dd className="mt-1 font-medium">{observability.admission.active} / {observability.admission.active_limit}</dd></div>
+              <div><dt className="text-neutral-500">等待下载</dt><dd className="mt-1 font-medium">{observability.admission.pending} / {observability.admission.pending_limit}</dd></div>
+              <div><dt className="text-neutral-500">等待切换音源</dt><dd className="mt-1 font-medium">{observability.admission.source_pending}</dd></div>
+              <div><dt className="text-neutral-500">并发状态</dt><dd className="mt-1 font-medium">{observability.admission.active_limit_reached ? '名额已满' : '名额未满'}</dd></div>
+            </dl>
+            {!!observability.admission.possible_wait_factors.length && (
+              <p className="text-xs text-neutral-400 mt-3">整体等待可能与：{observability.admission.possible_wait_factors.map((factor) => WAIT_FACTOR_LABELS[factor] ?? factor).join('；')}有关。</p>
+            )}
+            <p className="text-xs text-neutral-500 mt-2">此处显示整体占用，等待条件不对应某一首歌；单曲阶段见下方详情。</p>
+          </>
+        ) : <p className="text-sm text-neutral-400 mt-3">当前服务暂未提供并发计数。</p>)}
+      </section>
       <div className={`grid gap-6 items-start ${selected ? 'xl:grid-cols-2' : ''}`}>
         <section aria-label="下载记录" className="min-w-0">
           {loading && <p role="status" className="text-neutral-400 p-6">正在读取下载记录…</p>}

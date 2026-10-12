@@ -306,6 +306,19 @@ export type DownloadHistoryPage = {
   limit: number
 }
 
+export type DownloadObservability = {
+  scope: 'application_process'
+  admission: null | {
+    active: number
+    active_limit: number
+    pending: number
+    pending_limit: number
+    source_pending: number
+    active_limit_reached: boolean
+    possible_wait_factors: string[]
+  }
+}
+
 export type CheckState = 'ok' | 'failed' | 'unavailable' | 'not_required'
 
 export type HealthReport = {
@@ -527,6 +540,10 @@ const DETAIL_TEXT: Record<string, string> = {
   runtime_reloading: '运行时正在切换，请稍后重试下载',
   download_queue_full: '下载队列已满，请稍后重试',
   download_queue_timeout: '等待下载容量超时，请稍后重试',
+  download_source_capacity: '目标音源的并发名额暂不可用，请稍后重试',
+  download_source_timeout: '等待目标音源的并发名额超时，请稍后重试',
+  download_admission_blocked: '下载并发容量暂不可用，请稍后重试',
+  download_admission_timeout: '等待下载并发容量超时，请稍后重试',
   'credential change required': '请先修改默认密码',
   // Refreshing does not help: the token half of the pair only ever comes back
   // with a login reply, so a page that lost it (a second tab, a cleared
@@ -1032,6 +1049,10 @@ export function downloadCandidate(candidate: Candidate, query?: string): Promise
 
 export function listDownloadHistory(offset = 0, limit = 20, signal?: AbortSignal): Promise<DownloadHistoryPage> {
   return request<DownloadHistoryPage>('/downloads', { query: { offset, limit }, signal })
+}
+
+export function readDownloadObservability(signal?: AbortSignal): Promise<DownloadObservability> {
+  return request<DownloadObservability>('/downloads/observability', { signal })
 }
 
 export function readDownloadHistory(id: string, signal?: AbortSignal): Promise<DownloadHistoryDetail> {

@@ -1160,6 +1160,28 @@ def create_admin_router(*, auth: AdminAuth | None = None, sources: SourceManager
         except HistoryUnavailable:
             raise HTTPException(503, "history_unavailable") from None
 
+    @router.get("/downloads/observability")
+    async def download_observability(request: Request):
+        require(request)
+        admission = panel_downloads.admission.snapshot() if panel_downloads.admission is not None else None
+        if admission is not None:
+            active = admission["active"]
+            pending = admission["pending"]
+            source_pending = admission["source_pending"]
+            admission = {
+                "active": active,
+                "active_limit": admission["active_limit"],
+                "pending": pending,
+                "pending_limit": admission["pending_limit"],
+                "source_pending": source_pending,
+                "active_limit_reached": active >= admission["active_limit"],
+                "possible_wait_factors": (["active_limit_reached"] if pending and
+                                           active >= admission["active_limit"] else
+                                           ["source_or_user_limit"] if pending else []) +
+                                          (["source_transition_limit"] if source_pending else []),
+            }
+        return {"scope": "application_process", "admission": admission}
+
     @router.get("/downloads/{task_id}")
     async def download_history_detail(task_id: str, request: Request):
         require(request)

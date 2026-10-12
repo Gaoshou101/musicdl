@@ -64,6 +64,11 @@ jobs:
       MUSICDL_PORT: "3999"
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install fixture runtime
+        run: python -m pip install -e .
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -72,6 +77,9 @@ jobs:
       - name: Install
         working-directory: web
         run: npm ci --no-audit --no-fund
+      - name: Install Chromium for the real browser smoke
+        working-directory: web
+        run: npx playwright install --with-deps chromium
       - name: Typecheck
         working-directory: web
         run: npx tsc --noEmit
@@ -137,6 +145,30 @@ jobs:
           grep --quiet '管理后台' /tmp/console.html || fail
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3999/admin/sources)" = "401" || fail
           echo "one container answered /healthz, served the console, and kept /admin behind a session"
+      - name: Export the panel from the built deployment image
+        run: |
+          set -euo pipefail
+          container="$(docker compose -p console-smoke -f compose.prod.yaml ps -q musicdl)"
+          test -n "$container"
+          mkdir -p "$RUNNER_TEMP/musicdl-panel"
+          docker cp "$container:/app/panel/." "$RUNNER_TEMP/musicdl-panel/"
+      - name: Authenticated browser smoke for downloads, source lists, and failures
+        working-directory: web
+        env:
+          MUSICDL_BROWSER_PANEL_ROOT: ${{ runner.temp }}/musicdl-panel
+          MUSICDL_BROWSER_ARTIFACTS: ${{ runner.temp }}/browser-smoke-artifacts
+        run: npm run smoke:browser
+      - name: Upload browser screenshots and traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/browser-smoke-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Stop the production panel smoke container
+        if: always()
+        run: docker compose -p console-smoke -f compose.prod.yaml down --volumes --remove-orphans --timeout 20
 
   # The published 1.1.4 images support lite. Build both services from this
   # checkout to test this commit's manifest and lite support without relying
@@ -150,6 +182,9 @@ jobs:
       MUSICDL_PORT: "3997"
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - name: Build and exercise the source-built two-container lite deployment
         shell: bash
         run: |
@@ -281,7 +316,31 @@ jobs:
               raise SystemExit("rejected lite policy update changed saved settings")
           print("authenticated lite policy probe returned 422; effective and saved settings stayed unchanged")
           PY
+
+          # Measure only the images this job already built and the panel in
+          # the running main container; this does not build or start anything.
+          main_container="$(compose ps --quiet musicdl)"
+          main_image="$(compose images --quiet musicdl)"
+          plugin_image="$(compose images --quiet plugin-runner)"
+          test -n "$main_container" && test -n "$main_image" && test -n "$plugin_image" || fail
+          mkdir -p "$RUNNER_TEMP/musicdl-lite-panel"
+          docker cp "$main_container:/app/panel/." "$RUNNER_TEMP/musicdl-lite-panel/" || fail
+          python scripts/performance/measure_artifacts.py \
+            --assets-dir "$RUNNER_TEMP/musicdl-lite-panel" \
+            --image "$main_image" \
+            --image "$plugin_image" \
+            --source-commit "$GITHUB_SHA" \
+            --snapshot "lite-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            > "$RUNNER_TEMP/lite-artifact-measurement.jsonl" || fail
           echo "source-built lite stack served its panel, authenticated safely, and refused WeCom without saving a change"
+      - name: Upload lite image and panel artifact measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lite-artifact-measurement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lite-artifact-measurement.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Exercise the published quick-install manifest as operators use it: one
   # file, its default versioned images, and its bundled Redis. This is separate
