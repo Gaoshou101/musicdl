@@ -170,7 +170,7 @@ jobs:
         if: always()
         run: docker compose -p console-smoke -f compose.prod.yaml down --volumes --remove-orphans --timeout 20
 
-  # The published 1.1.4 images support lite. Build both services from this
+  # The 1.1.5 candidate images will support lite. Build both services from this
   # checkout to test this commit's manifest and lite support without relying
   # on published images or a moving latest tag.
   lite-mode-source-image:
@@ -373,10 +373,10 @@ jobs:
           }
           trap cleanup EXIT
 
-          # The candidate 1.1.4 images do not exist until the release tag is
-          # published. Smoke the last published pair before that tag is pushed.
-          # After publication, verify the manifest's 1.1.4 default separately.
-          export MUSICDL_IMAGE_TAG=1.1.3
+          # The candidate 1.1.5 images do not exist until the release tag is
+          # published. Smoke the last published 1.1.4 pair before that tag is pushed.
+          # After publication, verify the manifest's 1.1.5 default separately.
+          export MUSICDL_IMAGE_TAG=1.1.4
           compose pull || fail
           compose up --detach --wait --wait-timeout 120 || fail
 
