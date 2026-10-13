@@ -10,112 +10,107 @@ def compose():
     return yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
 
 
-def test_compose_has_exactly_two_application_services_and_no_redis_service():
+def test_one_manifest_runs_release_images_or_builds_from_checkout():
     data = compose()
-    assert set(data["services"]) == {"musicdl", "plugin-runner"}
-    assert all("redis" not in str(service.get("image", "")).lower() for service in data["services"].values())
+    services = data["services"]
+
+    assert data["name"] == "musicdl"
+    assert set(services) == {"musicdl", "plugin-runner", "redis"}
+    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.1.5}"
+    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.1.5}"
+    assert services["musicdl"]["build"] == {"context": ".", "dockerfile": "docker/main/Dockerfile"}
+    assert services["plugin-runner"]["build"] == {"context": ".", "dockerfile": "docker/plugin/Dockerfile"}
+    assert services["musicdl"]["env_file"] == [{"path": ".env", "required": False}]
+    assert not any((ROOT / name).exists() for name in ("compose.quick.yaml", "compose.prod.yaml", "compose.lite.yaml"))
 
 
-def test_compose_main_owns_volumes_and_only_receives_external_redis_url():
+def test_compose_main_uses_bundled_redis_and_owns_application_volumes():
     data = compose()
     main = data["services"]["musicdl"]
     plugin = data["services"]["plugin-runner"]
-    assert main["environment"]["MUSICDL_REDIS__URL"] == "${MUSICDL_REDIS__URL:?set an external Redis URL}"
-    assert not any("REDIS" in str(v).upper() for v in plugin.get("environment", {}).keys())
-    assert set(main["volumes"]) == {"musicdl-media:/data/music", "musicdl-app-data:/data/app", "musicdl-telegram:/data/telegram-sessions"}
-    assert plugin.get("volumes", []) == []
+    redis = data["services"]["redis"]
+
+    assert main["environment"]["MUSICDL_REDIS__URL"] == "redis://redis:6379/0"
     assert main["environment"]["MUSICDL_PLUGIN__SERVICE_URL"] == "http://plugin-runner:8080"
     assert main["environment"]["MUSICDL_CONFIG__VERSION"] == "1"
     assert main["environment"]["MUSICDL_MEDIA__ROOT"] == "/data/music"
     assert main["environment"]["MUSICDL_TELEGRAM__SESSION_ROOT"] == "/data/telegram-sessions"
+    assert main["environment"]["MUSICDL_DEPLOYMENT_MODE"] == "${MUSICDL_DEPLOYMENT_MODE:-full}"
+    assert set(main["volumes"]) == {
+        "musicdl-media:/data/music", "musicdl-app-data:/data/app", "musicdl-telegram:/data/telegram-sessions"
+    }
+    assert redis["volumes"] == ["musicdl-redis-data:/data"]
+    assert set(data["volumes"]) == {"musicdl-media", "musicdl-app-data", "musicdl-telegram", "musicdl-redis-data"}
+    assert plugin.get("volumes", []) == []
 
 
-def test_compose_plugin_runner_is_internal_and_main_can_reach_it():
+def test_compose_loopback_cookie_and_private_network_defaults():
     data = compose()
-    main = data["services"]["musicdl"]
-    plugin = data["services"]["plugin-runner"]
-    assert set(main["networks"]) == {"default", "plugin-control"}
+    services = data["services"]
+    main = services["musicdl"]
+    plugin = services["plugin-runner"]
+    redis = services["redis"]
+
+    assert main["ports"] == ["${MUSICDL_BIND_HOST:-127.0.0.1}:${MUSICDL_PORT:-8000}:8000"]
+    assert main["environment"]["MUSICDL_ADMIN__COOKIE_SECURE"] == "${MUSICDL_ADMIN__COOKIE_SECURE:-false}"
+    assert set(main["networks"]) == {"default", "state", "plugin-control"}
     assert plugin["networks"] == ["plugin-control"]
+    assert redis["networks"] == ["state"]
+    assert data["networks"]["state"]["internal"] is True
     assert data["networks"]["plugin-control"]["internal"] is True
+    assert "ports" not in plugin and "ports" not in redis
 
 
-def test_compose_has_no_console_service_because_the_app_serves_it():
-    """The console is a deliverable of the app image, not a container.
-
-    A service here would mean a second runtime, a second published port, and a
-    forwarding hop whose paths could drift from the API's -- which is what the
-    static export removed. Naming only the app and the runner is what keeps that
-    from creeping back in, and the image is where the files actually have to be.
-    """
+def test_compose_hardens_each_container_and_waits_for_healthy_services():
     data = compose()
-    assert "admin-panel" not in data["services"]
-    app = data["services"]["musicdl"]
-    assert app["ports"] == ["127.0.0.1:${MUSICDL_PORT:-8000}:8000"]
-    manifest = (ROOT / "docker/main/Dockerfile").read_text(encoding="utf-8")
-    assert "COPY --from=panel" in manifest
-    assert "/app/panel" in manifest
+    services = data["services"]
 
-
-def test_compose_security_and_network_boundaries():
-    data = compose()
-    main = data["services"]["musicdl"]
-    plugin = data["services"]["plugin-runner"]
-    for service in (main, plugin):
-        assert service["user"] == "10001:10001"
+    for service in services.values():
         assert service["read_only"] is True
         assert service["cap_drop"] == ["ALL"]
         assert service["security_opt"] == ["no-new-privileges:true"]
-        assert any(str(tmpfs).startswith("/tmp") for tmpfs in service["tmpfs"])
-    assert main["ports"] == ["127.0.0.1:${MUSICDL_PORT:-8000}:8000"]
-    assert "ports" not in plugin
+        assert "healthcheck" in service
+
+    for name in ("musicdl", "plugin-runner"):
+        assert services[name]["user"] == "10001:10001"
+        assert services[name]["restart"] == "unless-stopped"
+
+    assert services["musicdl"]["depends_on"] == {
+        "redis": {"condition": "service_healthy"},
+        "plugin-runner": {"condition": "service_healthy"},
+    }
+    assert services["redis"]["image"] == "redis:8.8.3-alpine"
+    assert services["redis"]["restart"] == "unless-stopped"
 
 
-def test_compose_plugin_runner_resource_limits_are_exact():
+def test_compose_plugin_runner_has_no_host_integration_surfaces():
     plugin = compose()["services"]["plugin-runner"]
+
     assert plugin["mem_limit"] == "512m"
     assert plugin["cpus"] == "1.0"
     assert plugin["pids_limit"] == 64
     assert plugin["init"] is True
     assert plugin["tmpfs"] == ["/tmp:size=32m,noexec,nosuid,nodev"]
-
-
-def test_compose_plugin_runner_has_no_host_integration_surfaces():
-    plugin = compose()["services"]["plugin-runner"]
+    assert plugin.get("environment", {}) == {}
+    assert plugin.get("volumes", []) == []
     assert plugin.get("secrets", []) == []
-    assert not any("docker.sock" in str(v) for v in plugin.get("volumes", []))
-    assert not any(key.upper().startswith(("REDIS", "OPENAI", "TELEGRAM")) for key in plugin.get("environment", {}))
+    assert "ports" not in plugin
 
 
-def test_compose_uses_pinned_images_and_stdlib_healthchecks():
+def test_compose_uses_runtime_native_healthchecks_and_quiet_uvicorn():
     data = compose()
-    for service in data["services"].values():
-        assert service["build"]["context"] == "."
-        assert service["healthcheck"]["test"][0] == "CMD"
-    dockers = {name: service["build"]["dockerfile"] for name, service in data["services"].items()}
-    assert dockers == {
-        "musicdl": "docker/main/Dockerfile",
-        "plugin-runner": "docker/plugin/Dockerfile",
-    }
-    # Each image is probed with the runtime it actually ships.
-    probes = {name: service["healthcheck"]["test"][1] for name, service in data["services"].items()}
-    assert probes == {"musicdl": "python", "plugin-runner": "python"}
+    services = data["services"]
 
-
-def test_compose_disables_uvicorn_query_string_access_logs():
-    command = compose()["services"]["musicdl"]["command"]
-    assert "--no-access-log" in command
+    assert all(service["healthcheck"]["test"][0] == "CMD" for service in services.values())
+    assert services["musicdl"]["command"][-1] == "--no-access-log"
+    assert services["redis"]["command"] == ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
 
 
 def test_main_image_initialises_every_compose_volume_mountpoint_for_the_service_uid():
-    """Docker seeds a fresh named volume from the image directory it mounts over.
-
-    Without those directories in the image the volume is created root-owned, the
-    service runs as 10001, and the first write to the admin state file, the media
-    root, or the session root fails with EACCES.
-    """
     mounts = {entry.split(":")[1] for entry in compose()["services"]["musicdl"]["volumes"]}
     text = (ROOT / "docker/main/Dockerfile").read_text(encoding="utf-8")
     line = next(line for line in text.splitlines() if "install -d" in line)
+
     assert mounts <= set(line.split())
     assert "-o 10001" in line and "-g 10001" in line
     assert text.index("useradd") < text.index("install -d") < text.index("USER 10001:10001")

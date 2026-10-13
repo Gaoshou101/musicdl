@@ -50,18 +50,16 @@ jobs:
   # own job: the Python gates never wait on npm, and a console that does not
   # build can never hide behind a green test suite. It ships inside the app's
   # image rather than in one of its own, so this job builds and starts that
-  # service through the production Compose file itself -- and then asks it for
+  # service through the deployment Compose file itself -- and then asks it for
   # a page, a route, and the session boundary, because a container that starts
   # is not yet a container that serves.
   admin-panel:
     name: Admin panel image
     runs-on: ubuntu-latest
     env:
-      # The deployment files require an external Redis URL. Nothing in this job
-      # enables WeCom, so the runtime never dials it, and a hosted runner is
-      # never handed a real credential to make a smoke test pass.
-      MUSICDL_REDIS__URL: redis://127.0.0.1:6379/0
       MUSICDL_PORT: "3999"
+      # Keep source builds on this runner away from published release tags.
+      MUSICDL_IMAGE_TAG: ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -98,11 +96,8 @@ jobs:
       - name: Source diagnostic polling regression
         working-directory: web
         run: npm run check:diagnostic-polling
-      - name: Build the service the deployment file describes, console included
-        # The production file, not the development one: it is what a host runs,
-        # and it layers on nothing -- combining the two would merge their
-        # sequence fields rather than replace them.
-        run: docker compose -p console-smoke -f compose.prod.yaml build musicdl
+      - name: Build the services the deployment file describes, console included
+        run: docker compose -p console-smoke -f compose.yaml build musicdl plugin-runner
       - name: Serve one page and one route from that container
         # Every boundary in play -- read-only root filesystem, tmpfs, the
         # volume-backed data root, the user, the published port, the command --
@@ -112,9 +107,9 @@ jobs:
         # asked for, because serving the first while shadowing the second is
         # the failure this job exists to catch.
         run: |
-          compose() { docker compose -p console-smoke -f compose.prod.yaml "$@"; }
+          compose() { docker compose -p console-smoke -f compose.yaml "$@"; }
           fail() { compose logs musicdl; exit 1; }
-          compose up --detach --no-build musicdl || fail
+          compose up --detach --no-build --pull missing musicdl || fail
           for attempt in $(seq 1 20); do
             if curl --fail --silent http://127.0.0.1:3999/healthz > /dev/null; then
               break
@@ -148,7 +143,7 @@ jobs:
       - name: Export the panel from the built deployment image
         run: |
           set -euo pipefail
-          container="$(docker compose -p console-smoke -f compose.prod.yaml ps -q musicdl)"
+          container="$(docker compose -p console-smoke -f compose.yaml ps -q musicdl)"
           test -n "$container"
           mkdir -p "$RUNNER_TEMP/musicdl-panel"
           docker cp "$container:/app/panel/." "$RUNNER_TEMP/musicdl-panel/"
@@ -168,11 +163,11 @@ jobs:
           retention-days: 14
       - name: Stop the production panel smoke container
         if: always()
-        run: docker compose -p console-smoke -f compose.prod.yaml down --volumes --remove-orphans --timeout 20
+        run: docker compose -p console-smoke -f compose.yaml down --volumes --remove-orphans --timeout 20
 
-  # The 1.1.5 candidate images will support lite. Build both services from this
-  # checkout to test this commit's manifest and lite support without relying
-  # on published images or a moving latest tag.
+  # Build both application images from this checkout and run the app in lite
+  # mode. The bundled Redis container still starts; the app's lite mode does
+  # not use it and rejects WeCom being enabled.
   lite-mode-source-image:
     name: Lite-mode source image
     runs-on: ubuntu-latest
@@ -180,17 +175,19 @@ jobs:
       MUSICDL_DEPLOYMENT_MODE: lite
       MUSICDL_ADMIN__COOKIE_SECURE: "false"
       MUSICDL_PORT: "3997"
+      MUSICDL_WECOM__ENABLED: "false"
+      MUSICDL_IMAGE_TAG: ci-lite-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Build and exercise the source-built two-container lite deployment
+      - name: Build and exercise the source-built lite deployment
         shell: bash
         run: |
           set -Eeuo pipefail
           project="musicdl-lite-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          compose() { docker compose --project-name "$project" --file compose.lite.yaml "$@"; }
+          compose() { docker compose --project-name "$project" --file compose.yaml "$@"; }
           cleanup() {
             status=$?
             trap - EXIT
@@ -206,14 +203,12 @@ jobs:
           }
           trap cleanup EXIT
 
-          # A unique Compose project gives both build-only services unique
-          # local project/service image tags; no published-image fallback is
-          # involved. Build each exactly once, then forbid Compose from building
-          # again during startup.
+          # The unique image tag keeps this source build away from release tags.
+          # Build each application service exactly once, then prevent pulls/builds.
           compose build musicdl plugin-runner || fail
-          compose up --detach --no-build --wait --wait-timeout 120 || fail
+          compose up --detach --no-build --pull missing --wait --wait-timeout 120 || fail
 
-          expected_services="$(printf '%s\n' musicdl plugin-runner | sort)"
+          expected_services="$(printf '%s\n' musicdl plugin-runner redis | sort)"
           configured_services="$(compose config --services | sort)"
           test "$configured_services" = "$expected_services" || fail
           running_services="$(compose ps --services --status running | sort)"
@@ -342,14 +337,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # Exercise the published quick-install manifest as operators use it: one
+  # Exercise the published deployment as operators use it: one
   # file, its default versioned images, and its bundled Redis. This is separate
   # from the source-built image tests above and never consumes deployment data.
   quick-install-stack:
-    name: Quick-install Compose stack
+    name: Published Compose stack
     runs-on: ubuntu-latest
     env:
       MUSICDL_PORT: "3998"
+      # Keep pre-release CI on the last published pair; the manifest default may be a candidate tag.
+      MUSICDL_IMAGE_TAG: "1.1.5"
     steps:
       - uses: actions/checkout@v7
       - name: Start and probe the published quick-install stack
@@ -357,7 +354,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           project="musicdl-quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          compose() { docker compose --project-name "$project" --file compose.quick.yaml "$@"; }
+          compose() { docker compose --project-name "$project" --file compose.yaml "$@"; }
           cleanup() {
             status=$?
             trap - EXIT
@@ -373,12 +370,8 @@ jobs:
           }
           trap cleanup EXIT
 
-          # The candidate 1.1.5 images do not exist until the release tag is
-          # published. Smoke the last published 1.1.4 pair before that tag is pushed.
-          # After publication, verify the manifest's 1.1.5 default separately.
-          export MUSICDL_IMAGE_TAG=1.1.4
           compose pull || fail
-          compose up --detach --wait --wait-timeout 120 || fail
+          compose up --detach --no-build --pull missing --wait --wait-timeout 120 || fail
 
           # Prove the main app can reach and use its internal Redis service,
           # rather than only observing the Redis container's own healthcheck.

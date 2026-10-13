@@ -1,420 +1,164 @@
 <h1 align="center">musicdl</h1>
 
-<p align="center">自托管的多音源音乐下载服务，提供中文管理面板、企业微信交互、Telegram 音源和隔离的 JavaScript 插件运行环境。</p>
+<p align="center">自托管的音乐搜索与下载服务，通过浏览器管理音源、任务和运行状态。</p>
 
 <p align="center">
   <a href="./README.md">English</a> | <a href="./README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
-  <img src="./web/public/brand-options/social-preview-cool-aurora-glass.png" alt="musicdl 冷瓷极光玻璃视觉横幅" width="720">
-</p>
-
-<p align="center">
   <a href="https://github.com/Gaoshou101/musicdl/actions/workflows/ci.yml"><img src="https://github.com/Gaoshou101/musicdl/actions/workflows/ci.yml/badge.svg" alt="CI 状态"></a>
   <a href="https://github.com/Gaoshou101/musicdl/releases"><img src="https://img.shields.io/github/v/release/Gaoshou101/musicdl?style=flat-square&color=F59E0B" alt="最新版本"></a>
   <a href="https://hub.docker.com/r/wit7zz/musicdl"><img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-4B5563?style=flat-square" alt="Docker 架构"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square" alt="Python 3.12"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-22C55E?style=flat-square" alt="MIT 许可证"></a>
 </p>
 
-## 核心亮点
+musicdl 可以搜索多个音乐音源，并将选中的歌曲下载到自己的服务器。管理面板还可以管理音源、下载历史，以及可选的消息平台和 AI 集成。
 
-| 亮点 | 对使用者的价值 |
+## 功能概览
+
+| 能力 | 可完成的操作 |
 |---|---|
-| 多音源搜索与下载 | 在一个界面中搜索已安装音源，并在某个渠道失败时尝试其他可用渠道。 |
-| 内置中文管理面板 | 管理音源、Telegram Bot、运行配置、渠道健康度、下载、事件、审计和服务日志。 |
-| 持久下载历史 | 换搜索、刷新页面或服务重启后，仍可查看面板和企业微信的下载记录，以及来源尝试、失败、耗时、文件与请求/实际音质。 |
-| 可导入 JavaScript 音源 | 导入前分析兼容的 LX Music 音源脚本，第三方脚本不会被直接打包进镜像。 |
-| 企业微信与 Telegram | 可在企业微信中直接发送歌名，也可将 Telegram 音乐 Bot 注册为额外渠道。 |
-| 隔离插件运行环境 | JavaScript 插件在独立的非 root 容器中运行，根文件系统只读、无 Linux capabilities，并受到资源限制。 |
-| 可复现部署 | 为 `linux/amd64` 和 `linux/arm64` 发布带版本号的 Docker 镜像。 |
-
-## 架构
-
-```text
-┌────────────────┐  HTTPS  ┌──────────────────────────────┐
-│ 浏览器 / 管理台│────────▶│        musicdl 主服务        │
-└────────────────┘         │  API、面板、搜索、任务处理   │
-                           └──────────────────────────────┘
-┌────────────────┐                     │
-│    企业微信    │◀──── 回调 ──────────┤
-└────────────────┘                     │
-                                      ├──────────────▶┌──────────────┐
-┌────────────────┐                     │  状态与任务    │    Redis     │
-│    Telegram    │◀──── Telethon ──────┤               └──────────────┘
-└────────────────┘                     │
-                                      │ 内部 HTTP
-                                      ▼
-                           ┌──────────────────────────────┐
-                           │       隔离插件运行器         │
-                           │  Deno、seccomp、不接收密钥   │
-                           └──────────────────────────────┘
-                                      │
-                                      ▼
-                           ┌──────────────────────────────┐
-                           │ 导入音源与音乐服务端点       │
-                           └──────────────────────────────┘
-```
-
-管理面板已经构建进主镜像。只有插件运行器保留为独立容器，因为它负责执行导入的代码。
-
-### 下载历史
-
-从面板的「下载历史」查看运行中和已结束的下载。面板开始下载前即建立记录；解析、下载与校验阶段记录实际耗时，其他事件保留时间戳，未知耗时留空。单条记录详情会显示最近记录的阶段，以及已知失败原因的实用处理建议；详情自动刷新，但阶段依据已保存事件，不代表实时进度。现有同步下载和有界渠道回退保持不变；历史功能不提供新队列、自动重试或断点续传。关闭页面后，原服务端请求可能继续执行；请求被取消时记录为中断。应用启动会将残留运行记录标记为 `interrupted / service_restarted`，不会猜测成功。企业微信记录覆盖媒体下载步骤，不代表通知消息发送结果；既有重放与产物恢复仍由 Redis 控制。
-
-历史通过 Python 标准库 SQLite 保存在管理状态文件（`MUSICDL_ADMIN__STATE_PATH`）旁的 `download-history.sqlite3`；未配置该文件时，保存在插件 app-data 目录。完整与 Lite 模式复用现有 Compose 数据卷，无需新服务或新挂载。升级和回滚时保留此文件。最多保留最近 1,000 条终态记录、每条 200 个事件；运行中的记录不被清理，同时最多追踪 128 条。历史到期不会删除已下载媒体，文件链接需要原文件仍在磁盘上。
-
-若开始前无法写入历史，面板会拒绝此次下载；若文件已成功下载后历史写入失败，仍返回真实的成功文件并明确提示历史未保存。企业微信的历史写入故障会记录日志，不改变 Redis 下载结果。所有历史接口沿用管理员会话保护；存储内容仅包含有长度限制的元数据和固定错误码，文件路径相对于媒体目录，媒体访问接口禁止读取历史数据库。
-
-### 渠道统计与选源
-
-「健康监控」与「音源管理」分别显示搜索可用率、来源尝试下载成功率、无损请求兑现率及各自样本数。搜索正常答复（含空结果）即算可用；下载按请求、来源、版本和候选的尝试去重，同一任务回退到不同来源或候选可产生多次尝试。取消与已识别的本地策略错误单列，不计入下载成功率分母。无损兑现仅判断请求无损且成功下载的结果：可证明无损算兑现，可证明有损算降级，模糊音质列为未知，不计分母。能力探测不代表实际交付。
-
-各指标使用有界的本次运行窗口，服务重启后清零；逐次尝试证据仍保存在下载历史。下载样本达到最小数量后，可靠性才参与选源的同级排序。搜索流量不能抬高下载成功率，也不能清除最近下载失败的证据。现有的声明优先级、实测无损能力、有界回退与 `best_available` 兼容行为保留；面板和企业微信搜索都汇入同一组渠道统计。
-
-### 该用哪份 Compose 文件？
-
-仓库提供四份清单，对应四种不同场景。每份文件的头部注释都有同样的速查说明；按下表选择：
-
-| 你的情况 | 用哪份 | 命令 |
-|---|---|---|
-| 想先跑起来看看（无需检出代码，内置 Redis） | `compose.quick.yaml` | `docker compose -f compose.quick.yaml up -d` |
-| 已有 Redis，部署固定的发布版镜像 | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG=1.1.5 docker compose -f compose.prod.yaml up -d` |
-| 基于本检出目录开发 musicdl | `compose.yaml` | `docker compose up -d --build` |
-| 没有 Redis，只要主服务 + 插件运行器 | `compose.lite.yaml` | `docker compose -f compose.lite.yaml up -d --build` |
+| 统一管理面板 | 在浏览器中搜索、下载、管理音源并查看服务状态。 |
+| 导入音源 | 添加 JavaScript 或 Python 音源，并在安装前检查脚本请求的网络访问权限。 |
+| 下载历史 | 搜索或服务重启后，仍可查看已保存的结果和文件。 |
+| 可选集成 | 按需配置企业微信、Telegram 和 OpenAI 兼容的 AI 功能。 |
+| 隔离的插件运行器 | 在独立容器中运行导入的音源脚本，并限制其权限和资源。 |
 
 ## 快速安装
 
-运行条件：
+需要安装 Docker Engine、Docker Compose v2.24.0 或更新版本，并能联网拉取已发布的镜像。
 
-- Docker Engine 和 Docker Compose 插件
-- 可访问互联网以拉取已发布的镜像
+先创建项目目录，再下载唯一的 Compose 文件并启动 musicdl。该文件将两个应用镜像固定为 `1.1.5`：
 
 ```bash
-curl -fsSLo compose.quick.yaml https://raw.githubusercontent.com/Gaoshou101/musicdl/main/compose.quick.yaml
-docker compose -f compose.quick.yaml up -d
+mkdir -p musicdl
+cd musicdl
+curl -fsSLo compose.yaml https://raw.githubusercontent.com/Gaoshou101/musicdl/main/compose.yaml
+docker compose up -d
 ```
 
-Windows PowerShell 可用以下命令下载同一个 Compose 文件并启动：
+Windows PowerShell：
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/Gaoshou101/musicdl/main/compose.quick.yaml -OutFile compose.quick.yaml
-docker compose -f .\compose.quick.yaml up -d
+New-Item -ItemType Directory -Force -Path "musicdl" | Out-Null
+Set-Location "musicdl"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Gaoshou101/musicdl/main/compose.yaml" -OutFile "compose.yaml"
+docker compose up -d
 ```
 
-快速安装使用预构建镜像，并包含一个私有 Redis 服务。无需克隆仓库、创建 `.env` 或单独准备 Redis。Redis 不映射宿主机端口，数据保存在 Docker 卷中，只有主服务可以访问。插件运行器仍位于独立的内部控制网络中，不接收应用密钥。Web 服务默认只绑定到 `127.0.0.1:8000`。
+该文件会启动 Web 服务、隔离的插件运行器和私有 Redis。默认安装无需克隆仓库、创建 `.env` 文件或单独准备 Redis。
 
-默认情况下，管理员会话和 CSRF Cookie 需要 HTTPS（`MUSICDL_ADMIN__COOKIE_SECURE=true`），建议通过 HTTPS 反向代理访问。若要持续从 Docker 主机通过 `127.0.0.1` 直接使用 HTTP，请在 `compose.quick.yaml` 同目录创建或编辑 `.env` 文件，并添加：
+## 快速开始
+
+1. 打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。全新安装的用户名是 `admin`，密码是 `password`。登录后立即更换用户名和密码；新密码至少需要 8 个字符。更换默认凭据前，请保持服务仅供本机访问。
+2. 打开「音源管理」，选择「导入音源」，粘贴[音源目录 URL](https://raw.githubusercontent.com/Gaoshou101/musicdl/main/sources/catalog.json)。安装前请检查每个脚本及其请求的网络权限，并只安装你信任的音源。目录中的脚本由第三方提供，可用性和许可条款各不相同。
+3. 在仪表板搜索歌曲名或艺人名，选择搜索结果并点击「下载」。打开「下载历史」查看结果和已保存的文件。
+
+初始安装不含音乐脚本；请先导入至少一个音源，再开始搜索。
+
+## 网络访问与配置
+
+服务默认只监听 `127.0.0.1:8000`，因此只有 Docker 主机可以访问。Compose 文件将 `MUSICDL_ADMIN__COOKIE_SECURE` 默认设为 `false`，这样登录会话可以通过本机 HTTP 工作。服务本身不提供 TLS。
+
+如需修改这些默认值，请在 `compose.yaml` 同目录创建可选的 `.env` 文件；默认部署无需创建。
+
+| 变量 | 默认值 | 用途 |
+|---|---|---|
+| `MUSICDL_BIND_HOST` | `127.0.0.1` | 宿主机监听地址。只有确需在可信局域网开放管理面板时才设为 `0.0.0.0`。 |
+| `MUSICDL_PORT` | `8000` | 管理面板映射到宿主机的端口。 |
+| `MUSICDL_IMAGE_TAG` | `1.1.5` | 主服务和插件运行器共用的镜像版本标签。 |
+| `MUSICDL_ADMIN__COOKIE_SECURE` | `false` | 通过 HTTPS 访问面板时设为 `true`。 |
+| `MUSICDL_DEPLOYMENT_MODE` | `full` | 设为 `lite` 可在应用中禁用企业微信；统一 Compose 栈仍会启动内置 Redis。 |
+| `MUSICDL_WECOM__ENABLED` | `false` | 启用或禁用企业微信集成。lite 模式下请保持为 `false`。 |
+
+如果确实需要让可信局域网中的其他设备或 NAS 用户访问管理面板，请在 `compose.yaml` 同目录创建 `.env`，设置监听地址：
 
 ```dotenv
-MUSICDL_ADMIN__COOKIE_SECURE=false
+MUSICDL_BIND_HOST=0.0.0.0
+MUSICDL_PORT=8000
 ```
 
-然后重新创建主服务：
+然后运行 `docker compose up -d` 应用设置。绑定到 `0.0.0.0` 会在主机的所有网络接口上开放端口。局域网中的其他设备可打开 `http://<主机IP>:<端口>`（默认端口 `8000`）。直接使用 HTTP 时数据不会加密；访问敏感数据或从远程访问时，请配置 HTTPS 反向代理。仓库提供了 [Caddy](./deploy/caddy/Caddyfile) 和 [Nginx](./deploy/nginx/musicdl.conf) 示例；请按实际情况修改示例域名和证书路径，并在同一个 `.env` 文件中设置 Cookie 选项：
+
+```dotenv
+MUSICDL_ADMIN__COOKIE_SECURE=true
+```
+
+只有通过主机环回地址直接使用 HTTP 时，才应保留 `MUSICDL_ADMIN__COOKIE_SECURE=false`。HTTP 不会加密登录凭据和会话 Cookie；从其他设备访问时请使用 HTTPS。
+
+登录后可在「运行配置」中查看应用设置。标记为需要重启的设置，执行 `docker compose restart musicdl` 后生效。修改 `.env` 会改变容器配置，应执行 `docker compose up -d`，让 Compose 重新创建服务。
+
+## 可选集成
+
+浏览器搜索无需配置其他集成。「运行配置」中可以启用 OpenAI 兼容 AI 辅助功能，或填写 Telegram 和企业微信凭据。Telegram 还需要授权账号并配置 Bot；企业微信需要配置允许访问的用户列表，并让 `/wecom/callback` 地址可从外部访问。内置 Redis 为企业微信状态和任务队列提供支持。
+
+## 数据、更新和已有部署
+
+Compose 项目名为 `musicdl`，数据保存在具名卷中；Docker 会在卷的实际名称前加上 Compose 项目名。
+
+| 卷键 | 容器路径 | 内容 |
+|---|---|---|
+| `musicdl-media` | `/data/music` | 已下载的音乐文件。 |
+| `musicdl-app-data` | `/data/app` | 管理员状态、运行配置、已安装音源和下载历史。 |
+| `musicdl-telegram` | `/data/telegram-sessions` | Telegram 会话。 |
+| `musicdl-redis-data` | `/data` | 内置 Redis 持久化数据。 |
+
+迁移前请备份数据卷；要保留数据时，不要运行 `docker compose down -v`。
+
+Compose 文件默认固定使用 `1.1.5` 镜像。更新时，先在 `.env` 中将 `MUSICDL_IMAGE_TAG` 改为目标版本，或下载默认标签已更新到目标版本的 Compose 文件，再在该文件所在目录执行：
 
 ```bash
-docker compose -f compose.quick.yaml up -d --force-recreate musicdl
+docker compose pull
+docker compose up -d
 ```
 
-快速安装默认无需 `.env` 文件；未设置该变量时，Cookie 仍仅通过 HTTPS 发送。将该行保留在 `.env` 中可使后续 Compose 重建继续使用 HTTP 设置。要恢复安全默认值，请删除这一行并强制重新创建 `musicdl`。快速安装默认仅绑定到环回地址，不会向局域网其他设备开放；如需局域网访问，必须另行有意修改端口绑定或反向代理配置。
+**已有部署迁移**：切换前先备份，并检查以下三项：
 
-全新快速安装的初始用户名为 `admin`，密码为 `password`。请立即设置新的强密码；面板会在凭据更改完成前阻止其余管理 API 的使用。默认凭据仍有效期间，请保持服务仅通过环回地址访问且不对外开放。
+- **应用数据**：核对旧 Compose 项目名、实际卷名和挂载路径，三者匹配才会复用数据。若需要保留旧项目名，且卷键和挂载路径也匹配，升级命令使用 `docker compose -p existing-project pull` 和 `docker compose -p existing-project up -d`；将 `existing-project` 换成实际项目名。名称不同的卷需要明确映射或复制。
+- **Redis 数据**：内置 Redis 使用自己的卷，不会自动复制外部 Redis 数据。企业微信用户应先规划并验证 Redis 状态迁移，确认完成前保留原 Redis 及其数据。
+- **应用配置**：保留原 `.env` 和其他需要的覆盖设置，尤其是企业微信凭据和允许访问的用户列表。
 
-请在使用预期的 Cookie 设置启动服务后检查状态：
-
-```bash
-curl http://127.0.0.1:8000/healthz
-curl http://127.0.0.1:8000/readyz
-```
-
-然后打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)。HTTP 会以明文传输账密和会话 Cookie，因此直接 HTTP 仅限可信的主机本地访问，公网访问请使用 HTTPS。
-
-快速安装的 Compose 项目名默认为 `musicdl`。如需更改宿主机端口，可在运行 Compose 前设置 `MUSICDL_PORT`。如需选择其他已发布的应用镜像，可设置 `MUSICDL_IMAGE_TAG`；快速安装清单现在默认使用 `1.1.5`。主服务与插件运行器镜像使用相同的版本标签。
-
-## Lite 双容器部署
-
-上面的完整快速安装仍是默认方案，包含私有 Redis 和企业微信支持。仅在不需要企业微信时选择 lite：lite 只运行主服务和隔离插件运行器，不启动或连接 Redis，并会拒绝企业微信处于启用状态。AI 和 Telegram 配置仍可用。清单将 `MUSICDL_DEPLOYMENT_MODE` 设置为 `lite`。已发布的 `1.1.5` 主服务和插件运行器镜像标签均支持 lite。`compose.lite.yaml` 仍会从源码检出目录分别使用 `docker/main/Dockerfile` 和 `docker/plugin/Dockerfile` 构建两个镜像；启动 lite 前请按清单先完成构建步骤。如果镜像未声明并实际启用 lite 模式，主服务会在启动 Uvicorn 前失败关闭。
-
-克隆仓库并准备私有工作目录：
-
-```bash
-git clone https://github.com/Gaoshou101/musicdl.git
-cd musicdl
-cp .env.example .env
-```
-
-在 `.env` 中设置所需部署参数（例如 `MUSICDL_PORT` 或 `MUSICDL_ADMIN__COOKIE_SECURE`）。如果复制了 `.env.example`，请删除或注释其中的 `MUSICDL_REDIS__URL` 行；lite 不会将该设置传给应用，也不会启动或连接 Redis。然后从当前源码构建两个镜像并启动双服务栈：
-
-```bash
-docker compose -f compose.lite.yaml up -d --build
-```
-
-项目名为 `musicdl`，与完整快速安装一致；三个应用数据卷名称和挂载路径也相同。插件运行器仍以非 root 用户运行，根文件系统只读、资源受限，仅能通过内部 plugin-control 网络访问，并且不接收应用密钥。主服务默认只绑定到 `127.0.0.1:8000`。全新安装的初始账密为 `admin` / `password`；请立即修改并保持服务私有。已有部署请按下方模式切换步骤操作，不要使用另一个项目名启动到相同端口或数据卷。
-
-## 现有仓库部署方式
-
-已自行管理 Redis，或需要从源码构建的用户仍可使用仓库内的 Compose 文件。该方式要求可访问的 Redis 实例以及本仓库代码副本：
+从源码检出目录构建两个应用镜像时，请使用单独的本地标签：
 
 ```bash
 git clone https://github.com/Gaoshou101/musicdl.git
 cd musicdl
-cp .env.example .env
+export MUSICDL_IMAGE_TAG=local
+docker compose build musicdl plugin-runner
+docker compose up -d --no-build --pull missing
 ```
 
-将 `.env` 中的 `MUSICDL_REDIS__URL` 设置为你的 Redis 地址。不要提交真实凭据。然后拉取并启动已发布镜像：
+Windows PowerShell：
+
+```powershell
+$env:MUSICDL_IMAGE_TAG = "local"
+docker compose build musicdl plugin-runner
+docker compose up -d --no-build --pull missing
+```
+
+## 启动检查与常见问题
+
+在 `compose.yaml` 所在目录执行以下命令，查看三个服务的状态和最近的日志：
 
 ```bash
-MUSICDL_IMAGE_TAG=1.1.5 docker compose -f compose.prod.yaml pull
-MUSICDL_IMAGE_TAG=1.1.5 docker compose -f compose.prod.yaml up -d
+docker compose ps
+docker compose logs --tail=100 musicdl plugin-runner redis
 ```
 
-需要从当前代码构建时，也可以使用 `compose.yaml`。
+- **页面打不开**：先确认三个服务均为 `healthy`。在 NAS 或服务器上安装时，请按「网络访问与配置」设置监听地址，并用该设备的 IP 打开页面。
+- **端口被占用**：在 `.env` 中设置 `MUSICDL_PORT=8001`，执行 `docker compose up -d` 后改用新端口访问。
+- **登录后又回到登录页**：本机 HTTP 使用 `MUSICDL_ADMIN__COOKIE_SECURE=false`；HTTPS 使用 `true`。修改后执行 `docker compose up -d`。
+- **搜索没有结果**：先确认已导入并启用音源，再在「音源管理」中检查音源状态。
 
-检查服务状态：
+## 更多信息
 
-```bash
-curl http://127.0.0.1:8000/healthz
-curl http://127.0.0.1:8000/readyz
-```
-
-默认通过 HTTPS 反向代理访问面板。直接访问 [http://127.0.0.1:8000](http://127.0.0.1:8000) 前，请完成下方「配置」中的 HTTP Cookie 设置。使用部署提供的初始账密登录；新部署必须先修改默认账密，之后才能使用其余管理接口。
-
-已发布的 `1.1.1` 镜像支持勾选「记住我」，登录有效期为 30 天；保留应用数据卷时，重启服务后也能恢复。普通登录使用浏览器会话 Cookie，服务端有效期为 12 小时。重新打开面板会检查并恢复当前会话；点击「退出登录」可撤销会话，修改管理员凭证会使已有会话失效。浏览器保存会话 Cookie，应用不会在浏览器保存密码。
-
-已发布的 `1.1.1` 面板还会以一排状态条展示最近十次真实搜索或下载请求，上方显示最近请求时间。绿色为成功、红色为失败、灰色为未知或不计入成功率的结果；悬停或聚焦可查看时间与结果。没有请求时显示空状态，原有三个成功率指标的口径保持不变。近期请求窗口存于当前进程，重启或切换音源版本后重新累计。
-
-音源页提供「测试音源」和「测试全部」，执行有并发与时间限制的搜索、音质解析测试，可取消并查看最近结果与时间。解析成功会明确标注「下载尚未验证」；需要验证音频内容时，使用现有真实下载流程。诊断请求不会计入真实请求健康度。结果关联音源版本和脚本指纹，更换脚本后旧结果显示为已过期。
-
-下载历史详情现在会显示最近记录的阶段和已知错误的实用处理建议。详情会自动刷新，但阶段依据已保存事件，不代表实时进度。面板与后台任务共享每个应用进程的下载预算：最多 4 个进行中、16 个等待中，单音源或单用户最多 2 个进行中。运行实例重载后继续使用同一预算；多个应用进程各自计算预算。并发卡显示响应请求的那个进程的瞬时快照，不代表整个集群；刷新失败时，面板会清除旧计数并显示错误，不会把过时数据当作当前值。
-
-本地媒体处理使用有界 Worker 容量，避免并发处理时阻塞应用事件循环。合成的本地基准测试显示事件循环响应有所改善；该结果不能用于推断生产环境的网络吞吐量。
-
-进入面板后可以：
-
-1. 导入或管理兼容的 JavaScript 音源脚本。
-2. 添加并配置 Telegram Bot 渠道。
-3. 搜索歌曲并执行真实下载测试。
-4. 配置企业微信、Telegram、AI 辅助、超时和运行限制。
-5. 查看渠道健康度、应用事件、审计记录和完整服务日志。
-
-在企业微信中发送歌名即可搜索，回复结果前的序号即可排队下载。结果较多时回复 `n` 查看下一页、`p` 返回上一页；各页的序号保持不变。回复 `/cancel` 可取消当前选曲列表，已排队的下载仍会继续。结果过期或被新搜索替换后，请重新发送歌名。
-
-## 部署
-
-当前已发布的镜像对为：
-
-| 镜像 | 用途 |
+| 主题 | 资料 |
 |---|---|
-| `wit7zz/musicdl:1.1.5` | 主服务和内置管理面板 |
-| `wit7zz/musicdl-plugin-runner:1.1.5` | 隔离的 JavaScript 插件运行环境 |
-
-`compose.quick.yaml` 和 `compose.prod.yaml` 都支持通过 `MUSICDL_IMAGE_TAG` 选择镜像版本。为便于稳定升级和回滚，建议固定已发布的具体版本。快速安装清单现在默认使用已发布的 `1.1.5` 镜像。musicdl 1.1.4 首次改进默认 `lossless_first` 策略下多个歌手的精确歌名搜索排序，保留曲库顺序，让用户查找原唱更容易；该行为在 1.1.5 及之后的版本中继续保留。`best_available` 策略继续保留原有的音质排序。Cookie 策略修复是在 `1.0.1` 中引入的，`1.0.3` 及之后的版本继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。`1.0.3` 及之后的版本还让面板配置的 `telegram.proxy` 真正生效：镜像现在包含 `python-socks` 隧道依赖，并把面板填写的代理地址转换成 Telethon 接受的形式；依赖缺失或 scheme 不支持会直接在面板报错，而不再被静默忽略。Docker 镜像标签和 GitHub 源码发布是独立的发布产物；源码发布及其附件请查看 [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases)。
-
-生产 Compose 默认只监听 `127.0.0.1`。如需从其他设备访问，请先通过支持 TLS 的反向代理对外提供服务。仓库提供了以下示例：
-
-- [Caddy](./deploy/caddy/Caddyfile)
-- [Nginx](./deploy/nginx/musicdl.conf)
-
-持久数据保存在三个 Docker 卷中：
-
-| 数据卷 | 内容 |
-|---|---|
-| `musicdl-media` | 已下载媒体 |
-| `musicdl-app-data` | 管理员状态和已安装音源数据 |
-| `musicdl-telegram` | Telegram 会话数据 |
-
-升级或迁移前应备份这三个数据卷。
-
-## 从现有部署迁移
-
-快速安装文件声明了与仓库 Compose 文件相同的三个应用卷键，并新增一个 Redis 卷。这些是 Compose 逻辑键；默认命名时，Docker 中的实际卷名为 `<项目名>_musicdl-media`、`<项目名>_musicdl-app-data` 和 `<项目名>_musicdl-telegram`。以下步骤假设使用这些带项目名前缀的卷名，且容器挂载路径未变更。如果旧配置为卷指定了 `name:`、使用 `external: true`、绑定挂载，或通过覆盖文件改了挂载路径，需要另行规划映射或复制；相同的逻辑键不代表会自动复用数据。
-
-按以下步骤迁移前，先打开管理面板的「运行配置」→「Redis」→「Redis 地址」（`redis.url`），检查配置来源。只有来源为「部署变量」（`env`），且已确认旧部署的 `MUSICDL_REDIS__URL` 是目标外部地址时，才适用本流程；如果来源为「默认值」，也必须独立核实当前生效地址确实是目标外部 Redis。面板覆盖会保存在复用的应用数据卷中的 `admin-state.json`，并优先于 Compose 环境变量；因此仅在快速安装文件中设置内置 Redis 地址，并不能保证应用切换过去。如果来源显示「面板覆盖」，旧应用或 Worker 运行期间不要点击「恢复为部署值」：Redis 密钥会被隐藏，清除覆盖可能立即热重载 `redis.url` 并切换到其他地址。请保持旧的外部 Redis Compose 部署运行，另行规划受控的离线迁移。如果无法确认来源和目标地址，请继续使用现有部署。
-
-同时检查自定义的 `wecom.api_base`、`telegram.proxy`、`ai.base_url`，以及旧 Compose 覆盖文件中引用的服务地址。快速安装清单不包含旧代理/覆盖服务，也不会自动带上它们的环境配置。切换前，请确认每个必需地址在快速安装网络中仍可访问，或先映射/替换地址并补齐所需环境设置。如果缺少必需的代理、服务或环境变量，请继续使用旧部署，直到依赖已映射或替换。
-
-1. 旧服务仍运行时，从 `docker compose ls` 记录原项目名、完整且有顺序的 `-f` 文件列表、所有 `--env-file` 参数，以及卷名和容器内挂载路径（用 `docker inspect` 检查主服务容器）。
-2. 先停止旧栈，再备份，以免服务在备份过程中继续写入文件。在原项目目录执行与启动旧栈时相同的 Compose 文件和环境参数。例如：
-
-   ```bash
-   docker compose -p OLD_PROJECT -f compose.prod.yaml stop
-   ```
-
-   将 `OLD_PROJECT` 和清单参数替换为步骤 1 记录的值；按原顺序重复所有 `-f`，并保留 `--env-file` 参数。备份步骤 1 查到的实际卷名，再在同一静止时间点使用外部 Redis 自身的一致性备份方式备份数据。如果 Redis 由其他服务共享，也要暂停那些写入方。可参考 Docker 的[数据卷备份与恢复说明](https://docs.docker.com/engine/storage/volumes/#back-up-restore-or-migrate-data-volumes)。
-3. 备份完成后，移除旧容器、网络和孤立服务，但保留数据卷：
-
-   ```bash
-   docker compose -p OLD_PROJECT -f compose.prod.yaml down --remove-orphans
-   ```
-
-   使用与 `stop` 相同的原始清单和环境参数。不要添加 `-v`。
-4. 快速安装会创建一个新的空 Redis。如果旧 Redis 状态可以丢弃，直接启动新栈：
-
-   ```bash
-   docker compose -p OLD_PROJECT -f compose.quick.yaml up -d
-   ```
-
-   如果必须保留 Redis 中的状态，先只启动内置 Redis，导入备份并验证后，再启动应用：
-
-   ```bash
-   docker compose -p OLD_PROJECT -f compose.quick.yaml up -d redis
-   # 将外部 Redis 备份恢复/导入到内置 Redis，并验证数据。
-   docker compose -p OLD_PROJECT -f compose.quick.yaml up -d
-   ```
-
-   将 `OLD_PROJECT` 替换为原项目名。如果 `compose.quick.yaml` 不在原目录，请在原项目目录执行，并传入该文件的绝对路径，例如 `-f /path/to/compose.quick.yaml`。`-p` 会覆盖快速安装文件中的默认项目名。只有实际卷名和容器挂载路径一致时，应用卷才会复用；新的 Redis 卷名为 `<项目名>_musicdl-redis-data`。必需的 Redis 数据导入并验证前，请保持新应用为停止状态。快速安装适用于全新部署、旧 Redis 状态可以丢弃的迁移，或已在启动应用前完成必需 Redis 数据导入、部署依赖配置映射并验证的迁移。
-5. 确认 Redis 配置来源显示「部署变量」（`env`）、`/readyz` 报告服务总体就绪，并检查登录、已安装音源、媒体和 Telegram 会话。复查自定义的 `wecom.api_base`、`telegram.proxy`、`ai.base_url` 地址并验证对应工作流。`/readyz` 不能普遍证明所有工作流都能连接 Redis 或外部集成；还应实际验证你使用的 Redis 相关及集成工作流。外部 Redis 内容不会自动复制，外部实例也不会被修改。
-
-只回滚服务、不回滚已保存设置或数据时，移除快速安装栈但保留卷，然后重新启动原清单。例如：
-
-```bash
-docker compose -p OLD_PROJECT -f compose.quick.yaml down
-docker compose -p OLD_PROJECT -f compose.prod.yaml up -d
-```
-
-将 `OLD_PROJECT` 替换为原项目名；第二条命令需重复原来的完整清单和环境参数。如果快速安装文件在其他位置，第一条命令传入其绝对路径。共享应用卷仍会保留，其中 app-data 卷内的 `admin-state.json` 也会保留，因此切换 Compose 文件不会重置面板配置和覆盖。内置 Redis 的写入仍在快速安装的独立 Redis 卷中，不会出现在旧外部 Redis 中。若要将数据和配置完整回滚到迁移前状态，需先停止写入方，再恢复迁移前备份的应用卷（包括已保存的后台状态）和同一静止时间点的外部 Redis 备份。若要保留快速安装期间写入内置 Redis 的新数据，则需另行导出并导入 Redis 数据。
-
-### 在 full 与 lite 模式之间切换
-
-lite 没有 Redis 服务，也不会连接 Redis，因为它要求禁用企业微信。从 full 切换到 lite 前，请在 full 模式下先禁用企业微信并保存；否则 lite 启动时会拒绝已启用的设置，包括保存在 app-data 卷中的启用值。需要企业微信时，仍应使用包含三个服务的完整快速安装作为默认方案。
-
-切换前请检查 Redis 配置来源，并查看「运行配置」→「Redis」→「Redis 地址」（`redis.url`），记录当前目标。即使 lite 不使用 Redis，该设置仍可能保存在 `admin-state.json` 中。如果来源为「面板覆盖」，旧 full 应用或 Worker 运行期间不要清除或恢复该覆盖：已保存的密钥会被隐藏，清除可能使 full 模式热重载到其他 Redis 地址。切回 full 前，应先决定 full 模式要使用哪个 Redis。
-
-停止旧栈之前，仍应先从当前检出源码构建 lite 镜像，尽管已发布的 `1.1.5` 镜像标签支持 lite。记录原 Compose 项目名、按顺序排列的清单和环境文件参数，以及实际卷名/挂载路径。保持相同项目名（默认是 `musicdl`），即可复用 `musicdl-media`、`musicdl-app-data` 和 `musicdl-telegram` 三个应用卷键。停止 full 栈并备份应用卷后再切换清单。若完整数据回滚可能涉及 full 快速安装，还应备份 `musicdl-redis-data`。不带 `-v` 的 Compose down 会保留该卷，支持服务回滚；备份则用于完整数据回滚。若完整数据回滚涉及外部 Redis，应在与应用卷备份相同的静止时间点，使用 Redis 提供方支持的方式创建一致性快照。若原 full 部署使用外部 Redis，请保持该 Redis 可用，以便恢复 full 模式时继续使用；lite 本身不会连接该 Redis 地址。
-
-```bash
-docker compose -p OLD_PROJECT -f compose.lite.yaml build
-docker compose -p OLD_PROJECT -f compose.quick.yaml stop
-# 在此备份实际的应用卷；如有需要，也在同一静止时间点备份 Redis 数据。
-docker compose -p OLD_PROJECT -f compose.quick.yaml down
-docker compose -p OLD_PROJECT -f compose.lite.yaml up -d
-```
-
-将 `OLD_PROJECT` 和旧清单命令替换为上文记录的实际项目名及参数；如果从其他 full 清单迁移，`stop` 和 `down` 都使用该旧清单。不要添加 `-v`。在源码检出目录中运行 lite 命令。验证 `/healthz`、`/readyz`、面板登录、媒体、Telegram 会话以及所用插件功能。共享的保存配置中企业微信仍保持禁用。
-
-仅回滚服务时，停止 lite 并以相同项目名和环境文件参数启动原 full 清单。应用数据和 full 快速安装原有的 Redis 卷都会保留。切回 full 后，企业微信在面板中仍为禁用状态，需明确重新启用。lite 不会写入 Redis，但 full 重启前仍应检查保存的 `redis.url` 目标。完整数据回滚则不同：停止所有写入方，并恢复匹配的迁移前应用卷备份；若原 full 使用快速安装，还需恢复对应的 `musicdl-redis-data` 备份。服务回滚期间不要删除卷。
-
-## 配置
-
-建议通过管理面板维护运行配置。环境变量主要用于部署层参数。
-
-| 变量 | 用途 |
-|---|---|
-| `MUSICDL_REDIS__URL` | `compose.yaml` 和 `compose.prod.yaml` 所需的外部 Redis 连接地址；full 快速安装使用内置 Redis；lite 不使用 Redis |
-| `MUSICDL_PORT` | 主服务绑定到宿主机的端口，默认为 `8000` |
-| `MUSICDL_ADMIN__COOKIE_SECURE` | 管理员 Cookie 是否只通过 HTTPS 发送，默认为 `true`；仅可信的主机本地 HTTP（环回访问）可设为 `false` |
-| `MUSICDL_IMAGE_TAG` | `compose.quick.yaml` 和 `compose.prod.yaml` 使用的 Docker 镜像版本；lite 从源码构建两个镜像 |
-| `MUSICDL_DEPLOYMENT_MODE` | `compose.lite.yaml` 设置为 `lite`；其他清单使用默认的 `full` 模式 |
-| `MUSICDL_MEDIA__VERIFY_DURATION` | 下载完成后如何对照曲库时长校验：`lenient`（默认）在两边时长都已知时拒收试听片段或半截文件，无法校验的文件放行并记录 `duration_unverified` 事件；`strict` 连无法校验的文件也拒收 |
-| `MUSICDL_WORKER__QUALITY_POLICY` | 默认 `lossless_first`，优先声明支持无损的音质；无损文件通常大得多。`best_available` 恢复 v1.0.4 的选择行为。 |
-| `MUSICDL_WORKER__QUALITY_PREFERENCE` | 可选音质，如 `flac` 或 `320k`，优先声明支持该音质的渠道；未声明支持时回退无损优先，不报错。 |
-| `MUSICDL_AI__ENABLED` | 开启可选的 OpenAI 兼容 AI 辅助功能 |
-| `MUSICDL_AI__BASE_URL` | OpenAI 兼容 API 地址 |
-| `MUSICDL_AI__API_KEY` | API 凭据，不要写入版本库 |
-| `MUSICDL_AI__MODEL` | 兼容端点使用的模型标识 |
-
-请在应用容器的 `environment` 中传入这两个 Worker 环境变量；仅写入 Compose 的 `.env` 不会自动转发。请求无损而返回明确有损音质时，在任务预算内最多切换一次音源。仍无法获取无损时保留可下载文件，成功通知展示实际音质与大小，并在已确认降级时标注「未取到无损」。
-
-面板保存的大部分配置会触发运行时热重载，不需要重启容器。涉及启动边界的设置仍可能要求重启。
-
-如需从部署主机通过环回地址直接使用 HTTP，请将 `MUSICDL_ADMIN__COOKIE_SECURE=false`；如果前面有 HTTPS 反向代理，请保持默认值 `true`。Compose 文件默认绑定到 `127.0.0.1`，局域网访问需要另行有意修改端口绑定或反向代理配置。快速安装清单现在默认使用 `1.1.5`。Cookie 策略修复是在已发布的 `1.0.1` 镜像中引入的，`1.0.3` 及之后的版本继续包含该修复；原始 `v1.0.0` 镜像不包含该修复。使用 `compose.prod.yaml` 时，请将设置写入 `.env` 并重新创建主服务；构建自定义镜像时，请使用包含 Cookie 策略修复的源码。
-
-自定义 Compose 还需在 `musicdl.environment` 中加入 `MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"`；只写入 `.env` 不会自动传给容器。升级并验证 HTTP 登录、改密成功后，可删除仅用于剥离 Secure 的临时 `panel` 反代服务及对应配置，把原入口端口直接映射到主服务的 `8000`。HTTP 会明文传输账密和会话，公网部署请使用 HTTPS。
-
-## 音源脚本与内容责任
-
-musicdl 的发布镜像不内置第三方音乐音源脚本。管理员可以在审查脚本分析结果和出网权限后，通过管理面板导入兼容脚本。
-
-仓库还提供[可下载音源目录](./sources/README.md)。其中脚本为可选文件，不会包含在发布镜像中。
-
-### 在面板中导入音源
-
-musicdl 1.1.3 及以上版本可在「音源 → 导入音源」中粘贴单个[聚合音源目录 Raw URL](https://raw.githubusercontent.com/Gaoshou101/musicdl/main/sources/catalog.json)，展开目录中的脚本。面板会先获取并预览目录条目，供你检查后再安装。也可以选择本地 `.js`、`.mjs`、`.cjs` 或 `.py` 文件，或每行粘贴一个 HTTP(S) 音源脚本 URL。本地文件和展开后的脚本共用最多 20 项的队列；追加 URL 不会清空已有项目，超出容量的批次会在获取目录子项或加入队列前整体拒绝；顶层输入需先获取以确定展开项数。每个本地文件和获取到的音源大小上限为 256 KiB。URL 导入由受限的管理端获取器逐个处理：只允许一个精确 DNS 主机的标准 80 或 443 端口，拒绝私有或其他非全局 DNS 地址和重定向，也不会转发浏览器 Cookie 或代理请求头。建议使用 HTTPS 和公开域名，不要使用 IP 字面量。
-
-批量导入全部十二个社区音源：
-
-1. 升级至 **musicdl 1.1.3 或更高版本**，打开「音源 → 导入音源」。
-2. 粘贴下面的链接，点击「获取并预览」。
-3. 检查各音源及所需权限，点击「安装可用音源」。
-
-```text
-https://raw.githubusercontent.com/Gaoshou101/musicdl/main/sources/catalog.json
-```
-
-面板会先获取并分析每个项目，再执行安装。请检查建议或手动修改的音源 ID、语言和所需出网授权，然后安装处于就绪状态的项目。安装按顺序进行；失败项目会保留在队列并显示错误，可以修正后重试，已经成功的项目不会丢失。
-
-导入的脚本会执行第三方逻辑，并可能访问外部服务。安装前请自行检查源码、许可证、出网权限和法律风险。
-
-本项目不授予任何受版权保护媒体的使用权。你需要自行遵守各服务提供方的条款和所在地法律。
-
-## 安全边界
-
-Compose 配置包含以下限制：
-
-- 使用非 root 身份 `10001:10001`；
-- 容器根文件系统只读；
-- 移除全部 Linux capabilities；
-- 启用 `no-new-privileges`；
-- 插件控制网络仅限内部访问；
-- 插件运行器不接收应用密钥；
-- 限制 CPU、内存、临时存储和插件执行时间；
-- 强制修改管理员默认账密；
-- 提供会话认证、CSRF 校验、审计记录和登录限速。
-
-导入脚本仍然属于不受信任代码。除非确有远程访问需求，否则建议保持服务私有；对外开放时应启用 TLS，并定期验证数据卷备份。
-
-## 开发
-
-后端要求 Python 3.12：
-
-```bash
-python -m venv .venv
-python -m pip install -e ".[dev]"
-python -m pytest -q
-```
-
-构建管理面板：
-
-```bash
-cd web
-npm ci --no-audit --no-fund
-npx tsc --noEmit
-npm run check:service-logs
-npm run check:search-probe
-npm run check:source-import
-npm run check:channel-metrics
-npm run build
-```
-
-检查发布门禁：
-
-```bash
-python scripts/release/run_gates.py --self-test --dry-run
-```
-
-部分验收项依赖真实的企业微信、Redis、Telegram 或 Docker 部署环境，因此无法由通用 GitHub 托管 Runner 完成。
-
-## 发布渠道
-
-- [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases)
-- [主服务 Docker 镜像](https://hub.docker.com/r/wit7zz/musicdl)
-- [插件运行器镜像](https://hub.docker.com/r/wit7zz/musicdl-plugin-runner)
-- [第三方依赖基线](./THIRD_PARTY.md)
-
-## 发布检查清单
-
-每次发布编号版本时，同步更新包/版本元数据、两份 README、GitHub Release，以及带相同版本标签的主服务和插件运行器 Docker 镜像。所有发布产物应来自同一源码提交并核实其来源；公告发布前确认 CI 已成功完成。
-
-完整步骤见[发布指南](./docs/RELEASE.md)。打标签前执行 `python scripts/release/verify_release.py preflight --json`；发布工作流完成后，在该标签的检出目录执行 `python scripts/release/verify_release.py published --tag v<版本> --json`。后者需要 `gh` 和 Docker Buildx，会核对 Release 正文、两个镜像摘要、平台、源码标签/provenance 和成功的 CI。退出码 0/1/2 分别表示 PASS/FAIL/NOT_RUN，缺少证据不会视为通过。
-
-## Star 历史
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Gaoshou101%2Fmusicdl&type=Date)](https://star-history.com/#Gaoshou101/musicdl&Date)
-
-该图表由第三方服务动态生成，仓库公开后才可正常读取数据。
+| 可选音源脚本与导入步骤 | [音源目录说明](./sources/README.md) |
+| 已发布版本与更新说明 | [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases) |
+| 容器镜像 | [Docker Hub](https://hub.docker.com/r/wit7zz/musicdl) |
 
 ## 许可证
 
-musicdl 基于 [MIT 许可证](./LICENSE) 发布。
-
+[MIT](./LICENSE)

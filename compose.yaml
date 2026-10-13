@@ -1,59 +1,90 @@
-# compose.yaml — development / source-build manifest (Docker Compose's default file).
+# musicdl 一键部署：发布镜像 + 私有 Redis；无需克隆仓库或准备 Redis。
 #
-# Who it is for : contributors running this checkout locally.
-# Images        : built from this checkout (`build:` only, no image tag).
-# Redis         : external and mandatory — set MUSICDL_REDIS__URL or Compose refuses to start.
-# Services      : 2 (musicdl + plugin-runner); the console is served by the app, not a container.
-# Start with    : MUSICDL_REDIS__URL=<your-redis-url> docker compose up -d --build
+# 首次启动：docker compose up -d（本机没有发布镜像时会自动拉取）
+# 在仓库目录从源码构建：先设置 MUSICDL_IMAGE_TAG=local，再依次执行 build 与 up 命令。
+# docker compose build musicdl plugin-runner
+# docker compose up -d --no-build --pull missing
+# 通过浏览器打开：http://127.0.0.1:8000
+# 默认只绑定本机环回地址；如需远程访问，请配置 HTTPS 反向代理。
+# 仅在可信局域网确有需要时，才将 MUSICDL_BIND_HOST 改为 0.0.0.0。
 #
-# Which manifest do I want?
-#   compose.yaml       dev / source build, external Redis, no restart policy or memory ceiling
-#   compose.prod.yaml  same topology on the published images, plus restart + resource limits
-#   compose.lite.yaml  no Redis at all (MUSICDL_DEPLOYMENT_MODE=lite), source build, WeCom refused
-#   compose.quick.yaml one command: published images + bundled Redis, no checkout needed
+# 可选配置：在 compose.yaml 同目录创建 .env；源码检出可复制 .env.example，单文件用户无需示例文件。
+# 部署模式可设为 full 或 lite；lite 不启用 WeCom，但仍会启动 Redis 容器。
+# 需要 WeCom 时设置 MUSICDL_WECOM__ENABLED=true，并在应用配置中填写凭据和允许用户。
+# Redis 和插件运行器地址由 Compose 内部服务名固定提供，无需单独配置。
+# 下载文件、应用状态、Telegram 会话和 Redis 数据使用具名卷，容器重建后仍会保留。
+# .env 不存在时也可以直接启动；MUSICDL_ADMIN__COOKIE_SECURE 默认 false，以支持本机 HTTP。
+# HTTPS 反向代理请将 MUSICDL_ADMIN__COOKIE_SECURE 设为 true。
+#
+# 源码构建时使用独立镜像标签（例如 local），避免本地构建覆盖发布版标签。
+# 应用数据使用四个具名卷；迁移前请核对旧项目名、实际卷名、外部 Redis 和环境配置。
+name: musicdl
+
 services:
   musicdl:
+    # 两个应用镜像共用 MUSICDL_IMAGE_TAG；本机有仓库源码时可按需构建。
+    image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.1.5}
     build:
       context: .
       dockerfile: docker/main/Dockerfile
+    env_file:
+      # 默认部署无需 .env；需要自定义时可复制 .env.example。
+      - path: .env
+        required: false
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    tmpfs: [/tmp]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     environment:
       MUSICDL_CONFIG__VERSION: "1"
-      MUSICDL_REDIS__URL: "${MUSICDL_REDIS__URL:?set an external Redis URL}"
+      # full 支持完整功能；lite 会拒绝启用 WeCom。
+      MUSICDL_DEPLOYMENT_MODE: "${MUSICDL_DEPLOYMENT_MODE:-full}"
+      # WeCom 默认关闭；启用前需配置凭据和允许用户。
+      MUSICDL_WECOM__ENABLED: "${MUSICDL_WECOM__ENABLED:-false}"
+      # 两个地址指向同一 Compose 项目中的内部服务。
+      MUSICDL_REDIS__URL: "redis://redis:6379/0"
       MUSICDL_PLUGIN__SERVICE_URL: "http://plugin-runner:8080"
-      MUSICDL_MEDIA__ROOT: "/data/music"
-      MUSICDL_TELEGRAM__SESSION_ROOT: "/data/telegram-sessions"
-      MUSICDL_ADMIN__STATE_PATH: "/data/app/admin-state.json"
-      MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"
+      MUSICDL_MEDIA__ROOT: /data/music
+      MUSICDL_TELEGRAM__SESSION_ROOT: /data/telegram-sessions
+      MUSICDL_ADMIN__STATE_PATH: /data/app/admin-state.json
+      # 本机 HTTP 登录默认可用；HTTPS 反向代理部署请设置为 true。
+      MUSICDL_ADMIN__COOKIE_SECURE: "${MUSICDL_ADMIN__COOKIE_SECURE:-false}"
+    # 默认仅绑定本机；可信局域网部署才需要改 MUSICDL_BIND_HOST。
     ports:
-      - "127.0.0.1:${MUSICDL_PORT:-8000}:8000"
+      - "${MUSICDL_BIND_HOST:-127.0.0.1}:${MUSICDL_PORT:-8000}:8000"
+    # 固定具名卷分别保存下载文件、应用状态和 Telegram 会话。
     volumes:
       - musicdl-media:/data/music
       - musicdl-app-data:/data/app
       - musicdl-telegram:/data/telegram-sessions
     networks:
       - default
+      - state
       - plugin-control
+    depends_on:
+      redis:
+        condition: service_healthy
+      plugin-runner:
+        condition: service_healthy
     command: ["uvicorn", "musicdl.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 512M
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
 
-  # The console is not a service of its own: `docker/main/Dockerfile` builds it
-  # into the image above and the app serves it from `/`.
-  #
-  # The plugin runner stays separate because it is the one place untrusted code
-  # executes. It runs under the same boundary as everything else here -- non-root,
-  # read-only root filesystem, no capabilities -- reaches the app over the
-  # internal plugin-control network, never joins the default one, and receives no
-  # secrets.
   plugin-runner:
+    # 使用与主服务相同的发布标签，方便成对升级或回滚。
+    image: wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.1.5}
     build:
       context: .
       dockerfile: docker/plugin/Dockerfile
@@ -69,18 +100,50 @@ services:
     networks:
       - plugin-control
     command: ["uvicorn", "musicdl_plugin_runner.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
+
+  redis:
+    # Redis 仅通过内部 state 网络供应用访问，数据写入独立持久卷。
+    image: redis:8.8.3-alpine
+    user: redis
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - musicdl-redis-data:/data
+    networks:
+      - state
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
+  # Redis 持久数据单独保存；其余三个卷由主应用使用。
   musicdl-media:
   musicdl-app-data:
   musicdl-telegram:
+  musicdl-redis-data:
 
 networks:
   default:
+  state:
+    internal: true
   plugin-control:
     internal: true

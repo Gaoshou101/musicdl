@@ -107,10 +107,9 @@ def test_invalid_cookie_policy_fails_startup(monkeypatch):
         AppSettings()
 
 
-@pytest.mark.parametrize("filename", ["compose.yaml", "compose.prod.yaml"])
-def test_compose_forwards_cookie_policy_to_main_service_only(filename):
+def test_compose_defaults_cookie_policy_to_loopback_http_and_keeps_it_private_to_main():
     root = Path(__file__).resolve().parents[2]
-    services = yaml.safe_load((root / filename).read_text(encoding="utf-8"))["services"]
+    services = yaml.safe_load((root / "compose.yaml").read_text(encoding="utf-8"))["services"]
     variable = "MUSICDL_ADMIN__COOKIE_SECURE"
-    assert services["musicdl"]["environment"][variable] == "${MUSICDL_ADMIN__COOKIE_SECURE:-true}"
+    assert services["musicdl"]["environment"][variable] == "${MUSICDL_ADMIN__COOKIE_SECURE:-false}"
     assert variable not in services["plugin-runner"].get("environment", {})

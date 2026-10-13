@@ -1,12 +1,14 @@
 <#
 .SYNOPSIS
-    Volume backup/restore drill for the two-container Compose deployment.
+    Volume backup/restore drill for the three-container Compose deployment.
 
 .DESCRIPTION
     The roadmap requires a Compose restart/backup-restore drill before 1.0. This
     script performs that drill against an operator-selected, disposable target.
-    It never stops, starts, or inspects a running deployment on its own, and it
-    never reads, writes, or logs credentials.
+    It never stops or starts a running deployment, and it never reads, writes,
+    or logs credentials. Before backup or restore it checks, read-only, that no
+    running container uses any target volume. Quiesce the app, Redis, and every
+    other container using those volumes first.
 
     Actions:
       dry-run  Resolve and print the exact plan for every volume. Always exits 0.
@@ -19,9 +21,9 @@
     Archives are named after the logical volume and replace any previous file of
     the same name in that target. Keep the target dedicated to this drill.
 
-    The helper image only needs a POSIX tar. Pass -ProjectName to match the
-    Compose project name used at deploy time (`docker compose -p`); without it the
-    volumes are addressed by the names declared in compose.prod.yaml.
+    The helper image only needs a POSIX tar. The default project name is `musicdl`,
+    matching compose.yaml. Pass -ProjectName to match an override used at deploy
+    time (`docker compose -p`). The drill includes the bundled Redis data volume.
 
 .NOTES
     Exit codes: 0 completed, 1 failed, 2 usage error or unsafe target,
@@ -41,13 +43,14 @@ $volumes = @(
     [pscustomobject]@{ Logical = 'musicdl-media';    Mount = '/data/music' }
     [pscustomobject]@{ Logical = 'musicdl-app-data'; Mount = '/data/app' }
     [pscustomobject]@{ Logical = 'musicdl-telegram'; Mount = '/data/telegram-sessions' }
+    [pscustomobject]@{ Logical = 'musicdl-redis-data'; Mount = '/data' }
 )
 
 function Write-Line([string]$Message) { Write-Output "[$Action] $Message" }
 function Stop-With([int]$Code, [string]$Message) { Write-Line $Message; exit $Code }
 function Resolve-Volume([string]$Logical) {
-    if ([string]::IsNullOrWhiteSpace($ProjectName)) { return $Logical }
-    return "${ProjectName}_$Logical"
+    $resolvedProjectName = if ([string]::IsNullOrWhiteSpace($ProjectName)) { 'musicdl' } else { $ProjectName }
+    return "${resolvedProjectName}_$Logical"
 }
 
 if ($Action -ne 'dry-run' -and -not $ConfirmIsolated) {
@@ -67,8 +70,7 @@ if (-not [string]::IsNullOrWhiteSpace($Target)) {
 }
 
 if ($Action -eq 'backup') {
-    if (-not (Test-Path -LiteralPath $targetFull)) { New-Item -ItemType Directory -Path $targetFull | Out-Null }
-    if (-not (Test-Path -LiteralPath $targetFull -PathType Container)) {
+    if ((Test-Path -LiteralPath $targetFull) -and -not (Test-Path -LiteralPath $targetFull -PathType Container)) {
         Stop-With 2 "FAIL - backup target is not a directory: $targetFull"
     }
 }
@@ -97,7 +99,6 @@ if ($Action -eq 'dry-run') {
 
 if (-not $targetFull) { Stop-With 2 'FAIL - explicit backup target is required' }
 if ($Action -eq 'restore') {
-    Write-Line 'WARN - stop the musicdl service before extracting into a live volume'
     foreach ($volume in $volumes) {
         $name = Resolve-Volume $volume.Logical
         $archivePath = Join-Path $targetFull "$($volume.Logical).tar.gz"
@@ -106,7 +107,25 @@ if ($Action -eq 'restore') {
 }
 if (-not $dockerAvailable) { Stop-With 3 'FAIL - docker CLI not found on PATH; the drill cannot run here' }
 
+if ($Action -in @('backup','restore')) {
+    $volumesInUse = @()
+    foreach ($volume in $volumes) {
+        $name = Resolve-Volume $volume.Logical
+        $runningContainers = & docker ps --filter "volume=$name" --format '{{.ID}}'
+        if ($LASTEXITCODE -ne 0) {
+            Stop-With 3 "FAIL - could not verify whether a running container uses $name; stop musicdl, Redis, and all containers using the target volumes, then retry"
+        }
+        if ($runningContainers) {
+            $volumesInUse += $name
+        }
+    }
+    if ($volumesInUse.Count -gt 0) {
+        Stop-With 2 "FAIL - running container(s) use target volume(s): $($volumesInUse -join ', '); stop musicdl, Redis, and all containers using the target volumes before backup or restore"
+    }
+}
+
 if ($Action -eq 'backup') {
+    if (-not (Test-Path -LiteralPath $targetFull)) { New-Item -ItemType Directory -Path $targetFull | Out-Null }
     foreach ($volume in $volumes) {
         $name = Resolve-Volume $volume.Logical
         $archivePath = Join-Path $targetFull "$($volume.Logical).tar.gz"
