@@ -7,9 +7,14 @@
 </p>
 
 <p align="center">
+  <img src="./web/public/brand-options/social-preview-cool-aurora-glass.png" alt="musicdl 冷瓷极光玻璃视觉横幅" width="720">
+</p>
+
+<p align="center">
   <a href="https://github.com/Gaoshou101/musicdl/actions/workflows/ci.yml"><img src="https://github.com/Gaoshou101/musicdl/actions/workflows/ci.yml/badge.svg" alt="CI 状态"></a>
   <a href="https://github.com/Gaoshou101/musicdl/releases"><img src="https://img.shields.io/github/v/release/Gaoshou101/musicdl?style=flat-square&color=F59E0B" alt="最新版本"></a>
   <a href="https://hub.docker.com/r/wit7zz/musicdl"><img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-4B5563?style=flat-square" alt="Docker 架构"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square" alt="Python 3.12"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-22C55E?style=flat-square" alt="MIT 许可证"></a>
 </p>
 
@@ -158,6 +163,12 @@ docker compose logs --tail=100 musicdl plugin-runner redis
 | 可选音源脚本与导入步骤 | [音源目录说明](./sources/README.md) |
 | 已发布版本与更新说明 | [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases) |
 | 容器镜像 | [Docker Hub](https://hub.docker.com/r/wit7zz/musicdl) |
+
+## Star 历史
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Gaoshou101%2Fmusicdl&type=Date)](https://star-history.com/#Gaoshou101/musicdl&Date)
+
+该图表由第三方服务动态生成，仓库公开后才可正常读取数据。
 
 ## 许可证
 

@@ -7,9 +7,14 @@
 </p>
 
 <p align="center">
+  <img src="./web/public/brand-options/social-preview-cool-aurora-glass.png" alt="Cool porcelain aurora glass artwork for musicdl" width="720">
+</p>
+
+<p align="center">
   <a href="https://github.com/Gaoshou101/musicdl/actions/workflows/ci.yml"><img src="https://github.com/Gaoshou101/musicdl/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="https://github.com/Gaoshou101/musicdl/releases"><img src="https://img.shields.io/github/v/release/Gaoshou101/musicdl?style=flat-square&color=F59E0B" alt="Latest release"></a>
   <a href="https://hub.docker.com/r/wit7zz/musicdl"><img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-4B5563?style=flat-square" alt="Docker architectures"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square" alt="Python 3.12"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-22C55E?style=flat-square" alt="MIT License"></a>
 </p>
 
@@ -158,6 +163,12 @@ docker compose logs --tail=100 musicdl plugin-runner redis
 | Available source scripts and import instructions | [Source catalog](./sources/README.md) |
 | Published versions and release notes | [GitHub Releases](https://github.com/Gaoshou101/musicdl/releases) |
 | Container images | [Docker Hub](https://hub.docker.com/r/wit7zz/musicdl) |
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Gaoshou101%2Fmusicdl&type=Date)](https://star-history.com/#Gaoshou101/musicdl&Date)
+
+The chart is provided by a third-party service and becomes available after the repository is public.
 
 ## License
 
