@@ -87,12 +87,8 @@ def test_ci_builds_and_then_serves_the_deployed_service_through_its_own_files():
     # this job has to build -- not a second one that could pass on its own and
     # then never be what a deployment runs.
     assert "docker compose" in ran
-    # The production file is the deployment, and it is layered on nothing:
-    # combining it with the development file merges their sequence fields
-    # (`security_opt`) into a duplicate rather than replacing them.
-    assert "compose.prod.yaml" in ran and "compose.yaml" not in ran
-    assert "build musicdl" in ran
-    assert "up --detach --no-build" in ran
+    assert "compose.yaml build musicdl plugin-runner" in ran
+    assert "up --detach --no-build --pull missing" in ran
     # Serving the page is not enough: the file server must not have taken the
     # API's routes with it, which is what the unauthenticated probe shows.
     assert "/healthz" in ran and "/admin/sources" in ran and "401" in ran
@@ -105,12 +101,10 @@ def test_ci_builds_and_then_serves_the_deployed_service_through_its_own_files():
 def test_ci_panel_job_never_needs_a_deployment_secret():
     data, _ = workflow()
     panel = job(data, "admin-panel")
-    # The deployment files require an external Redis URL. The job supplies a
-    # loopback placeholder because nothing in it enables WeCom, and it reaches
-    # no secret to make a smoke test pass.
     env = panel["env"]
-    assert env["MUSICDL_REDIS__URL"] == "redis://127.0.0.1:6379/0"
+    assert "MUSICDL_REDIS__URL" not in env
     assert env["MUSICDL_PORT"] == "3999"
+    assert env["MUSICDL_IMAGE_TAG"] == "ci-${{ github.run_id }}-${{ github.run_attempt }}"
     assert "secrets." not in str(panel)
     ran = " ".join(commands(panel))
     assert "--build-arg" not in ran, "the image's own default is the Compose service name"

@@ -28,7 +28,7 @@ NOTES = (ROOT / f"docs/release-notes/{TAG}.md").read_text(encoding="utf-8")
 def release_tree(tmp_path):
     for name in ("pyproject.toml", "docker/plugin/pyproject.toml", "web/package.json",
                  "web/package-lock.json", "docker/main/Dockerfile", "docker/plugin/Dockerfile",
-                 ".env.example", "compose.quick.yaml", "compose.prod.yaml", "README.md", "README.zh-CN.md",
+                 ".env.example", "compose.yaml", "README.md", "README.zh-CN.md",
                  f"docs/release-notes/{TAG}.md"):
         dest = tmp_path / name
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -60,9 +60,44 @@ def test_normal_preflight_and_annotated_tag(release_tree):
     assert verify.preflight(release_tree, TAG, git()).exit_code() == 0
 
 
+def test_legacy_release_checkout_keeps_quick_prod_and_readme_checks(release_tree):
+    # Historical published tags still need verification after this checkout has
+    # moved to the unified manifest. Keep this legacy source-root fixture
+    # self-contained so it also works in shallow CI clones.
+    old_images = {
+        "compose.quick.yaml": "${MUSICDL_IMAGE_TAG:-1.1.5}",
+        "compose.prod.yaml": "${MUSICDL_IMAGE_TAG:-latest}",
+    }
+    for filename, tag in old_images.items():
+        body = "\n".join([
+            "name: musicdl",
+            "services:",
+            f'  musicdl:\n    image: "wit7zz/musicdl:{tag}"',
+            f'  plugin-runner:\n    image: "wit7zz/musicdl-plugin-runner:{tag}"',
+            "",
+        ])
+        (release_tree / filename).write_text(body, encoding="utf-8")
+    legacy_readme = "\n".join([
+        "| `MUSICDL_IMAGE_TAG` | `1.1.5` | Shared application image version. |",
+        "| `wit7zz/musicdl:1.1.5` | Main service |",
+        "| `wit7zz/musicdl-plugin-runner:1.1.5` | Plugin runner |",
+        "| Pinned release | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG=1.1.5` |",
+        "",
+    ])
+    for filename in ("README.md", "README.zh-CN.md"):
+        (release_tree / filename).write_text(legacy_readme, encoding="utf-8")
+
+    report = verify.preflight(release_tree, TAG, git())
+    checks = {item["id"]: item["status"] for item in report.checks}
+    assert checks["quick-musicdl"] == "PASS"
+    assert checks["prod-plugin-runner"] == "PASS"
+    assert checks["README.md-image-table"] == "PASS"
+    assert report.exit_code() == 0
+
+
 @pytest.mark.parametrize("name", ["docker/plugin/pyproject.toml", "web/package.json", "web/package-lock.json",
                                    "docker/main/Dockerfile", "docker/plugin/Dockerfile", ".env.example",
-                                   "compose.quick.yaml", "README.md", "README.zh-CN.md"])
+                                   "compose.yaml", "README.md", "README.zh-CN.md"])
 def test_version_drift_fails(release_tree, name):
     path = release_tree / name
     path.write_text(path.read_text(encoding="utf-8").replace(VERSION, "99.0.0"), encoding="utf-8")
@@ -445,7 +480,7 @@ def test_ci_keeps_frontend_regressions_and_production_build():
     runs = [step.get("run", "") for step in steps]
     for name in ("service-logs", "search-probe", "source-import", "channel-metrics"):
         assert f"npm run check:{name}" in runs
-    assert any("compose.prod.yaml build musicdl" in run for run in runs)
+    assert any("compose.yaml build musicdl plugin-runner" in run for run in runs)
     assert any("verify_release.py preflight --json" in s.get("run", "") for s in jobs["release-gates"]["steps"])
 
 

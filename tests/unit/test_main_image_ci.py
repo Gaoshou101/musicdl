@@ -16,8 +16,9 @@ def test_admin_panel_job_inspects_wheel_and_static_export_in_the_built_container
     runs = [step.get("run", "") for step in panel_job["steps"]]
     combined = "\n".join(runs)
 
-    assert sum("compose.prod.yaml build musicdl" in run for run in runs) == 1
-    assert "compose up --detach --no-build musicdl" in combined
+    assert sum("compose.yaml build musicdl plugin-runner" in run for run in runs) == 1
+    assert "compose up --detach --no-build --pull missing musicdl" in combined
+    assert panel_job["env"]["MUSICDL_IMAGE_TAG"] == "ci-${{ github.run_id }}-${{ github.run_attempt }}"
     assert "compose exec -T musicdl python -" in combined
     assert "from importlib.resources import files" in combined
     assert 'files("musicdl").joinpath("templates", "admin_dashboard.html").is_file()' in combined

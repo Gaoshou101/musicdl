@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse, shutil, subprocess, sys, urllib.request, urllib.parse
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
-COMPOSE=ROOT/'compose.prod.yaml'; NGINX=ROOT/'deploy/nginx/musicdl.conf'; CADDY=ROOT/'deploy/caddy/Caddyfile'
+COMPOSE=ROOT/'compose.yaml'; NGINX=ROOT/'deploy/nginx/musicdl.conf'; CADDY=ROOT/'deploy/caddy/Caddyfile'
 _LAST_STATUS = {}
 
 def _python():
@@ -14,8 +14,23 @@ def report(n,s,d):
  print(f'[{n}] {s} - {d}')
  return s=='PASS'
 def compose_contract(t=None):
- t=t or COMPOSE.read_text()
- cs=[('services:\n  musicdl:' in t and '  plugin-runner:' in t and '  admin-panel:' not in t,'two application services: the app, which serves the console, and the plugin runner'),('redis:' not in t and 'MUSICDL_REDIS__URL: "${MUSICDL_REDIS__URL:?' in t,'external Redis only'),(t.count('user: "10001:10001"')==2,'every service non-root'),(t.count('read_only: true')==2 and t.count('cap_drop: [ALL]')==2 and t.count('no-new-privileges:true')==2,'read-only root and privilege boundary'),(t.count('limits:')==2 and t.count('cpus:')==2 and t.count('memory:')==2,'hard CPU/memory limits'),(t.count('healthcheck:')==2 and 'internal: true' in t,'health probes and internal network')]
+ t=t or COMPOSE.read_text(encoding='utf-8')
+ try:
+  import yaml
+  data=yaml.safe_load(t); services=data['services']; main=services['musicdl']; runner=services['plugin-runner']; redis=services['redis']
+  limits=lambda service:service.get('deploy',{}).get('resources',{}).get('limits',{})
+  cs=[(set(services)=={'musicdl','plugin-runner','redis'},'main app, isolated plugin runner, and bundled Redis'),
+      (main.get('environment',{}).get('MUSICDL_REDIS__URL')=='redis://redis:6379/0' and 'ports' not in redis and redis['networks']==['state'],'private bundled Redis with persistent service networking'),
+      (main.get('user')=='10001:10001' and runner.get('user')=='10001:10001' and redis.get('user')=='redis','every service non-root'),
+      (all(s.get('read_only') is True and s.get('cap_drop')==['ALL'] and s.get('security_opt')==['no-new-privileges:true'] for s in services.values()),'read-only root and privilege boundary'),
+      (all(limits(s).get('cpus') and limits(s).get('memory') for s in (main,redis)) and runner.get('cpus') and runner.get('mem_limit') and runner.get('pids_limit'),'hard CPU, memory, and plugin process limits'),
+      (all('healthcheck' in s for s in services.values()) and data['networks']['state'].get('internal') is True and data['networks']['plugin-control'].get('internal') is True,'health probes and internal networks')]
+ except ImportError:
+  return report('compose','FAIL','PyYAML unavailable; Compose contract cannot be parsed')
+ except yaml.YAMLError:
+  return report('compose','FAIL','compose.yaml is malformed')
+ except (AttributeError,KeyError,TypeError,ValueError):
+  return report('compose','FAIL','compose.yaml is missing a required service or configuration value')
  return all(report('compose','PASS' if ok else 'FAIL',d) for ok,d in cs)
 def compose(): return compose_contract()
 def one_line_blocks(t):
@@ -24,21 +39,31 @@ def one_line_blocks(t):
 def proxy_contract(n,c):
  cs=[('return 308 https://' in n and 'listen 443 ssl' in n and 'ssl_protocols TLSv1.2 TLSv1.3' in n,'Nginx HTTPS/TLS'),('expires 7d' in n and 'location /api/' not in n and 'location / {' in n,'Nginx caches static assets and sends everything else -- console and API -- to the one process'),('access_log /var/log/nginx/access.log combined if=$release_loggable' in n and 'proxy_pass http://musicdl_app/wecom/callback;' in n and 'strip_query' not in n,'Nginx preserves callback query and skips its access log'),('redir https://{host}{uri} permanent' in c and 'tls /etc/caddy/tls' in c,'Caddy HTTPS/TLS'),('log_skip @callback' in c and 'uri strip_query' not in c and 'reverse_proxy musicdl:8000' in c,'Caddy preserves callback query and skips its log'),('Cache-Control' in c and 'handle {' in c and 'handle_path' not in c,'Caddy caches static assets and proxies everything else, with no second upstream to strip a path for'),(not one_line_blocks(c),'every Caddy block opens and closes on its own line')]; return all(report('proxy','PASS' if ok else 'FAIL',d) for ok,d in cs)
 def proxy():
- n,c=NGINX.read_text(),CADDY.read_text(); return proxy_contract(n,c)
+ n,c=NGINX.read_text(encoding='utf-8'),CADDY.read_text(encoding='utf-8'); return proxy_contract(n,c)
 def telegram_contract(t):
  main,plug=t.split('  plugin-runner:',1); plug=plug.split('\nvolumes:',1)[0]; return main.count('musicdl-telegram:/data/telegram-sessions')==1 and 'musicdl-telegram' not in plug and 'SESSION' not in plug.upper()
 def telegram():
- ok=telegram_contract(COMPOSE.read_text()); return report('telegram-session-isolation','PASS' if ok else 'FAIL','parsed service volume/env ownership')
+ ok=telegram_contract(COMPOSE.read_text(encoding='utf-8')); return report('telegram-session-isolation','PASS' if ok else 'FAIL','parsed service volume/env ownership')
 def media():
  tests=sorted(str(p.relative_to(ROOT)) for p in (ROOT/'tests').glob('**/test_media_*.py')); py=_python()
  if not tests:return report('media-integrity','NOT_RUN','media tests absent')
  r=subprocess.run([str(py),'-m','pytest','-q','-W','error',*tests],cwd=ROOT,capture_output=True); return report('media-integrity','PASS' if r.returncode==0 else 'FAIL',f'pytest media tests exit {r.returncode}')
 def plugin_contract(t):
- s=t.split('  plugin-runner:',1)[1].split('\n\nvolumes:',1)[0]; req=['user: "10001:10001"','read_only: true','cap_drop: [ALL]','no-new-privileges:true','limits:','cpus:','memory:','networks: [plugin-control]']; forbidden=['docker.sock','telegram','session','api_key','redis','secret','config']; return all(x in s for x in req) and not any(x in s.lower() for x in forbidden)
+ try:
+  import yaml
+  s=yaml.safe_load(t)['services']['plugin-runner']
+  return (s.get('user')=='10001:10001' and s.get('read_only') is True and s.get('cap_drop')==['ALL']
+          and s.get('security_opt')==['no-new-privileges:true'] and s.get('networks')==['plugin-control']
+          and s.get('environment',{})=={} and s.get('volumes',[])==[] and s.get('secrets',[])==[]
+          and bool(s.get('mem_limit')) and bool(s.get('cpus')) and bool(s.get('pids_limit'))
+          and not any('docker.sock' in str(value).lower() for value in s.values()))
+ except ImportError: return False
+ except yaml.YAMLError: return False
+ except (AttributeError,KeyError,TypeError,ValueError): return False
 PLUGIN_SUITE=ROOT/'tests/integration/test_plugin_runtime.py'
 def plugin():
- t=COMPOSE.read_text(); ok=plugin_contract(t)
- if not ok:return report('plugin-security','FAIL','plugin-runner static boundary violated in compose.prod.yaml')
+ t=COMPOSE.read_text(encoding='utf-8'); ok=plugin_contract(t)
+ if not ok:return report('plugin-security','FAIL','plugin-runner static boundary violated in compose.yaml')
  if not PLUGIN_SUITE.exists():return report('plugin-security','FAIL','mandatory hostile runtime suite is absent')
  if not shutil.which('docker'):return report('plugin-security','NOT_RUN','static boundary valid; no docker CLI on this host, so the mandatory hostile runtime suite cannot run here (last full run: .planning/phases/06-restricted-plugin-runtime/SUMMARY.md)')
  r=subprocess.run([str(_python()),'-m','pytest','-q','-rs','-p','no:cacheprovider',str(PLUGIN_SUITE)],cwd=ROOT,capture_output=True,text=True)
@@ -63,7 +88,7 @@ def wecom(url=None,expected=None):
   with urllib.request.urlopen(url,timeout=10) as r: body=r.read(4096).decode('utf-8','replace'); ok=callback_matches(r.status,body,expected)
   return report('wecom-callback','PASS' if ok else 'FAIL','controlled HTTPS callback probe matched expected status/body')
  except Exception:return report('wecom-callback','FAIL','controlled callback probe failed (details suppressed)')
-BACKUP_VOLUMES=('musicdl-media','musicdl-app-data','musicdl-telegram')
+BACKUP_VOLUMES=('musicdl-media','musicdl-app-data','musicdl-telegram','musicdl-redis-data')
 def backup_plan():
  'Exercise the real backup script; a placeholder cannot name every volume.'
  script=ROOT/'scripts/release/backup_restore.ps1'
@@ -76,7 +101,7 @@ def backup_plan():
  missing=[n for n in BACKUP_VOLUMES if n not in out]
  return ('FAIL','backup dry-run omits '+missing[0]) if missing else ('PASS',f'backup plan resolved for {len(BACKUP_VOLUMES)} volumes')
 def recovery(redis_url=None,confirm=False,namespace=None):
- t=COMPOSE.read_text(); ok='restart: unless-stopped' in t and all(x in t for x in [n+':' for n in BACKUP_VOLUMES])
+ t=COMPOSE.read_text(encoding='utf-8'); ok='restart: unless-stopped' in t and all(x in t for x in [n+':' for n in BACKUP_VOLUMES])
  if not ok:return report('compose-recovery','FAIL','restart/volume contract invalid')
  plan,detail=backup_plan()
  if plan!='PASS':return report('compose-recovery',plan,detail)
@@ -87,7 +112,7 @@ FUN={'compose':compose,'proxy':proxy,'wecom-callback':wecom,'telegram-session-is
 def main():
  p=argparse.ArgumentParser(); p.add_argument('--gate',choices=['all',*FUN],default='all'); p.add_argument('--dry-run',action='store_true'); p.add_argument('--self-test',action='store_true'); p.add_argument('--wecom-url'); p.add_argument('--wecom-expected'); p.add_argument('--redis-url'); p.add_argument('--confirm-isolated',action='store_true'); p.add_argument('--namespace'); a=p.parse_args(); good=True
  if a.self_test:
-  base=COMPOSE.read_text(); n=NGINX.read_text(); c=CADDY.read_text(); plug=base.replace('  plugin-runner:\n','  plugin-runner:\n    environment:\n      API_KEY: leaked\n',1); badtele=base.replace('  plugin-runner:\n','  plugin-runner:\n    volumes:\n      - musicdl-telegram:/bad\n',1); checks=[not compose_contract(base.replace('read_only: true','read_only: false',1)), not telegram_contract(badtele), not proxy_contract(n,c.replace('log_skip @callback','',1)), not plugin_contract(plug)]; good=all(checks); print('[self-test]', 'PASS' if good else 'FAIL','- compose, Telegram, proxy, and plugin tamper checks')
+  base=COMPOSE.read_text(encoding='utf-8'); n=NGINX.read_text(encoding='utf-8'); c=CADDY.read_text(encoding='utf-8'); plug=base.replace('\n  plugin-runner:\n','\n  plugin-runner:\n    environment:\n      API_KEY: leaked\n',1); badtele=base.replace('\n  plugin-runner:\n','\n  plugin-runner:\n    volumes:\n      - musicdl-telegram:/bad\n',1); checks=[not compose_contract(base.replace('read_only: true','read_only: false',1)), not telegram_contract(badtele), not proxy_contract(n,c.replace('log_skip @callback','',1)), not plugin_contract(plug)]; good=all(checks); print('[self-test]', 'PASS' if good else 'FAIL','- compose, Telegram, proxy, and plugin tamper checks')
  for n in (FUN if a.gate=='all' else {a.gate:FUN[a.gate]}):
   _LAST_STATUS.pop(n, None)
   ok=wecom(a.wecom_url,a.wecom_expected) if n=='wecom-callback' else recovery(a.redis_url,a.confirm_isolated,a.namespace) if n=='compose-recovery' else FUN[n]()

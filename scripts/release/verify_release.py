@@ -27,6 +27,11 @@ IMAGES = ("wit7zz/musicdl", "wit7zz/musicdl-plugin-runner")
 REPO = "Gaoshou101/musicdl"
 METADATA_FILES = (
     "pyproject.toml", "docker/plugin/pyproject.toml", "web/package.json", "web/package-lock.json",
+    "docker/main/Dockerfile", "docker/plugin/Dockerfile", ".env.example", "compose.yaml",
+    "README.md", "README.zh-CN.md",
+)
+LEGACY_METADATA_FILES = (
+    "pyproject.toml", "docker/plugin/pyproject.toml", "web/package.json", "web/package-lock.json",
     "docker/main/Dockerfile", "docker/plugin/Dockerfile", ".env.example", "compose.quick.yaml",
     "compose.prod.yaml", "README.md", "README.zh-CN.md",
 )
@@ -99,6 +104,9 @@ def release_body(notes, tag, commit, main_digest, runner_digest):
 def preflight(root=ROOT, tag=None, run=None):
     run = run or (lambda args: command(args, root=root))
     report = Report("preflight", tag)
+    # Read-only compatibility for historical published tags that predate the
+    # single-manifest layout. The current checkout is checked against compose.yaml.
+    legacy_compose = (root / "compose.quick.yaml").is_file() and (root / "compose.prod.yaml").is_file()
     try:
         version = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
         report.check("version-format", version, "MAJOR.MINOR.PATCH", ok=isinstance(version, str) and bool(VERSION.fullmatch(version)))
@@ -124,23 +132,38 @@ def preflight(root=ROOT, tag=None, run=None):
     field("env-image-version", lambda: re.findall(r"(?m)^MUSICDL_IMAGE_TAG=([^\s#]+)\s*$", (root / ".env.example").read_text(encoding="utf-8")), [version])
     try:
         import yaml  # Existing dev dependency, also installed in the publish job.
-        quick = yaml.safe_load((root / "compose.quick.yaml").read_text(encoding="utf-8"))
-        prod = yaml.safe_load((root / "compose.prod.yaml").read_text(encoding="utf-8"))
-        for service, image in zip(("musicdl", "plugin-runner"), IMAGES):
-            report.check(f"quick-{service}", quick["services"][service]["image"], f"{image}:${{MUSICDL_IMAGE_TAG:-{version}}}")
-            report.check(f"prod-{service}", prod["services"][service]["image"], f"{image}:${{MUSICDL_IMAGE_TAG:-latest}}")
+        if legacy_compose:
+            quick = yaml.safe_load((root / "compose.quick.yaml").read_text(encoding="utf-8"))
+            prod = yaml.safe_load((root / "compose.prod.yaml").read_text(encoding="utf-8"))
+            for service, image in zip(("musicdl", "plugin-runner"), IMAGES):
+                report.check(f"quick-{service}", quick["services"][service]["image"], f"{image}:${{MUSICDL_IMAGE_TAG:-{version}}}")
+                report.check(f"prod-{service}", prod["services"][service]["image"], f"{image}:${{MUSICDL_IMAGE_TAG:-latest}}")
+        else:
+            compose = yaml.safe_load((root / "compose.yaml").read_text(encoding="utf-8"))
+            for service, image in zip(("musicdl", "plugin-runner"), IMAGES):
+                expected = f"{image}:${{MUSICDL_IMAGE_TAG:-{version}}}"
+                report.check(f"compose-{service}", compose["services"][service]["image"], expected)
     except ImportError:
         report.unavailable("compose-images", "PyYAML dev dependency is unavailable")
     except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
         report.check("compose-images", "missing or malformed", "two configured versioned application images")
     for filename in ("README.md", "README.zh-CN.md"):
-        field(f"{filename}-image-table", lambda filename=filename: sorted(re.findall(
-            r"(?m)^\| `(wit7zz/musicdl(?:-plugin-runner)?:[^`]+)` \|", (root / filename).read_text(encoding="utf-8"))),
-              sorted(f"{image}:{version}" for image in IMAGES))
-        # Deployment matrix is the current recommendation; historical examples
-        # elsewhere in the README may deliberately use an older version.
+        if legacy_compose:
+            field(f"{filename}-image-table", lambda filename=filename: sorted(re.findall(
+                r"(?m)^\| `(wit7zz/musicdl(?:-plugin-runner)?:[^`]+)` \|",
+                (root / filename).read_text(encoding="utf-8"))),
+                  sorted(f"{image}:{version}" for image in IMAGES))
+            field(f"{filename}-recommended-version", lambda filename=filename: re.findall(
+                r"(?m)^\|[^\n]*`compose\.prod\.yaml`[^\n]*MUSICDL_IMAGE_TAG=(\d+\.\d+\.\d+)\b",
+                (root / filename).read_text(encoding="utf-8")), [version])
+            continue
+        field(f"{filename}-container-image-link", lambda filename=filename: re.findall(
+            r"\]\(https://hub\.docker\.com/r/wit7zz/musicdl\)",
+            (root / filename).read_text(encoding="utf-8")), ["](https://hub.docker.com/r/wit7zz/musicdl)"])
+        # The configuration table is the current recommendation; historical
+        # examples elsewhere in the README may deliberately use an older version.
         field(f"{filename}-recommended-version", lambda filename=filename: re.findall(
-            r"(?m)^\|[^\n]*`compose\.prod\.yaml`[^\n]*MUSICDL_IMAGE_TAG=(\d+\.\d+\.\d+)\b",
+            r"(?m)^\| `MUSICDL_IMAGE_TAG` \| `(\d+\.\d+\.\d+)` \|",
             (root / filename).read_text(encoding="utf-8")), [version])
     notes_path = f"docs/release-notes/v{version}.md"
     notes = None
@@ -170,7 +193,8 @@ def preflight(root=ROOT, tag=None, run=None):
                 report.check("tag-commit", run(["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"]), report.source_commit)
                 # Local fixes must not mask a mismatch in the tagged source.
                 # HEAD diff includes both staged and unstaged tracked changes.
-                report.check("committed-metadata", run(["git", "diff", "--name-only", "HEAD", "--", *METADATA_FILES]), "")
+                metadata_files = LEGACY_METADATA_FILES if legacy_compose else METADATA_FILES
+                report.check("committed-metadata", run(["git", "diff", "--name-only", "HEAD", "--", *metadata_files]), "")
                 if notes is not None:
                     report.check("committed-notes", normalized(run(["git", "show", f"HEAD:{notes_path}"])), normalized(notes))
     except Unavailable as exc:

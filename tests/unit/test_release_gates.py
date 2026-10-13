@@ -84,3 +84,13 @@ def test_dry_run_never_hides_a_completed_gate_failure(monkeypatch, gate, dry_run
 
 def test_child_suites_use_the_invoking_interpreter():
     assert gates._python() == Path(sys.executable)
+
+
+def test_compose_gate_rejects_a_null_service_without_crashing(capsys):
+    import yaml
+
+    compose = yaml.safe_load(gates.COMPOSE.read_text(encoding="utf-8"))
+    compose["services"]["musicdl"] = None
+
+    assert gates.compose_contract(yaml.safe_dump(compose)) is False
+    assert "[compose] FAIL" in capsys.readouterr().out
