@@ -16,7 +16,7 @@ def test_ci_smokes_the_unified_published_stack_with_bundled_redis():
     run = "\n".join(step.get("run", "") for step in smoke["steps"])
 
     assert smoke["runs-on"] == "ubuntu-latest"
-    assert smoke["env"] == {"MUSICDL_PORT": "3998", "MUSICDL_IMAGE_TAG": "1.1.5"}
+    assert smoke["env"] == {"MUSICDL_PORT": "3998", "MUSICDL_IMAGE_TAG": "1.2.0"}
     assert 'project="musicdl-quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in run
     assert 'docker compose --project-name "$project" --file compose.yaml "$@"' in run
     assert "MUSICDL_IMAGE_TAG" not in run

@@ -349,7 +349,7 @@ jobs:
     env:
       MUSICDL_PORT: "3998"
       # Keep pre-release CI on the last published pair; the manifest default may be a candidate tag.
-      MUSICDL_IMAGE_TAG: "1.1.5"
+      MUSICDL_IMAGE_TAG: "1.2.0"
     steps:
       - uses: actions/checkout@v7
       - name: Start and probe the published quick-install stack
