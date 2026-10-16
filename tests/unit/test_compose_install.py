@@ -24,8 +24,8 @@ def test_install_uses_the_release_images_and_also_supports_source_builds():
 
     assert data["name"] == "musicdl"
     assert set(services) == {"musicdl", "plugin-runner", "redis"}
-    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.1.5}"
-    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.1.5}"
+    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.2.0}"
+    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.2.0}"
     assert services["musicdl"]["build"] == {"context": ".", "dockerfile": "docker/main/Dockerfile"}
     assert services["plugin-runner"]["build"] == {"context": ".", "dockerfile": "docker/plugin/Dockerfile"}
     assert services["musicdl"]["env_file"] == [{"path": ".env", "required": False}]
@@ -49,8 +49,8 @@ def test_install_defaults_are_documented_and_local_http_login_works():
         assert "https://raw.githubusercontent.com/Gaoshou101/musicdl/main/compose.yaml" in readme
         assert "MUSICDL_ADMIN__COOKIE_SECURE" in readme
         assert "musicdl-redis-data" in readme
-        assert re.search(r"(?m)^\| `MUSICDL_IMAGE_TAG` \| `1\.1\.5` \|", readme)
-    assert "MUSICDL_IMAGE_TAG=1.1.5" in env_example
+        assert re.search(r"(?m)^\| `MUSICDL_IMAGE_TAG` \| `1\.2\.0` \|", readme)
+    assert "MUSICDL_IMAGE_TAG=1.2.0" in env_example
     assert "MUSICDL_BIND_HOST=127.0.0.1" in env_example
     assert "MUSICDL_ADMIN__COOKIE_SECURE=false" in env_example
     assert "MUSICDL_DEPLOYMENT_MODE=full" in env_example

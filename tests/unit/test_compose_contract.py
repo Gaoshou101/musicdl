@@ -16,8 +16,8 @@ def test_one_manifest_runs_release_images_or_builds_from_checkout():
 
     assert data["name"] == "musicdl"
     assert set(services) == {"musicdl", "plugin-runner", "redis"}
-    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.1.5}"
-    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.1.5}"
+    assert services["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.2.0}"
+    assert services["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.2.0}"
     assert services["musicdl"]["build"] == {"context": ".", "dockerfile": "docker/main/Dockerfile"}
     assert services["plugin-runner"]["build"] == {"context": ".", "dockerfile": "docker/plugin/Dockerfile"}
     assert services["musicdl"]["env_file"] == [{"path": ".env", "required": False}]

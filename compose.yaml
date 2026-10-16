@@ -23,7 +23,7 @@ name: musicdl
 services:
   musicdl:
     # 两个应用镜像共用 MUSICDL_IMAGE_TAG；本机有仓库源码时可按需构建。
-    image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.1.5}
+    image: wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.2.0}
     build:
       context: .
       dockerfile: docker/main/Dockerfile
@@ -84,7 +84,7 @@ services:
 
   plugin-runner:
     # 使用与主服务相同的发布标签，方便成对升级或回滚。
-    image: wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.1.5}
+    image: wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.2.0}
     build:
       context: .
       dockerfile: docker/plugin/Dockerfile

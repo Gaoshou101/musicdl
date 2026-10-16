@@ -36,6 +36,6 @@ def test_ci_smokes_the_unified_published_stack_with_bundled_redis():
     assert "docker system prune" not in run
 
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
-    assert compose["services"]["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.1.5}"
-    assert compose["services"]["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.1.5}"
+    assert compose["services"]["musicdl"]["image"] == "wit7zz/musicdl:${MUSICDL_IMAGE_TAG:-1.2.0}"
+    assert compose["services"]["plugin-runner"]["image"] == "wit7zz/musicdl-plugin-runner:${MUSICDL_IMAGE_TAG:-1.2.0}"
     assert compose["services"]["redis"]["image"] == "redis:8.8.3-alpine"

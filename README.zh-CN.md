@@ -34,7 +34,7 @@ musicdl 可以搜索多个音乐音源，并将选中的歌曲下载到自己的
 
 需要安装 Docker Engine、Docker Compose v2.24.0 或更新版本，并能联网拉取已发布的镜像。
 
-先创建项目目录，再下载唯一的 Compose 文件并启动 musicdl。该文件将两个应用镜像固定为 `1.1.5`：
+先创建项目目录，再下载唯一的 Compose 文件并启动 musicdl。该文件将两个应用镜像固定为 `1.2.0`：
 
 ```bash
 mkdir -p musicdl
@@ -72,7 +72,7 @@ docker compose up -d
 |---|---|---|
 | `MUSICDL_BIND_HOST` | `127.0.0.1` | 宿主机监听地址。只有确需在可信局域网开放管理面板时才设为 `0.0.0.0`。 |
 | `MUSICDL_PORT` | `8000` | 管理面板映射到宿主机的端口。 |
-| `MUSICDL_IMAGE_TAG` | `1.1.5` | 主服务和插件运行器共用的镜像版本标签。 |
+| `MUSICDL_IMAGE_TAG` | `1.2.0` | 主服务和插件运行器共用的镜像版本标签。 |
 | `MUSICDL_ADMIN__COOKIE_SECURE` | `false` | 通过 HTTPS 访问面板时设为 `true`。 |
 | `MUSICDL_DEPLOYMENT_MODE` | `full` | 设为 `lite` 可在应用中禁用企业微信；统一 Compose 栈仍会启动内置 Redis。 |
 | `MUSICDL_WECOM__ENABLED` | `false` | 启用或禁用企业微信集成。lite 模式下请保持为 `false`。 |
@@ -111,7 +111,7 @@ Compose 项目名为 `musicdl`，数据保存在具名卷中；Docker 会在卷�
 
 迁移前请备份数据卷；要保留数据时，不要运行 `docker compose down -v`。
 
-Compose 文件默认固定使用 `1.1.5` 镜像。更新时，先在 `.env` 中将 `MUSICDL_IMAGE_TAG` 改为目标版本，或下载默认标签已更新到目标版本的 Compose 文件，再在该文件所在目录执行：
+Compose 文件默认固定使用 `1.2.0` 镜像。更新时，先在 `.env` 中将 `MUSICDL_IMAGE_TAG` 改为目标版本，或下载默认标签已更新到目标版本的 Compose 文件。`1.1.5` 镜像对仍可用于回滚。然后在该文件所在目录执行：
 
 ```bash
 docker compose pull

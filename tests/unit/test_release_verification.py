@@ -65,7 +65,7 @@ def test_legacy_release_checkout_keeps_quick_prod_and_readme_checks(release_tree
     # moved to the unified manifest. Keep this legacy source-root fixture
     # self-contained so it also works in shallow CI clones.
     old_images = {
-        "compose.quick.yaml": "${MUSICDL_IMAGE_TAG:-1.1.5}",
+        "compose.quick.yaml": f"${{MUSICDL_IMAGE_TAG:-{VERSION}}}",
         "compose.prod.yaml": "${MUSICDL_IMAGE_TAG:-latest}",
     }
     for filename, tag in old_images.items():
@@ -78,10 +78,10 @@ def test_legacy_release_checkout_keeps_quick_prod_and_readme_checks(release_tree
         ])
         (release_tree / filename).write_text(body, encoding="utf-8")
     legacy_readme = "\n".join([
-        "| `MUSICDL_IMAGE_TAG` | `1.1.5` | Shared application image version. |",
-        "| `wit7zz/musicdl:1.1.5` | Main service |",
-        "| `wit7zz/musicdl-plugin-runner:1.1.5` | Plugin runner |",
-        "| Pinned release | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG=1.1.5` |",
+        f"| `MUSICDL_IMAGE_TAG` | `{VERSION}` | Shared application image version. |",
+        f"| `wit7zz/musicdl:{VERSION}` | Main service |",
+        f"| `wit7zz/musicdl-plugin-runner:{VERSION}` | Plugin runner |",
+        f"| Pinned release | `compose.prod.yaml` | `MUSICDL_IMAGE_TAG={VERSION}` |",
         "",
     ])
     for filename in ("README.md", "README.zh-CN.md"):
