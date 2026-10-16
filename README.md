@@ -34,7 +34,7 @@ musicdl searches music sources and downloads selected tracks to your own server.
 
 Requirements: Docker Engine, Docker Compose v2.24.0 or newer, and internet access to pull the published images.
 
-Create a project directory, download the single Compose file, and start musicdl. The file pins both application images to `1.1.5`:
+Create a project directory, download the single Compose file, and start musicdl. The file pins both application images to `1.2.0`:
 
 ```bash
 mkdir -p musicdl
@@ -72,7 +72,7 @@ To change these defaults, create an optional `.env` file beside `compose.yaml`; 
 |---|---|---|
 | `MUSICDL_BIND_HOST` | `127.0.0.1` | Host interface to bind. Use `0.0.0.0` only when you intend to expose the panel on a trusted LAN. |
 | `MUSICDL_PORT` | `8000` | Host port for the web panel. |
-| `MUSICDL_IMAGE_TAG` | `1.1.5` | Version tag shared by the main and plugin-runner images. |
+| `MUSICDL_IMAGE_TAG` | `1.2.0` | Version tag shared by the main and plugin-runner images. |
 | `MUSICDL_ADMIN__COOKIE_SECURE` | `false` | Set to `true` when accessing the panel through HTTPS. |
 | `MUSICDL_DEPLOYMENT_MODE` | `full` | Set to `lite` to disable WeCom in the app. The unified Compose stack still starts bundled Redis. |
 | `MUSICDL_WECOM__ENABLED` | `false` | Enable or disable the WeCom app integration. Keep this `false` in lite mode. |
@@ -111,7 +111,7 @@ The Compose project is named `musicdl`. Persistent data is stored in named volum
 
 Back up the volumes before a migration, and do not use `docker compose down -v` when you need to keep their contents.
 
-The Compose file pins the image tag to `1.1.5`. To update, set `MUSICDL_IMAGE_TAG` in `.env` to the release you want, or download a Compose file whose default tag is that release. Then run these commands from the directory containing it:
+The Compose file pins the image tag to `1.2.0`. To update, set `MUSICDL_IMAGE_TAG` in `.env` to the release you want, or download a Compose file whose default tag is that release. The `1.1.5` image pair remains available for rollback. Then run these commands from the directory containing it:
 
 ```bash
 docker compose pull
