@@ -2,22 +2,24 @@
   <div class="app-shell">
     <div v-if="menuOpen" class="nav-backdrop" @click="menuOpen = false" />
     <aside class="sidebar" :class="{ 'sidebar-open': menuOpen }" aria-label="主导航">
-      <RouterLink to="/dashboard" class="brand-lockup" @click="menuOpen = false">
-        <img src="/brand/icon.svg" alt="" class="brand-icon" />
-        <span><strong>musicdl</strong><small>Telegram 音乐服务</small></span>
-      </RouterLink>
-      <p class="nav-heading">工作台</p>
-      <nav class="nav-list" aria-label="后台导航">
-        <RouterLink v-for="item in mainLinks" :key="item.to" :to="item.to" class="nav-link" :class="{ active: route.path === item.to }" @click="menuOpen = false">
-          <component :is="item.icon" class="nav-glyph" aria-hidden="true" /><span>{{ item.label }}</span>
+      <div class="sidebar-main">
+        <RouterLink to="/dashboard" class="brand-lockup" @click="menuOpen = false">
+          <img src="/brand/icon.svg" alt="" class="brand-icon" />
+          <span><strong>musicdl</strong><small>Telegram 音乐服务</small></span>
         </RouterLink>
-      </nav>
-      <p class="nav-heading nav-heading-secondary">管理</p>
-      <nav class="nav-list" aria-label="管理导航">
-        <RouterLink v-for="item in adminLinks" :key="item.to" :to="item.to" class="nav-link" :class="{ active: route.path === item.to }" @click="menuOpen = false">
-          <component :is="item.icon" class="nav-glyph" aria-hidden="true" /><span>{{ item.label }}</span>
-        </RouterLink>
-      </nav>
+        <p class="nav-heading">工作台</p>
+        <nav class="nav-list" aria-label="后台导航">
+          <RouterLink v-for="item in mainLinks" :key="item.to" :to="item.to" class="nav-link" :class="{ active: route.path === item.to }" @click="menuOpen = false">
+            <component :is="item.icon" class="nav-glyph" aria-hidden="true" /><span>{{ item.label }}</span>
+          </RouterLink>
+        </nav>
+        <p class="nav-heading nav-heading-secondary">管理</p>
+        <nav class="nav-list" aria-label="管理导航">
+          <RouterLink v-for="item in adminLinks" :key="item.to" :to="item.to" class="nav-link" :class="{ active: route.path === item.to }" @click="menuOpen = false">
+            <component :is="item.icon" class="nav-glyph" aria-hidden="true" /><span>{{ item.label }}</span>
+          </RouterLink>
+        </nav>
+      </div>
       <div class="sidebar-bottom">
         <span class="console-label">服务控制台</span>
         <button class="quiet-button" type="button" @click="signOut">退出登录</button>

@@ -1,6 +1,7 @@
 #app { min-height: 100vh; }
 .app-shell { display: flex; min-height: 100vh; color: var(--color-neutral-100); }
-.sidebar { position: fixed; z-index: 30; inset: 0 auto 0 0; display: flex; width: 218px; flex-direction: column; padding: 28px 15px 20px; border-right: 1px solid var(--glass-border); background: var(--glass-opaque-bg); }
+.sidebar { position: fixed; z-index: 30; inset: 0 auto 0 0; display: grid; grid-template-rows: minmax(0,1fr) auto; width: 218px; height: 100vh; height: 100dvh; overflow: hidden; border-right: 1px solid var(--glass-border); background: var(--glass-opaque-bg); box-shadow: inset -1px 0 color-mix(in srgb, var(--color-neutral-50) 3%, transparent); }
+.sidebar-main { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: max(28px,env(safe-area-inset-top)) 15px 20px; scrollbar-width: thin; }
 .brand-lockup { display: flex; align-items: center; gap: 11px; min-width: 0; color: inherit; text-decoration: none; }
 .brand-lockup span { display: grid; gap: 3px; }
 .brand-lockup strong { font-size: 15px; letter-spacing: -.02em; }
@@ -14,12 +15,15 @@
 .nav-link.active,.nav-link.router-link-exact-active { color: var(--color-neutral-100); border-color: color-mix(in oklab, var(--color-accent-500) 20%, transparent); background: color-mix(in oklab, var(--color-accent-500) 11%, transparent); }
 .nav-link.active .nav-glyph,.nav-link.router-link-exact-active .nav-glyph { color: var(--color-accent-400); }
 .nav-glyph { width: 17px; height: 17px; }
-.sidebar-bottom { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; margin-top: auto; padding: 14px 8px 0; border-top: 1px solid var(--glass-border); color: var(--color-neutral-400); font-size: 10px; }
+.sidebar-bottom { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 6px; margin: 0 15px; padding: 10px 0 max(12px,env(safe-area-inset-bottom)); border-top: 1px solid var(--glass-border); color: var(--color-neutral-400); font-size: 12px; }
+.sidebar-bottom .console-label { padding-left: 9px; font-size: 12px; }
+.sidebar-bottom .quiet-button { min-height: 44px; padding: 0 9px; border: 1px solid transparent; border-radius: 9px; font-size: 12px; transition: color .16s ease,background .16s ease,border-color .16s ease; }
+.sidebar-bottom .quiet-button:hover { border-color: var(--glass-border); background: color-mix(in oklab, var(--color-neutral-800) 45%, transparent); }
 .console-label { color: var(--color-neutral-500); }
 .status-dot,.health-pill i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--color-success); box-shadow: 0 0 0 4px color-mix(in oklab, var(--color-success) 15%, transparent); }
 .quiet-button { border: 0; padding: 4px; color: var(--color-neutral-400); background: transparent; font-size: 10px; cursor: pointer; }
 .quiet-button:hover { color: var(--color-neutral-100); }
-.sidebar-error { grid-column: 1 / -1; margin: 0; color: var(--color-danger); line-height: 1.5; }
+.sidebar-error { grid-column: 1 / -1; margin: 0; padding: 0 9px 3px; overflow-wrap: anywhere; color: var(--color-danger); line-height: 1.5; }
 .workspace { display: flex; width: calc(100% - 218px); min-height: 100vh; flex-direction: column; margin-left: 218px; }
 .topbar { position: sticky; z-index: 10; top: 0; display: flex; height: 62px; flex: 0 0 62px; align-items: center; justify-content: space-between; gap: 18px; padding: 0 clamp(22px, 3.2vw, 48px); border-bottom: 1px solid var(--glass-border); background: color-mix(in srgb, var(--color-neutral-950) 96%, transparent); }
 .breadcrumb { display: flex; align-items: center; gap: 10px; color: var(--color-neutral-500); font-size: 11px; }
@@ -66,7 +70,8 @@
 .search-entry input,.field input { width: 100%; min-width: 0; border: 1px solid var(--glass-border); border-radius: 11px; padding: 12px 14px; color: var(--color-neutral-100); background: color-mix(in srgb, var(--color-neutral-950) 42%, transparent); font: inherit; font-size: 12px; }
 .primary-button,.secondary-button { display: inline-flex; min-height: 40px; align-items: center; justify-content: center; gap: 8px; border: 1px solid transparent; border-radius: 11px; padding: 9px 16px; color: #fff; background: color-mix(in oklab, var(--color-accent-500) 65%, black); font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; transition: filter .15s ease, transform .15s ease; }
 .primary-button:hover { filter: brightness(1.08); }
-.primary-button:active { transform: translateY(1px); }
+.primary-button { box-shadow: inset 0 1px 0 rgb(255 255 255 / .12),0 1px 0 rgb(0 0 0 / .12); }
+.primary-button:active { transform: translateY(1px); box-shadow: inset 0 1px 2px rgb(0 0 0 / .12); }
 .primary-button:disabled,.secondary-button:disabled { opacity: .48; cursor: not-allowed; }
 .secondary-button { border-color: var(--glass-border); color: var(--color-neutral-200); background: var(--glass-bg); }
 .shortcut-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
@@ -153,9 +158,10 @@
 .overview-page { gap: 22px; }
 .music-hero { position: relative; isolation: isolate; display: grid; min-height: 376px; grid-template-columns: minmax(0,1.18fr) minmax(300px,.82fr); align-items: center; overflow: hidden; border: 1px solid var(--glass-border); border-radius: 26px; padding: clamp(30px,4.5vw,58px); background: radial-gradient(ellipse at 78% 48%, color-mix(in oklab, #d47a65 17%, transparent), transparent 46%), var(--glass-bg); }
 html[data-appearance="light"] .music-hero { background: radial-gradient(ellipse at 79% 48%, color-mix(in oklab, #e5a08b 25%, transparent), transparent 46%), var(--glass-bg); }
+.music-hero { box-shadow: var(--glass-shadow); }
 .music-hero-copy { position: relative; z-index: 2; max-width: 590px; }
 .music-hero .eyebrow { margin-bottom: 17px; color: var(--color-neutral-400); letter-spacing: .14em; }
-.music-hero h1 { margin: 0; color: var(--color-neutral-50); font-size: clamp(43px,5.2vw,69px); font-weight: 650; letter-spacing: -.075em; line-height: 1.08; }
+.music-hero h1 { margin: 0; color: var(--color-neutral-50); font-size: clamp(43px,5.2vw,69px); font-weight: 650; letter-spacing: -.045em; line-height: 1.08; }
 .music-hero-description { max-width: 390px; margin: 15px 0 0; color: var(--color-neutral-400); font-size: 12px; line-height: 1.75; }
 .hero-search { max-width: 500px; margin-top: 28px; }
 .hero-search label { display: block; margin-bottom: 8px; color: var(--color-neutral-400); font-size: 10px; }

@@ -62,6 +62,15 @@ function stopChild(child) {
   })
 }
 
+async function assertSidebarFooterAtBottom(page) {
+  const footer = await page.locator('.sidebar-bottom').boundingBox()
+  const viewport = page.viewportSize()
+  assert.ok(footer && viewport, 'sidebar footer must be visible')
+  const bottomGap = viewport.height - footer.y - footer.height
+  assert.ok(footer.y >= 0 && bottomGap >= -1 && bottomGap <= 40,
+    `sidebar footer must stay at the viewport bottom (gap ${bottomGap}px)`)
+}
+
 const port = await freePort()
 const baseUrl = `http://127.0.0.1:${port}`
 let fixtureOutput = ''
@@ -126,6 +135,18 @@ try {
   assert.equal(await page.locator('html').getAttribute('data-appearance'), 'dark')
   assert.equal(await page.getByLabel('主题色').inputValue(), 'rose')
   await page.getByRole('heading', { name: '依赖检查', exact: true }).waitFor({ state: 'visible' })
+  await assertSidebarFooterAtBottom(page)
+  await page.setViewportSize({ width: 1280, height: 540 })
+  assert.equal(await page.locator('.sidebar-main').evaluate((element) => element.scrollHeight > element.clientHeight), true,
+    'short-screen navigation must scroll without moving the footer')
+  await page.getByRole('navigation', { name: '管理导航', exact: true }).getByRole('link', { name: '设置', exact: true }).scrollIntoViewIfNeeded()
+  await assertSidebarFooterAtBottom(page)
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-sidebar-short.png'), animations: 'disabled' })
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.locator('.sidebar').getByRole('link').first().scrollIntoViewIfNeeded()
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
+  await assertSidebarFooterAtBottom(page)
+  await page.evaluate(() => window.scrollTo(0, 0))
   await page.screenshot({ path: path.join(artifactRoot, 'vue-overview.png'), fullPage: true, animations: 'disabled' })
   await page.getByRole('button', { name: '切换浅色模式', exact: true }).click()
   await page.screenshot({ path: path.join(artifactRoot, 'vue-overview-light.png'), fullPage: true, animations: 'disabled' })
@@ -317,6 +338,13 @@ try {
   await page.setViewportSize({ width: 390, height: 844 })
   const menu = page.getByRole('button', { name: '打开后台导航', exact: true })
   await menu.click()
+  await page.setViewportSize({ width: 390, height: 540 })
+  assert.equal(await page.locator('.sidebar-main').evaluate((element) => element.scrollHeight > element.clientHeight), true,
+    'short mobile navigation must scroll without moving the footer')
+  await page.getByRole('navigation', { name: '管理导航', exact: true }).getByRole('link', { name: '设置', exact: true }).scrollIntoViewIfNeeded()
+  await assertSidebarFooterAtBottom(page)
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-mobile-navigation.png'), animations: 'disabled' })
+  await page.setViewportSize({ width: 390, height: 844 })
   await page.getByLabel('后台导航', { exact: true }).getByRole('link', { name: '下载历史' }).click()
   await page.getByRole('region', { name: '下载记录' }).waitFor()
   assert.equal(await menu.getAttribute('aria-expanded'), 'false')

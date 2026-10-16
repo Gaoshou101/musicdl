@@ -43,7 +43,7 @@
   --glass-border: rgb(255 249 238 / 0.11);
   --glass-highlight: rgb(255 255 255 / 0.035);
   --glass-opaque-bg: oklch(22% 0.005 78 / 0.99);
-  --glass-shadow: none;
+  --glass-shadow: inset 0 1px 0 var(--glass-highlight);
   --glass-blur: 0px;
 }
 
@@ -84,7 +84,7 @@ html[data-appearance="light"] {
   --glass-border: rgb(68 56 42 / 0.12);
   --glass-highlight: rgb(255 255 255 / 0.7);
   --glass-opaque-bg: rgb(255 253 247 / 0.99);
-  --glass-shadow: none;
+  --glass-shadow: inset 0 1px 0 var(--glass-highlight);
 }
 
 :root { color-scheme: dark; }
