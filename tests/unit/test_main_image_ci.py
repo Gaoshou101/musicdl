@@ -27,7 +27,7 @@ def test_admin_panel_job_inspects_wheel_and_static_export_in_the_built_container
     assert "module_path.is_relative_to(source_root)" in combined
     assert 'panel = Path("/app/panel")' in combined
     assert '(panel / "index.html").is_file()' in combined
-    assert 'panel / "_next" / "static"' in combined
+    assert 'panel / "assets"' in combined
     assert "static_assets.rglob(\"*\")" in combined
 
     runtime = next(run for run in runs if "compose exec -T musicdl python -" in run)

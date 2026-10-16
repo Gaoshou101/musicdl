@@ -169,7 +169,7 @@ class AdminSettings(BaseModel):
     # out of the panel's own config page and is set by the image that bakes the
     # files in. It carries no path validator on purpose: the rest of these paths
     # describe mounts inside the container, while this one is also what a
-    # developer points at a local `web/out`, and a value that resolves to
+    # developer points at a local `web/dist`, and a value that resolves to
     # nothing is reported at start-up rather than refused.
     panel_root: str | None = None
 

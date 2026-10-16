@@ -1,10 +1,7 @@
 """The console is served by the process it manages, from files the image bakes in.
 
-A deployment used to run Next as a second container and forward its `/api/*`
-calls to the app. The console is a client-only build, so it ships as static
-files now and these tests hold the two properties that replaced that hop: one
-origin serves the files, and every route the app already owned is decided before
-any of them is consulted.
+The Vue console ships as static files with an explicit history-route allowlist.
+API routes, missing assets and unknown pages must never receive the SPA entry.
 """
 
 from __future__ import annotations
@@ -19,10 +16,10 @@ from musicdl.config import AppSettings
 
 
 def panel_tree(root):
-    """The shape `next build` produces with `trailingSlash`: a directory per route."""
-    (root / "dashboard" / "config").mkdir(parents=True)
+    """Vite emits one entry document and content-hashed asset files."""
+    (root / "assets").mkdir(parents=True)
     (root / "index.html").write_text("<!doctype html><title>控制台</title>", encoding="utf-8")
-    (root / "dashboard" / "config" / "index.html").write_text("<title>运行配置</title>", encoding="utf-8")
+    (root / "assets" / "panel-123.js").write_text("console.log('panel')", encoding="utf-8")
     return root
 
 
@@ -43,7 +40,11 @@ def test_the_app_serves_the_console_and_still_owns_every_route_above_it(tmp_path
                 "home": await client.get("/"),
                 "deep": await client.get("/dashboard/config/"),
                 "bare_deep": await client.get("/dashboard/config"),
-                "followed": await client.get("/dashboard/config", follow_redirects=True),
+                "search": await client.get("/dashboard/search/?q=hello%20world"),
+                "asset": await client.get("/assets/panel-123.js"),
+                "missing_asset": await client.get("/assets/missing.js"),
+                "missing_api": await client.get("/admin/not-a-route"),
+                "missing_page": await client.get("/dashboard/not-a-page"),
                 "health": await client.get("/healthz"),
                 "api": await client.get("/admin/sources"),
                 "login_page": await client.get("/admin/"),
@@ -52,18 +53,54 @@ def test_the_app_serves_the_console_and_still_owns_every_route_above_it(tmp_path
 
     seen = run(scenario())
     assert seen["home"].status_code == 200 and "控制台" in seen["home"].text
-    # A deep link is a directory with an index file in it, which is what a plain
-    # file server can answer; without the trailing slash it says so and redirects
-    # rather than 404-ing a URL an operator typed.
-    assert seen["deep"].status_code == 200 and "运行配置" in seen["deep"].text
-    assert seen["bare_deep"].status_code == 307
-    assert seen["followed"].status_code == 200 and "运行配置" in seen["followed"].text
+    # Both old trailing-slash links and the Vue router's URLs use the SPA entry.
+    for name in ("deep", "bare_deep", "search"):
+        assert seen[name].status_code == 200 and "控制台" in seen[name].text
+        assert seen[name].headers["cache-control"] == "no-cache"
+    assert seen["home"].headers["cache-control"] == "no-cache"
+    assert seen["asset"].status_code == 200 and "console.log" in seen["asset"].text
+    assert "javascript" in seen["asset"].headers["content-type"]
+    for name in ("missing_asset", "missing_api", "missing_page"):
+        assert seen[name].status_code == 404
+        assert "控制台" not in seen[name].text
     # Everything below was registered before the panel mount, so the console can
     # never shadow the service's own endpoints -- not even with its 404 page.
     assert seen["health"].status_code == 200 and seen["health"].json()["status"] == "ok"
     assert seen["api"].status_code == 401
     assert seen["login_page"].status_code == 200 and 'action="/admin/login-form"' in seen["login_page"].text
     assert seen["unclaimed"].status_code == 404
+
+
+def test_every_panel_deep_link_supports_head_and_rejects_post(tmp_path):
+    app = create_app(AppSettings(admin={"panel_root": str(panel_tree(tmp_path / "panel"))}))
+
+    async def scenario():
+        async with client_for(app) as client:
+            for page in ("", "search", "downloads", "sources", "bots", "config", "health", "logs", "settings"):
+                path = "/dashboard" + ("/" + page if page else "")
+                response = await client.get(path)
+                assert response.status_code == 200 and "控制台" in response.text
+                head = await client.head(path)
+                assert head.status_code == 200 and head.content == b""
+                assert head.headers["cache-control"] == "no-cache"
+                assert (await client.post(path)).status_code == 405
+
+    run(scenario())
+
+
+def test_panel_fallback_does_not_expose_files_outside_its_root(tmp_path):
+    root = panel_tree(tmp_path / "panel")
+    (tmp_path / "outside.txt").write_text("private fixture", encoding="utf-8")
+    app = create_app(AppSettings(admin={"panel_root": str(root)}))
+
+    async def scenario():
+        async with client_for(app) as client:
+            for path in ("/assets/%2e%2e/%2e%2e/outside.txt", "/dashboard/missing.js", "/api/missing"):
+                response = await client.get(path)
+                assert response.status_code == 404
+                assert "private fixture" not in response.text
+
+    run(scenario())
 
 
 def test_a_deployment_without_a_console_serves_no_front_page():

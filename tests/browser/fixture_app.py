@@ -126,10 +126,8 @@ def create_fixture_app(root: Path, panel_root: Path) -> FastAPI:
     portal.fetch_source_with_metadata = _fixture_fetch
     source = BrowserSmokeSource()
     settings = AppSettings(
-        admin={"cookie_secure": False, "panel_root": str(panel_root), "state_path": str(state_path)},
-        media={"root": str(media_root), "verify_duration": "lenient"},
-        plugin={"app_data_root": str(plugin_root)},
-        telegram={"session_root": str(telegram_root)},
+        admin={"cookie_secure": False, "panel_root": str(panel_root)},
+        media={"verify_duration": "lenient"},
         worker={
             "quality_policy": "best_available",
             "search_timeout": 1.0,
@@ -139,6 +137,13 @@ def create_fixture_app(root: Path, panel_root: Path) -> FastAPI:
             "budget_slack_seconds": 2.0,
         },
     )
+    # Deployment paths are validated as POSIX container mounts. This disposable
+    # fixture also runs on Windows, so supply native temporary paths after that
+    # validation, just as the unit-test fixtures do.
+    settings.admin.state_path = str(state_path)
+    settings.media.root = str(media_root)
+    settings.plugin.app_data_root = str(plugin_root)
+    settings.telegram.session_root = str(telegram_root)
     app = create_app(
         settings,
         runtime_factory=lambda _settings: BrowserSmokeRuntime(source),

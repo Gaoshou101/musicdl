@@ -562,6 +562,28 @@ def _build_runtime(settings: AppSettings, clock=None, *, bots=(), sources=(),
                     platform_search=platform_search)
 
 
+class _PanelStaticFiles(StaticFiles):
+    """Serve the SPA entry only for routes owned by the administration panel."""
+
+    _routes = frozenset({
+        "dashboard", "dashboard/search", "dashboard/downloads", "dashboard/sources",
+        "dashboard/bots", "dashboard/config", "dashboard/health", "dashboard/logs",
+        "dashboard/settings",
+    })
+
+    async def get_response(self, path: str, scope) -> Response:
+        # An allowlist keeps unknown API paths and missing assets as real 404s.
+        # StaticFiles still enforces GET/HEAD, path containment and file access.
+        route = Path(path).as_posix()  # StaticFiles uses OS-native separators.
+        entry = route in {".", "", "index.html"} or route.rstrip("/") in self._routes
+        response = await super().get_response("index.html" if entry else path, scope)
+        if entry:
+            # Revalidate the entry after an upgrade so it never keeps referring
+            # to hashed chunks from an older application image.
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def _panel_root(settings: AppSettings) -> str | None:
     """The directory the built console occupies, or None when there is none.
 
@@ -907,21 +929,13 @@ def create_app(settings: AppSettings | None = None, state_factory: Callable[[Any
             return PlainTextResponse("not ready", status_code=503)
         return Response(status_code=200)
 
-    # The console is this process's own front end. It is a client-only Next
-    # build, so the image carries static files rather than a second runtime, and
-    # one origin serves the browser everything it asks for: the pages, the
-    # administration routes they call, and the WeCom callback.
-    #
-    # The mount is registered last on purpose. Starlette matches routes in the
-    # order they were added, so every path declared above -- /healthz, /readyz,
-    # /wecom/callback, and the whole /admin surface -- is decided before this
-    # one is consulted, and the panel only ever answers what nothing else
-    # claimed. `html=True` is what makes a deep link work: the export writes
-    # `dashboard/config/index.html`, and a directory request has to resolve to
-    # the file inside it rather than to a listing.
+    # The Vue console ships as static files in this process's image. Register
+    # it last so health, callbacks and administration APIs always take priority.
+    # Its history routes share one entry document; the restricted fallback does
+    # not turn missing assets or unknown API routes into successful HTML pages.
     panel_root = _panel_root(settings)
     if panel_root is not None:
-        app.mount("/", StaticFiles(directory=panel_root, html=True), name="panel")
+        app.mount("/", _PanelStaticFiles(directory=panel_root), name="panel")
 
     return app
 

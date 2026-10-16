@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN" data-appearance="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#061026" />
+    <link rel="icon" type="image/svg+xml" href="/brand/icon.svg" />
+    <title>musicdl 管理后台</title>
+    <script>
+      (() => {
+        const themes = { blue: 240, emerald: 145, rose: 25, amber: 85 };
+        let saved = {};
+        try {
+          const parsed = JSON.parse(localStorage.getItem('tgmusic.theme') || 'null');
+          saved = parsed?.state || parsed || {};
+        } catch {}
+        const appearance = ['light', 'dark'].includes(saved.appearance)
+          ? saved.appearance
+          : matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        const theme = Object.hasOwn(themes, saved.theme) ? saved.theme : 'blue';
+        const root = document.documentElement;
+        root.dataset.appearance = appearance;
+        root.style.colorScheme = appearance;
+        const hue = themes[theme];
+        const ramp = appearance === 'dark'
+          ? [[50,98,.015],[100,95,.02],[200,89,.025],[300,79,.035],[400,67,.04],[500,55,.18],[600,45,.15],[700,38,.12],[800,30,.08],[900,22,.04]]
+          : [[50,97,.025],[100,93,.05],[200,86,.1],[300,46,.15],[400,55,.17],[500,66,.18],[600,57,.16],[700,48,.13],[800,39,.09],[900,30,.05]];
+        for (const [step, lightness, chroma] of ramp) {
+          root.style.setProperty(`--color-accent-${step}`, `oklch(${lightness}% ${chroma} ${hue})`);
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

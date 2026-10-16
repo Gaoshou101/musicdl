@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
-const output = fileURLToPath(new URL('../.next/source-import-contract/sourceImport.js', import.meta.url))
+const output = fileURLToPath(new URL('../.contract/source-import/sourceImport.js', import.meta.url))
 const source = await readFile(output, 'utf8')
 const {
   duplicateSourceIds,
@@ -17,7 +17,7 @@ const {
   sourceLanguageForFilename,
 } = await import(`data:text/javascript,${encodeURIComponent(source)}`)
 
-const apiPath = fileURLToPath(new URL('../.next/source-import-contract/api.js', import.meta.url))
+const apiPath = fileURLToPath(new URL('../.contract/source-import/api.js', import.meta.url))
 const apiSource = await readFile(apiPath, 'utf8')
 const api = await import(`data:text/javascript,${encodeURIComponent(apiSource)}`)
 

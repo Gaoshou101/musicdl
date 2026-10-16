@@ -527,7 +527,7 @@ const API_ROOT = '/admin'
 
 /** The origin the panel is served from, or a test/standalone override. */
 function configuredBase(): string {
-  const value = typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_API_BASE : undefined
+  const value = typeof process !== 'undefined' ? process.env.MUSICDL_API_BASE : undefined
   return value ? value.replace(/\/+$/, '') : ''
 }
 

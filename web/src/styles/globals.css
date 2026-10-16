@@ -7,18 +7,18 @@
   --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
     "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
 
-  /* Deep navy neutrals keep the dark appearance from flattening into black. */
-  --color-neutral-50: oklch(98% 0.015 225);
-  --color-neutral-100: oklch(95% 0.02 225);
-  --color-neutral-200: oklch(89% 0.025 225);
-  --color-neutral-300: oklch(79% 0.035 225);
-  --color-neutral-400: oklch(67% 0.04 225);
-  --color-neutral-500: oklch(54% 0.045 225);
-  --color-neutral-600: oklch(42% 0.05 225);
-  --color-neutral-700: oklch(32% 0.055 228);
-  --color-neutral-800: oklch(23% 0.05 232);
-  --color-neutral-900: oklch(15% 0.045 236);
-  --color-neutral-950: oklch(10% 0.04 240);
+  /* A neutral graphite scale keeps dark screens calm and the artwork distinct. */
+  --color-neutral-50: oklch(98% 0.003 80);
+  --color-neutral-100: oklch(93% 0.003 80);
+  --color-neutral-200: oklch(84% 0.004 80);
+  --color-neutral-300: oklch(76% 0.004 80);
+  --color-neutral-400: oklch(68% 0.004 80);
+  --color-neutral-500: oklch(58% 0.004 80);
+  --color-neutral-600: oklch(48% 0.004 80);
+  --color-neutral-700: oklch(37% 0.004 80);
+  --color-neutral-800: oklch(30% 0.004 80);
+  --color-neutral-900: oklch(24% 0.004 80);
+  --color-neutral-950: oklch(17% 0.004 80);
 
   /* Accent color - Electric Blue. Theme switching rotates this whole ramp. */
   --color-accent-50: oklch(96% 0.02 240);
@@ -32,36 +32,36 @@
   --color-accent-800: oklch(30% 0.08 240);
   --color-accent-900: oklch(22% 0.04 240);
 
-  /* Semantic colors use a brighter ramp on navy and a darker ramp on frost. */
+  /* Semantic colors remain distinct on graphite and porcelain surfaces. */
   --color-success: oklch(70% 0.15 145);
   --color-warning: oklch(78% 0.15 85);
   --color-danger: oklch(68% 0.18 25);
   --color-info: oklch(70% 0.15 240);
 
-  /* Frosted surface tokens. These are intentionally shared by every panel. */
-  --glass-bg: rgb(18 32 64 / 0.62);
-  --glass-border: rgb(170 204 255 / 0.17);
-  --glass-highlight: rgb(255 255 255 / 0.11);
-  --glass-opaque-bg: rgb(16 29 56 / 0.98);
-  --glass-shadow: 0 18px 48px rgb(2 8 23 / 0.24);
-  --glass-blur: 24px;
+  /* Preserve the surface token API with crisp fills and restrained inset depth. */
+  --glass-bg: oklch(23% 0.004 80 / 0.99);
+  --glass-border: rgb(255 255 255 / 0.09);
+  --glass-highlight: rgb(255 255 255 / 0.025);
+  --glass-opaque-bg: oklch(19% 0.004 80 / 0.99);
+  --glass-shadow: inset 0 1px 0 var(--glass-highlight);
+  --glass-blur: 0px;
 }
 
 /* Light mode deliberately reverses the neutral ramp because the existing
    screens use 950 for canvas, 900 for fields, and 100 for primary text. */
 html[data-appearance="light"] {
   color-scheme: light;
-  --color-neutral-50: oklch(7% 0.03 230);
-  --color-neutral-100: oklch(12% 0.04 230);
-  --color-neutral-200: oklch(18% 0.04 230);
-  --color-neutral-300: oklch(27% 0.05 230);
-  --color-neutral-400: oklch(37% 0.06 230);
-  --color-neutral-500: oklch(46% 0.065 230);
-  --color-neutral-600: oklch(54% 0.06 230);
-  --color-neutral-700: oklch(82% 0.04 230);
-  --color-neutral-800: oklch(89% 0.035 230);
-  --color-neutral-900: oklch(99% 0.008 230);
-  --color-neutral-950: oklch(97.5% 0.018 230);
+  --color-neutral-50: oklch(8% 0.003 80);
+  --color-neutral-100: oklch(14% 0.003 80);
+  --color-neutral-200: oklch(24% 0.004 80);
+  --color-neutral-300: oklch(34% 0.004 80);
+  --color-neutral-400: oklch(45% 0.004 80);
+  --color-neutral-500: oklch(56% 0.004 80);
+  --color-neutral-600: oklch(65% 0.004 80);
+  --color-neutral-700: oklch(79% 0.004 80);
+  --color-neutral-800: oklch(89% 0.004 80);
+  --color-neutral-900: oklch(96% 0.004 80);
+  --color-neutral-950: oklch(99% 0.003 80);
 
   /* Default blue values before the client store paints a selected accent. */
   --color-accent-50: oklch(97% 0.025 240);
@@ -80,27 +80,14 @@ html[data-appearance="light"] {
   --color-danger: oklch(50% 0.18 25);
   --color-info: oklch(47% 0.16 240);
 
-  --glass-bg: rgb(255 255 255 / 0.68);
-  --glass-border: rgb(45 78 135 / 0.16);
-  --glass-highlight: rgb(255 255 255 / 0.82);
-  --glass-opaque-bg: rgb(248 251 255 / 0.98);
-  --glass-shadow: 0 16px 42px rgb(45 75 120 / 0.14);
+  --glass-bg: rgb(255 255 255 / 0.98);
+  --glass-border: rgb(28 31 36 / 0.1);
+  --glass-highlight: rgb(255 255 255 / 0.72);
+  --glass-opaque-bg: rgb(255 255 255 / 0.99);
+  --glass-shadow: inset 0 1px 0 var(--glass-highlight);
 }
 
-:root {
-  color-scheme: dark;
-  --canvas-gradient:
-    radial-gradient(circle at 12% 8%, rgb(44 94 184 / 0.18), transparent 34%),
-    radial-gradient(circle at 88% 84%, rgb(73 53 180 / 0.14), transparent 38%),
-    linear-gradient(145deg, rgb(6 16 38 / 0.98), rgb(13 24 51 / 0.98));
-}
-
-html[data-appearance="light"] {
-  --canvas-gradient:
-    radial-gradient(circle at 12% 8%, rgb(111 180 255 / 0.22), transparent 33%),
-    radial-gradient(circle at 88% 84%, rgb(163 139 255 / 0.16), transparent 38%),
-    linear-gradient(145deg, rgb(244 249 255 / 0.98), rgb(231 240 255 / 0.98));
-}
+:root { color-scheme: dark; }
 
 @layer base {
   html {
@@ -116,8 +103,8 @@ html[data-appearance="light"] {
   body {
     @apply bg-neutral-950 text-neutral-100 font-sans antialiased;
     min-height: 100vh;
-    background-image: var(--canvas-gradient);
-    background-attachment: fixed;
+    font-size: 14px;
+    line-height: 1.55;
     font-feature-settings: "tnum" on, "lnum" on;
   }
 
@@ -155,10 +142,10 @@ html[data-appearance="light"] {
 
 /* Keep modal backdrops dark in the light appearance so dialogs remain clear. */
 html[data-appearance="light"] .fixed.inset-0.backdrop-blur-sm {
-  background-color: rgb(7 16 36 / 0.62);
+  background-color: rgb(18 18 18 / 0.54);
 }
 
-/* Glass morphism utility classes. */
+/* Legacy utility names now use flat surfaces so content stays in focus. */
 @layer utilities {
   .glass {
     position: relative;
@@ -166,9 +153,7 @@ html[data-appearance="light"] .fixed.inset-0.backdrop-blur-sm {
     background: var(--glass-bg);
     border: 1px solid var(--glass-border);
     box-shadow: var(--glass-shadow);
-    /* Plain property only: Tailwind's build adds the -webkit- alias itself, and
-       spelling both by hand makes it drop this one as the redundant half. */
-    backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+    backdrop-filter: none;
   }
 
   .glass-highlight {
@@ -182,13 +167,14 @@ html[data-appearance="light"] .fixed.inset-0.backdrop-blur-sm {
     inset: 0;
     z-index: -1;
     border-radius: inherit;
-    background: linear-gradient(135deg, var(--glass-highlight) 0%, transparent 50%);
+    background: var(--glass-highlight);
     pointer-events: none;
   }
 
   /* Accent filled actions inherit the same readable foreground in both modes. */
   .bg-accent-500 {
-    color: var(--color-neutral-100);
+    color: #fff;
+    background-color: color-mix(in oklab, var(--color-accent-500) 65%, black);
   }
 }
 
