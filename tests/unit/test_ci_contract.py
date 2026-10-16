@@ -82,7 +82,8 @@ def test_ci_builds_and_then_serves_the_deployed_service_through_its_own_files():
     assert setup["with"]["cache-dependency-path"] == "web/package-lock.json"
     ran = " ".join(commands(panel))
     assert "npm ci" in ran
-    assert "npx tsc --noEmit" in ran
+    assert "npm run typecheck" in ran
+    assert "npm test" in ran
     # The console ships in the image Compose deploys, so that is the service
     # this job has to build -- not a second one that could pass on its own and
     # then never be what a deployment runs.

@@ -17,7 +17,11 @@ build/
 web/node_modules/
 web/.next/
 web/out/
+web/dist/
+web/.contract/
+web/coverage/
 web/tsconfig.tsbuildinfo
+artifacts/
 
 # A local Deno module cache belongs to whoever ran the plugin runner by hand.
 .deno-cache/

@@ -10,7 +10,8 @@
  *   npm run check:api:build
  *   node scripts/check-api-contract.mjs <panel-origin> <suite> [user] [password] [script]
  *
- *   suite=remote         read-only flow against a deployed panel (never mutates)
+ *   suite=remote         deployed-panel flow, including a sample download;
+ *                        use only against an explicitly authorized test panel
  *   suite=local          full flow against an app whose plugin store is present
  *                        but which runs no plugin runner
  *   suite=local-nostore  the same app started with no plugin store at all
@@ -20,7 +21,7 @@
  *
  *   # build the console, then point the app at what it produced
  *   cd web && npm run build
- *   MUSICDL_ADMIN__PANEL_ROOT=$PWD/out .venv/Scripts/python -m uvicorn musicdl.app:app \
+ *   MUSICDL_ADMIN__PANEL_ROOT=$PWD/dist .venv/Scripts/python -m uvicorn musicdl.app:app \
  *     --host 127.0.0.1 --port 3101
  *
  *   # suite=local   -- store present, no runner: search answers an empty
@@ -47,9 +48,9 @@ const password = process.argv[5] ?? 'password'
 
 // The client is TypeScript, so it is compiled next to the build before it can
 // be imported here; `npm run check:api:build` is what puts it there.
-const compiled = new URL('../.next/contract/api.mjs', import.meta.url)
+const compiled = new URL('../.contract/api/api.mjs', import.meta.url)
 
-process.env.NEXT_PUBLIC_API_BASE = base
+process.env.MUSICDL_API_BASE = base
 
 const jar = new Map()
 let lastSetCookies = []

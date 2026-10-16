@@ -98,7 +98,7 @@ def test_the_console_is_built_into_the_app_image_and_not_into_one_of_its_own():
     assert (ROOT / "web/public/brand/icon.svg").is_file()
     assert (ROOT / "web/public/brand/icon-apple-touch.png").is_file()
     runtime = text[text.rindex("FROM python:3.12.14-slim"):]
-    assert "COPY --from=panel --chown=10001:10001 /build/out /app/panel" in runtime
+    assert "COPY --from=panel --chown=10001:10001 /build/dist /app/panel" in runtime
     assert "ENV MUSICDL_ADMIN__PANEL_ROOT=/app/panel" in runtime
     # Nothing from the Node toolchain survives into the stage that runs.
     assert "npm" not in runtime and "node_modules" not in runtime
@@ -106,5 +106,5 @@ def test_the_console_is_built_into_the_app_image_and_not_into_one_of_its_own():
 
 def test_dockerignore_keeps_the_panel_build_output_out_of_the_context():
     text = (ROOT / ".dockerignore").read_text(encoding="utf-8")
-    for pattern in ("web/node_modules", "web/.next", "web/out", "web/tsconfig.tsbuildinfo"):
+    for pattern in ("web/node_modules", "web/dist", "web/.contract", "web/tsconfig.tsbuildinfo"):
         assert pattern in text

@@ -80,7 +80,10 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Typecheck
         working-directory: web
-        run: npx tsc --noEmit
+        run: npm run typecheck
+      - name: Vue behavior regressions
+        working-directory: web
+        run: npm test
       - name: Service log cursor regression
         working-directory: web
         run: npm run check:service-logs
@@ -131,9 +134,9 @@ jobs:
 
           panel = Path("/app/panel")
           assert (panel / "index.html").is_file(), "panel static export is missing index.html"
-          static_assets = panel / "_next" / "static"
+          static_assets = panel / "assets"
           assert static_assets.is_dir() and any(path.is_file() for path in static_assets.rglob("*")), \
-              "panel static export is missing Next.js assets"
+              "panel static build is missing Vite assets"
           print("installed package, admin template, and panel static export verified; /app/src is absent")
           PY
           curl --fail --silent --show-error http://127.0.0.1:3999/ > /tmp/console.html || fail

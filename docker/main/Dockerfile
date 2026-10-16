@@ -1,16 +1,13 @@
 # The console, built from the same commit as the service that serves it.
 #
-# It is a client-only Next application: `next build` emits static files, nothing
-# in production needs Node, and the runtime stage below only has to carry the
-# export. Building it here rather than into an image of its own is what keeps a
-# deployment to the app and the plugin runner instead of three containers.
+# Vite builds the Vue application into static files. The runtime stage carries
+# only those files; the Python service serves the panel and its API together.
 FROM node:22.23.2-slim AS panel
 
-ENV NEXT_TELEMETRY_DISABLED=1
 WORKDIR /build
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
-COPY web/next.config.mjs web/postcss.config.mjs web/tsconfig.json web/next-env.d.ts ./
+COPY web/vite.config.ts web/postcss.config.mjs web/tsconfig.json web/index.html ./
 COPY web/src ./src
 COPY web/public ./public
 RUN npm run build
@@ -35,7 +32,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore /tmp/musicdl-1.1.5-py3-
 # The console travels in the image and the app is told where it landed. Nothing
 # else sets this: a checkout that never ran the panel build has no console, and
 # saying so is how it answers no front page instead of an empty one.
-COPY --from=panel --chown=10001:10001 /build/out /app/panel
+COPY --from=panel --chown=10001:10001 /build/dist /app/panel
 ENV MUSICDL_ADMIN__PANEL_ROOT=/app/panel
 RUN groupadd --gid 10001 musicdl \
     && useradd --uid 10001 --gid musicdl --create-home --shell /usr/sbin/nologin musicdl \

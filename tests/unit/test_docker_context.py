@@ -108,17 +108,17 @@ def test_dockerfile_copy_inputs_remain_in_the_build_context():
         "src/musicdl_plugin_runner",
         "web/package.json",
         "web/package-lock.json",
-        "web/next.config.mjs",
+        "web/vite.config.ts",
         "web/postcss.config.mjs",
         "web/tsconfig.json",
-        "web/next-env.d.ts",
+        "web/index.html",
         "web/src",
     }
     for source in sources:
         assert not _is_ignored(source, patterns), f"Docker COPY source is ignored: {source.relative_to(ROOT)}"
 
         if source.is_dir() and source.relative_to(ROOT).as_posix() in copied_source_dirs:
-            suffixes = {".py", ".js", ".html", ".ts", ".tsx", ".css"}
+            suffixes = {".py", ".js", ".html", ".ts", ".vue", ".css"}
             for nested in source.rglob("*"):
                 if nested.is_file() and nested.suffix in suffixes:
                     assert not _is_ignored(nested, patterns), (
