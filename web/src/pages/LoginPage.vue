@@ -1,12 +1,19 @@
 <template>
   <main class="login-page">
-    <div class="login-orbit login-orbit-one" aria-hidden="true" /><div class="login-orbit login-orbit-two" aria-hidden="true" />
     <section class="login-intro" aria-label="musicdl 简介">
       <div class="brand-lockup login-brand"><img src="/brand/icon.svg" alt="" class="brand-icon" /><span><strong>musicdl</strong><small>Telegram 音乐服务</small></span></div>
-      <p class="eyebrow">音乐服务控制台</p>
-      <h1>把音乐服务，<span>交给清晰的控制面板。</span></h1>
-      <p class="login-description">管理音源、Telegram Bot 与后台运行状态。从一个安静、可靠的工作台开始。</p>
-      <div class="intro-facts"><div><span>音源与 Bot</span><strong>集中管理</strong></div><div><span>运行依赖</span><strong>实时可见</strong></div></div>
+      <div class="login-feature">
+        <div class="login-feature-copy">
+          <p class="eyebrow">音乐服务控制台</p>
+          <h1>音乐服务，<br />一处管理。</h1>
+          <p class="login-description">搜索并下载音乐，管理音源、Bot 与服务状态。</p>
+          <div class="intro-facts"><div><span>音源与 Bot</span><strong>集中管理</strong></div><div><span>运行依赖</span><strong>实时可见</strong></div></div>
+        </div>
+        <div class="record-artwork login-record-artwork" aria-hidden="true">
+          <div class="record-sleeve"><span class="sleeve-sun" /></div>
+          <div class="record-disc"><span class="record-grooves" /><span class="record-center" /></div>
+        </div>
+      </div>
     </section>
     <section class="login-card" aria-label="管理员登录">
       <div class="login-card-toolbar"><div class="brand-lockup mobile-login-brand"><img src="/brand/icon.svg" alt="" class="brand-icon" /><span><strong>musicdl</strong><small>管理后台</small></span></div><ThemeControl /></div>

@@ -1,20 +1,34 @@
 <template>
-  <div class="page-stack">
-    <header class="page-heading-row"><div><p class="eyebrow">工作台</p><h1>仪表板</h1><p class="muted">musicdl 服务概览，关键状态集中在这里。</p></div><span class="health-pill" :class="healthTone"><i />{{ healthLabel }}</span></header>
+  <div class="page-stack overview-page">
     <p v-if="error" role="alert" class="notice notice-error">{{ error }}</p>
     <div v-if="loading" class="panel loading-panel"><span class="spinner" />正在读取服务状态</div>
-    <section class="summary-grid" aria-label="服务概览">
-      <article class="panel summary-card"><div><p class="muted">启用音源</p><p class="summary-value">{{ sources.enabled }}<small>/ {{ sources.total }}</small></p><p class="subtle">可用于搜索与下载</p></div><span class="summary-icon">♫</span></article>
-      <article class="panel summary-card"><div><p class="muted">启用 Bot</p><p class="summary-value">{{ bots.enabled }}<small>/ {{ bots.total }}</small></p><p class="subtle">已注册的 Telegram Bot</p></div><span class="summary-icon">◉</span></article>
-      <article class="panel summary-card"><div><p class="muted">依赖状态</p><p class="summary-value" :class="healthTone">{{ health?.status ?? '未知' }}</p><p class="subtle">主服务、Redis 与 Telegram</p></div><span class="summary-icon">⌁</span></article>
+    <section class="music-hero" aria-labelledby="overview-title">
+      <div class="music-hero-copy">
+        <p class="eyebrow">音乐工作台</p>
+        <h1 id="overview-title">下一首，<br />想听什么？</h1>
+        <p class="music-hero-description">搜索歌曲与艺术家，把喜欢的音乐下载到媒体目录。</p>
+        <form class="hero-search" @submit.prevent="search">
+          <label for="overview-search">从一首歌开始</label>
+          <div class="hero-search-controls">
+            <input id="overview-search" v-model="query" aria-label="搜索关键词" placeholder="歌曲名称或艺术家" />
+            <button class="primary-button" type="submit" :disabled="!query.trim()">搜索音乐 <span aria-hidden="true">↗</span></button>
+          </div>
+        </form>
+      </div>
+      <div class="record-artwork" aria-hidden="true">
+        <div class="record-sleeve"><span class="sleeve-sun" /></div>
+        <div class="record-disc"><span class="record-grooves" /><span class="record-center" /></div>
+      </div>
+      <span class="music-hero-status health-pill" :class="healthTone"><i />{{ healthLabel }}</span>
+    </section>
+    <section class="overview-stats" aria-label="服务概览">
+      <article class="overview-stat"><p>启用音源</p><strong>{{ sources.enabled }}<small>/ {{ sources.total }}</small></strong><span>可用于搜索与下载</span></article>
+      <article class="overview-stat"><p>启用 Bot</p><strong>{{ bots.enabled }}<small>/ {{ bots.total }}</small></strong><span>已注册的 Telegram Bot</span></article>
+      <article class="overview-stat"><p>依赖状态</p><strong :class="healthTone">{{ health?.status ?? '未知' }}</strong><span>主服务、Redis 与 Telegram</span></article>
     </section>
     <section v-if="health" class="panel section-panel" aria-labelledby="overview-dependencies">
       <div class="section-heading"><div><h2 id="overview-dependencies">依赖检查</h2><p class="muted">查看支撑搜索与下载流程的服务是否可用。</p></div><span class="subtle">实时读取</span></div>
       <div class="dependency-grid"><div v-for="name in checkNames" :key="name" class="dependency-chip" :class="checkTone(health.checks[name])"><span>{{ checkLabels[name] }}</span><small>{{ checkLabelsByState[health.checks[name]] }}</small></div></div>
-    </section>
-    <section class="panel section-panel" aria-labelledby="quick-search-title">
-      <div class="section-heading"><div><p class="eyebrow">开始一个任务</p><h2 id="quick-search-title">快速搜索</h2></div><p class="muted">用当前启用的音源搜索歌曲，并试下载到服务端媒体目录。</p></div>
-      <form class="search-entry" @submit.prevent="search"><input v-model="query" aria-label="搜索关键词" placeholder="输入歌曲名称或艺术家…" /><button class="primary-button" type="submit" :disabled="!query.trim()">搜索</button></form>
     </section>
     <section class="shortcut-grid" aria-label="快捷入口"><RouterLink v-for="link in shortcuts" :key="link.to" :to="link.to" class="panel shortcut-card"><span><strong>{{ link.title }}</strong><small>{{ link.detail }}</small></span><b aria-hidden="true">→</b></RouterLink></section>
   </div>

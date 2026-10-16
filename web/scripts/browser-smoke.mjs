@@ -108,7 +108,7 @@ try {
 
   await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
   await page.getByRole('heading', { name: '欢迎回来' }).waitFor({ state: 'visible' })
-  await page.screenshot({ path: path.join(artifactRoot, 'vue-login.png'), fullPage: true })
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-login.png'), fullPage: true, animations: 'disabled' })
   await page.getByLabel('用户名').fill('browser-smoke')
   await page.getByLabel('密码').fill('browser-smoke-password')
   await page.getByRole('button', { name: '登录', exact: true }).click()
@@ -126,12 +126,39 @@ try {
   assert.equal(await page.locator('html').getAttribute('data-appearance'), 'dark')
   assert.equal(await page.getByLabel('主题色').inputValue(), 'rose')
   await page.getByRole('heading', { name: '依赖检查', exact: true }).waitFor({ state: 'visible' })
-  await page.screenshot({ path: path.join(artifactRoot, 'vue-overview.png'), fullPage: true })
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-overview.png'), fullPage: true, animations: 'disabled' })
+  await page.getByRole('button', { name: '切换浅色模式', exact: true }).click()
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-overview-light.png'), fullPage: true, animations: 'disabled' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.waitForFunction(() => {
+    const sidebar = document.querySelector('.sidebar')
+    return sidebar && sidebar.getBoundingClientRect().right <= 0
+  })
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true,
+    'mobile overview must not scroll horizontally')
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-mobile-overview.png'), fullPage: true, animations: 'disabled' })
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.getByRole('button', { name: '切换深色模式', exact: true }).click()
 
   await page.goto(`${baseUrl}/dashboard/search/`, { waitUntil: 'domcontentloaded' })
+  await page.getByLabel('搜索关键词').waitFor({ state: 'visible' })
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-search-empty.png'), fullPage: true, animations: 'disabled' })
   await page.getByLabel('搜索关键词').fill('musicdl browser smoke')
   await page.getByRole('button', { name: '搜索', exact: true }).click()
   await page.getByRole('heading', { name: 'Browser Smoke Track' }).waitFor({ state: 'visible' })
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-search-results.png'), fullPage: true, animations: 'disabled' })
+  await page.getByRole('button', { name: '切换浅色模式', exact: true }).click()
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-search-results-light.png'), fullPage: true, animations: 'disabled' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.waitForFunction(() => {
+    const sidebar = document.querySelector('.sidebar')
+    return sidebar && sidebar.getBoundingClientRect().right <= 0
+  })
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true,
+    'mobile search results must not scroll horizontally')
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-mobile-search.png'), fullPage: true, animations: 'disabled' })
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.getByRole('button', { name: '切换深色模式', exact: true }).click()
   await page.getByRole('button', { name: '下载到服务端媒体目录' }).click()
 
   const resolveStarted = await fetch(`${baseUrl}/__browser_fixture__/wait-for-resolve`, {
@@ -169,7 +196,7 @@ try {
     .getByText('已完成', { exact: true }).waitFor({ state: 'visible' })
   await historyPage.getByRole('region', { name: '下载并发' }).locator('dd').first()
     .filter({ hasText: /^0\s*\/\s*[1-9]\d*$/ }).waitFor({ state: 'visible' })
-  await historyPage.screenshot({ path: successScreenshot, fullPage: true })
+  await historyPage.screenshot({ path: successScreenshot, fullPage: true, animations: 'disabled' })
   await historyPage.close()
 
   await page.goto(`${baseUrl}/dashboard/sources/`, { waitUntil: 'domcontentloaded' })
@@ -299,7 +326,7 @@ try {
   })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true,
     'mobile page must not scroll horizontally')
-  await page.screenshot({ path: path.join(artifactRoot, 'vue-mobile-downloads.png'), fullPage: true })
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-mobile-downloads.png'), fullPage: true, animations: 'disabled' })
   await page.setViewportSize({ width: 1280, height: 900 })
 
   await page.getByLabel('后台导航', { exact: true }).getByRole('link', { name: '下载历史' }).click()
@@ -337,7 +364,7 @@ try {
   failure = error
   if (page) {
     try {
-      await page.screenshot({ path: failureScreenshot, fullPage: true })
+      await page.screenshot({ path: failureScreenshot, fullPage: true, animations: 'disabled' })
     } catch {
       // Preserve the original failure if the browser has already gone away.
     }
