@@ -1,16 +1,16 @@
 <template>
   <Teleport to="body">
-    <div class="fixed inset-0 z-50 overflow-y-auto bg-neutral-950/80 p-3 backdrop-blur-sm sm:p-6" @keydown.esc="close">
-      <section role="dialog" aria-modal="true" aria-labelledby="import-title" class="glass glass-highlight mx-auto my-3 w-full max-w-3xl rounded-2xl p-4 sm:my-8 sm:p-6">
+    <div class="source-import-backdrop fixed inset-0 z-50 overflow-y-auto bg-neutral-950/80 p-3 backdrop-blur-sm sm:p-6" @keydown.esc="close">
+      <section role="dialog" aria-modal="true" aria-labelledby="import-title" class="source-import-dialog glass mx-auto my-3 w-full max-w-3xl sm:my-8">
         <header class="mb-5 flex items-start justify-between gap-4">
-          <div><p class="text-xs font-semibold uppercase tracking-[0.16em] text-accent-300">Source catalog</p><h2 id="import-title" class="mt-1 text-xl font-semibold">导入音源脚本</h2>
+          <div><h2 id="import-title" class="text-xl font-semibold">导入音源脚本</h2>
             <p class="mt-1.5 text-sm leading-relaxed text-neutral-400">选择本地脚本或粘贴 URL 加入队列。服务会逐个分析身份和出口授权，确认后再安装。</p></div>
           <button type="button" class="icon-action shrink-0" aria-label="关闭导入音源" :disabled="busy && !canCancel" @click="close"><X :size="19" /></button>
         </header>
 
         <label class="group block cursor-pointer">
           <input type="file" accept=".js,.mjs,.cjs,.py" multiple class="sr-only" :disabled="busy" @change="onFiles">
-          <span class="block rounded-xl border border-dashed border-neutral-700 bg-neutral-900/20 p-5 text-center transition-colors group-hover:border-accent-400/50 sm:p-7">
+          <span class="source-upload-target block rounded-xl border border-dashed border-neutral-700 bg-neutral-900/20 p-5 text-center transition-colors group-hover:border-accent-400/50 sm:p-7">
             <UploadSimple :size="32" weight="duotone" class="mx-auto text-accent-300" />
             <span class="mt-2 block font-medium">选择 JS / PY 文件（可多选）</span>
             <span class="mt-1 block text-xs text-neutral-500">支持 lx-music 和普通脚本 · 每个文件不超过 {{ formatBytes(SOURCE_IMPORT_MAX_BYTES) }}</span>
@@ -37,7 +37,7 @@
             <div><h3 class="font-semibold">导入队列 <span class="ml-1 text-xs font-normal text-neutral-500">{{ batch.length }} / {{ SOURCE_IMPORT_MAX_URLS }}</span></h3><p class="mt-1 text-xs text-neutral-500">已安装 {{ completedCount }} · 当前可安装 {{ readyCount }}</p></div>
             <button type="button" class="action-primary" :disabled="busy || readyCount === 0" @click="installReady"><SpinnerGap v-if="busy && !canCancel" :size="17" class="animate-spin" /><Check v-else :size="17" weight="bold" />安装可用音源</button>
           </div>
-          <article v-for="(row, index) in batch" :key="row.key" class="rounded-xl border border-neutral-800 bg-neutral-900/25 p-3 sm:p-4">
+          <article v-for="(row, index) in batch" :key="row.key" class="source-batch-row rounded-xl border border-neutral-800 bg-neutral-900/25 p-3 sm:p-4">
             <div class="flex items-start justify-between gap-3">
               <div class="flex min-w-0 items-start gap-3"><span class="grid size-6 shrink-0 place-items-center rounded-md bg-neutral-800 text-xs text-neutral-400">{{ index + 1 }}</span>
                 <div class="min-w-0"><p class="break-words text-sm font-medium">{{ row.filename || '待获取文件名' }}</p><p class="mt-1 break-all font-mono text-[10px] text-neutral-500">{{ row.url }}</p></div>
@@ -336,14 +336,25 @@ async function installReady(): Promise<void> {
 </script>
 
 <style scoped>
-.field-control { min-height: 2.65rem; border: 1px solid var(--glass-border); border-radius: .75rem; padding: .55rem .8rem; background: color-mix(in srgb, var(--color-neutral-900) 55%, transparent); color: var(--color-neutral-100); transition: border-color 150ms; }
-.field-control:focus { border-color: var(--color-accent-400); outline: none; }
+.source-import-dialog { max-height: calc(100dvh - 24px); overflow-y: auto; border-radius: 18px; padding: 18px; box-shadow: 0 16px 48px rgb(0 0 0 / .2); }
+.source-upload-target { border-radius: 12px; background: color-mix(in srgb, var(--glass-bg) 70%, var(--color-neutral-950)); }
+.source-batch-row { border-radius: 12px; background: color-mix(in srgb, var(--glass-bg) 72%, var(--color-neutral-950)); }
+.field-control { min-width: 0; min-height: 44px; border: 1px solid var(--glass-border); border-radius: 12px; padding: 9px 12px; background: color-mix(in srgb, var(--color-neutral-950) 24%, var(--glass-bg)); color: var(--color-neutral-100); font-size: 13px; transition: border-color 150ms, box-shadow 150ms; }
+.field-control:focus { border-color: var(--color-accent-400); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent-400) 14%, transparent); }
 .field-control:disabled { cursor: not-allowed; opacity: .55; }
 .field-control::placeholder { color: var(--color-neutral-500); }
-.action-primary, .action-secondary { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; min-height: 2.45rem; border-radius: .75rem; padding: .55rem .8rem; font-size: .875rem; font-weight: 600; transition: background-color 150ms, border-color 150ms, opacity 150ms; }
+.action-primary, .action-secondary { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; min-height: 44px; border-radius: 12px; padding: 9px 13px; font-size: 12px; font-weight: 580; transition: background-color 150ms, border-color 150ms, opacity 150ms; }
 .action-primary { background: var(--color-accent-500); color: var(--color-neutral-100); }
 .action-primary:hover:not(:disabled) { background: var(--color-accent-600); }
 .action-secondary { border: 1px solid var(--glass-border); background: color-mix(in srgb, var(--color-neutral-900) 45%, transparent); color: var(--color-neutral-200); }
 .action-secondary:hover:not(:disabled) { background: var(--color-neutral-800); }
 .action-primary:disabled, .action-secondary:disabled { cursor: not-allowed; opacity: .5; }
+@media (max-width: 560px) {
+  .source-import-dialog { margin-top: 0; padding: 14px; }
+  .source-import-dialog header { margin-bottom: 16px; }
+  .source-import-dialog h2 { font-size: 18px; }
+  .source-upload-target { padding: 16px 12px; }
+  .source-batch-row { padding: 11px; }
+  .source-import-dialog footer { position: sticky; bottom: -14px; z-index: 1; margin-right: -14px; margin-left: -14px; padding: 12px 14px 14px; background: var(--glass-opaque-bg); }
+}
 </style>

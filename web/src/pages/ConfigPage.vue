@@ -1,10 +1,9 @@
 <template>
-  <section class="mx-auto w-full max-w-6xl space-y-6 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
-    <header class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+  <section class="admin-page config-page mx-auto w-full max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7 lg:px-8">
+    <header class="page-header flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
       <div>
-        <p class="mb-2 text-xs font-semibold tracking-wide text-accent-300">服务运行</p>
-        <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">运行配置</h1>
-        <p class="mt-1.5 max-w-3xl text-sm leading-relaxed text-neutral-400">
+        <h1 class="page-title">运行配置</h1>
+        <p class="page-description max-w-3xl">
           面板保存自己的配置覆盖；没有覆盖的字段继续使用部署变量或内置默认值。
         </p>
       </div>
@@ -246,7 +245,13 @@ onBeforeUnmount(() => { mounted = false })
 
 <style scoped>
 @reference "../styles/globals.css";
-.action-primary { @apply inline-flex items-center justify-center gap-2 rounded-xl bg-accent-500 px-4 py-2.5 text-sm font-semibold text-neutral-100 transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50; }
-.action-secondary { @apply inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/45 px-3.5 py-2.5 text-sm font-medium text-neutral-300 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50; }
+.admin-page { color: var(--color-neutral-100); font-size: 14px; }
+.page-header { min-height: 70px; }
+.page-title { margin: 0; color: var(--color-neutral-50); font-size: clamp(28px, 3vw, 34px); font-weight: 620; letter-spacing: -.045em; line-height: 1.2; }
+.page-description { margin: 7px 0 0; color: var(--color-neutral-400); font-size: 14px; line-height: 1.65; }
+.config-page :deep(.glass) { box-shadow: none; }
+.action-primary { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-accent-500 px-4 py-2 text-sm font-semibold text-neutral-100 transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50; }
+.action-secondary { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/45 px-3.5 py-2 text-sm font-medium text-neutral-300 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50; }
 .action-quiet { @apply rounded-lg px-2.5 py-2 text-sm text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-200 disabled:opacity-50; }
+@media (max-width: 560px) { .page-header { min-height: auto; } }
 </style>

@@ -71,6 +71,30 @@ async function assertSidebarFooterAtBottom(page) {
     `sidebar footer must stay at the viewport bottom (gap ${bottomGap}px)`)
 }
 
+async function captureResponsiveLayouts(page, name) {
+  const originalViewport = page.viewportSize()
+  for (const [size, viewport] of [
+    ['desktop', { width: 1280, height: 900 }],
+    ['tablet', { width: 820, height: 1050 }],
+    ['mobile', { width: 390, height: 844 }],
+  ]) {
+    await page.setViewportSize(viewport)
+    if (viewport.width <= 760) {
+      await page.waitForFunction(() => {
+        const sidebar = document.querySelector('.sidebar')
+        return sidebar && sidebar.getBoundingClientRect().right <= 0
+      })
+    }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true,
+      `${name} must fit the ${size} viewport without horizontal scrolling`)
+    await page.screenshot({ path: path.join(artifactRoot, `vue-${name}-${size}.png`), fullPage: true, animations: 'disabled' })
+    if (name === 'config') {
+      await page.screenshot({ path: path.join(artifactRoot, `vue-${name}-${size}-viewport.png`), animations: 'disabled' })
+    }
+  }
+  await page.setViewportSize(originalViewport)
+}
+
 const port = await freePort()
 const baseUrl = `http://127.0.0.1:${port}`
 let fixtureOutput = ''
@@ -168,6 +192,7 @@ try {
   await page.getByRole('button', { name: '搜索', exact: true }).click()
   await page.getByRole('heading', { name: 'Browser Smoke Track' }).waitFor({ state: 'visible' })
   await page.screenshot({ path: path.join(artifactRoot, 'vue-search-results.png'), fullPage: true, animations: 'disabled' })
+  await captureResponsiveLayouts(page, 'search')
   await page.getByRole('button', { name: '切换浅色模式', exact: true }).click()
   await page.screenshot({ path: path.join(artifactRoot, 'vue-search-results-light.png'), fullPage: true, animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
@@ -236,19 +261,30 @@ try {
   await page.getByRole('heading', { name: sourceId, exact: true, level: 3 }).waitFor({ state: 'visible' })
   await page.getByRole('button', { name: '关闭', exact: true }).click()
   await page.getByRole('heading', { name: '导入音源脚本', exact: true }).waitFor({ state: 'detached' })
+  await captureResponsiveLayouts(page, 'sources')
+  await page.getByRole('button', { name: '切换浅色模式', exact: true }).click()
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-sources-light.png'), fullPage: true, animations: 'disabled' })
+  await page.getByRole('button', { name: '切换深色模式', exact: true }).click()
 
   // Exercise the remaining pages through real session-protected service routes.
   await page.goto(`${baseUrl}/dashboard/health`, { waitUntil: 'domcontentloaded' })
   await page.getByRole('heading', { name: '健康监控', exact: true }).waitFor()
+  await captureResponsiveLayouts(page, 'health')
   await page.goto(`${baseUrl}/dashboard/logs`, { waitUntil: 'domcontentloaded' })
   await page.getByRole('heading', { name: '日志查看', exact: true }).waitFor()
   await page.getByRole('tab', { name: /^服务日志/ }).click()
   await page.getByRole('tab', { name: /^管理操作/ }).click()
+  await captureResponsiveLayouts(page, 'logs')
 
   await page.goto(`${baseUrl}/dashboard/config`, { waitUntil: 'domcontentloaded' })
   await page.getByRole('heading', { name: '运行配置', exact: true }).waitFor()
   const configField = page.getByLabel(/窗口内失败次数上限/)
   const originalLimit = await configField.inputValue()
+  await captureResponsiveLayouts(page, 'config')
+  await page.getByRole('button', { name: '切换浅色模式', exact: true }).click()
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-config-light.png'), fullPage: true, animations: 'disabled' })
+  await page.screenshot({ path: path.join(artifactRoot, 'vue-config-light-viewport.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: '切换深色模式', exact: true }).click()
   await configField.fill('6')
   const savedConfig = page.waitForResponse((response) =>
     new URL(response.url()).pathname === '/admin/config' && response.request().method() === 'PATCH',
@@ -287,6 +323,8 @@ try {
   })
   await page.goto(`${baseUrl}/dashboard/bots`, { waitUntil: 'domcontentloaded' })
   const telegram = page.getByRole('region', { name: 'Telegram 账号会话' })
+  await telegram.getByLabel(/手机号/).waitFor()
+  await captureResponsiveLayouts(page, 'bots')
   await telegram.getByLabel(/手机号/).fill('+8613800138000')
   await telegram.getByRole('button', { name: '发送登录码', exact: true }).click()
   await telegram.getByLabel('Telegram 发来的登录码').fill('12345')
@@ -362,6 +400,7 @@ try {
   await admission.locator('dd').first().waitFor({ state: 'visible' })
   const countsBeforeFailure = await admission.innerText()
   assert.match(countsBeforeFailure, /\d+\s*\/\s*\d+/)
+  await captureResponsiveLayouts(page, 'downloads')
 
   // Fault injection for observability follows its real initial response.
   // Telegram and the forced-change state above use explicit browser fixtures;

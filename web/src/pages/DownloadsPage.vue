@@ -1,10 +1,10 @@
 <template>
-  <section class="mx-auto w-full max-w-7xl space-y-6 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
-    <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+  <section class="admin-page downloads-page mx-auto w-full max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7 lg:px-8">
+    <header class="page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">下载历史</h1>
-        <p class="mt-1.5 max-w-2xl text-sm leading-relaxed text-neutral-400">查看下载结果、请求音质与换源过程。记录保存在服务端，刷新页面或重启后仍可查看。</p>
-        <p class="mt-2 text-xs text-neutral-500">最近 1,000 条已结束记录 · 列表每 5 秒更新</p>
+        <h1 class="page-title">下载历史</h1>
+        <p class="page-description">查看下载结果、请求音质与换源过程。记录保存在服务端，刷新页面或重启后仍可查看。</p>
+        <p class="page-meta">最近 1,000 条已结束记录 · 列表每 5 秒更新</p>
       </div>
       <div class="flex flex-wrap gap-2">
         <RouterLink to="/dashboard/search" class="action-secondary">搜索音乐</RouterLink>
@@ -14,7 +14,7 @@
 
     <p v-if="error" role="alert" class="rounded-xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">{{ error }}</p>
 
-    <section aria-label="下载并发" class="glass rounded-2xl p-4 sm:p-5">
+    <section aria-label="下载并发" class="capacity-panel glass">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 class="font-semibold">下载并发</h2>
@@ -25,11 +25,11 @@
       <p v-if="observabilityError" role="alert" class="mt-3 text-sm text-danger">{{ observabilityError }}</p>
       <p v-else-if="!observability" role="status" class="mt-3 text-sm text-neutral-400">正在读取瞬时状态…</p>
       <template v-else-if="observability.admission">
-        <dl class="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-          <div><dt class="text-neutral-500">占用名额</dt><dd class="mt-1 font-medium">{{ observability.admission.active }} / {{ observability.admission.active_limit }}</dd></div>
-          <div><dt class="text-neutral-500">等待下载</dt><dd class="mt-1 font-medium">{{ observability.admission.pending }} / {{ observability.admission.pending_limit }}</dd></div>
-          <div><dt class="text-neutral-500">等待切换音源</dt><dd class="mt-1 font-medium">{{ observability.admission.source_pending }}</dd></div>
-          <div><dt class="text-neutral-500">并发状态</dt><dd class="mt-1 font-medium" :class="observability.admission.active_limit_reached ? 'text-warning' : 'text-success'">{{ observability.admission.active_limit_reached ? '名额已满' : '名额未满' }}</dd></div>
+        <dl class="capacity-grid mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+          <div class="capacity-stat"><dt>占用名额</dt><dd>{{ observability.admission.active }} / {{ observability.admission.active_limit }}</dd></div>
+          <div class="capacity-stat"><dt>等待下载</dt><dd>{{ observability.admission.pending }} / {{ observability.admission.pending_limit }}</dd></div>
+          <div class="capacity-stat"><dt>等待切换音源</dt><dd>{{ observability.admission.source_pending }}</dd></div>
+          <div class="capacity-stat"><dt>并发状态</dt><dd :class="observability.admission.active_limit_reached ? 'text-warning' : 'text-success'">{{ observability.admission.active_limit_reached ? '名额已满' : '名额未满' }}</dd></div>
         </dl>
         <p v-if="observability.admission.possible_wait_factors.length" class="mt-3 text-xs text-neutral-400">整体等待可能与：{{ observability.admission.possible_wait_factors.map((factor) => WAIT_LABELS[factor] ?? factor).join('；') }}有关。</p>
         <p class="mt-2 text-xs text-neutral-500">此处显示整体占用，等待条件不对应某一首歌；单曲阶段见下方详情。</p>
@@ -47,12 +47,12 @@
           <RouterLink to="/dashboard/search" class="mt-5 inline-block text-sm text-accent-300 hover:underline">开始搜索音乐 →</RouterLink>
         </div>
         <template v-else-if="history?.items.length">
-          <div class="mb-3 flex justify-between gap-3 px-1 text-xs text-neutral-500"><span>共 {{ history.total }} 条记录</span><span>按开始时间从新到旧</span></div>
+          <div class="history-caption"><span>共 {{ history.total }} 条记录</span><span>按开始时间从新到旧</span></div>
           <ul class="space-y-3">
             <li v-for="item in history.items" :key="item.id">
               <button type="button" :aria-pressed="selected === item.id" :aria-label="'查看 ' + (item.title || '未命名歌曲') + ' 的下载记录'"
-                class="w-full rounded-xl border p-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400"
-                :class="selected === item.id ? 'border-accent-500 bg-accent-500/10' : 'border-neutral-800 bg-neutral-900/30 hover:border-neutral-600'" @click="choose(item.id)">
+                class="history-row w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400"
+                :class="selected === item.id ? 'history-row--selected' : ''" @click="choose(item.id)">
                 <span class="flex items-start justify-between gap-3">
                   <span class="min-w-0"><span class="block truncate font-medium">{{ item.title || '未命名歌曲' }}</span><span class="mt-1 block truncate text-sm text-neutral-400">{{ item.artist || '未知艺术家' }}</span></span>
                   <StatusBadge :status="item.status" />
@@ -293,10 +293,41 @@ const DownloadDetail = defineComponent({
 </script>
 
 <style scoped>
-.action-primary, .action-secondary { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; min-height: 2.5rem; border-radius: .75rem; padding: .55rem .85rem; font-size: .875rem; font-weight: 600; transition: background-color 150ms, border-color 150ms, opacity 150ms; }
-.action-primary { background: var(--color-accent-500); color: var(--color-neutral-100); }
+.downloads-page { color: var(--color-neutral-100); font-size: 14px; }
+.page-title { margin: 0; color: var(--color-neutral-50); font-size: clamp(28px, 3vw, 34px); font-weight: 620; letter-spacing: -.045em; line-height: 1.2; }
+.page-description { max-width: 45rem; margin: 7px 0 0; color: var(--color-neutral-400); font-size: 14px; line-height: 1.65; }
+.page-meta { margin: 7px 0 0; color: var(--color-neutral-500); font-size: 12px; line-height: 1.55; }
+.capacity-panel { border-radius: 18px; padding: 16px; box-shadow: none; background: color-mix(in srgb, var(--glass-bg) 72%, var(--color-neutral-950)); }
+.capacity-panel h2 { color: var(--color-neutral-100); font-size: 16px; font-weight: 620; }
+.capacity-grid { gap: 8px; }
+.capacity-stat { min-width: 0; border-left: 2px solid var(--glass-border); padding: 2px 10px; }
+.capacity-stat dt { color: var(--color-neutral-500); font-size: 12px; line-height: 1.45; }
+.capacity-stat dd { margin: 5px 0 0; color: var(--color-neutral-100); font-size: 15px; font-weight: 620; font-variant-numeric: tabular-nums; line-height: 1.35; }
+.history-caption { display: flex; justify-content: space-between; gap: 12px; margin: 0 1px 9px; color: var(--color-neutral-500); font-size: 12px; }
+.history-row { display: block; min-width: 0; border: 1px solid var(--glass-border); border-radius: 14px; padding: 14px; background: color-mix(in srgb, var(--glass-bg) 58%, var(--color-neutral-950)); transition: border-color 140ms, background-color 140ms; }
+.history-row:hover { border-color: color-mix(in srgb, var(--color-neutral-500) 42%, var(--glass-border)); }
+.history-row--selected { border-color: color-mix(in srgb, var(--color-accent-500) 60%, var(--glass-border)); background: color-mix(in srgb, var(--color-accent-500) 8%, var(--glass-bg)); }
+.history-row > span:nth-of-type(2) { color: var(--color-neutral-500); font-size: 12px; line-height: 1.55; }
+.history-row > span:nth-of-type(3) { font-size: 12px; line-height: 1.55; }
+.downloads-page nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.downloads-page nav > span { color: var(--color-neutral-500); font-size: 12px; }
+.downloads-page :deep(section[aria-label="下载详情"]) { border-radius: 18px; border-color: var(--glass-border); padding: 16px; box-shadow: none; }
+.downloads-page :deep(section[aria-label="下载详情"] h2) { font-size: 16px; font-weight: 620; }
+.downloads-page :deep(section[aria-label="下载详情"] dl) { gap: 8px 14px; font-size: 12px; }
+.downloads-page :deep(section[aria-label="下载详情"] dd) { min-width: 0; color: var(--color-neutral-200); overflow-wrap: anywhere; }
+.downloads-page :deep(section[aria-label="下载详情"] ol li) { border-color: var(--glass-border); font-size: 12px; }
+.action-primary, .action-secondary { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; min-height: 44px; border-radius: 12px; padding: 9px 13px; font-size: 12px; font-weight: 580; transition: background-color 150ms, border-color 150ms, opacity 150ms; }
+.action-primary { background: var(--color-accent-500); color: var(--color-neutral-50); }
 .action-primary:hover:not(:disabled) { background: var(--color-accent-600); }
 .action-secondary { border: 1px solid var(--glass-border); background: color-mix(in srgb, var(--color-neutral-900) 45%, transparent); color: var(--color-neutral-200); }
 .action-secondary:hover:not(:disabled) { background: var(--color-neutral-800); }
 .action-primary:disabled, .action-secondary:disabled { cursor: not-allowed; opacity: .5; }
+@media (max-width: 560px) {
+  .capacity-panel { padding: 14px; }
+  .capacity-stat { padding-right: 4px; padding-left: 8px; }
+  .capacity-stat dd { font-size: 14px; }
+  .history-caption { flex-wrap: wrap; font-size: 11px; }
+  .history-row { padding: 12px; }
+  .downloads-page nav > button { min-height: 40px; padding: 8px 10px; font-size: 11px; }
+}
 </style>

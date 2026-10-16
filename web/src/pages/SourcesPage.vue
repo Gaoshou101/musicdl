@@ -1,13 +1,12 @@
 <template>
-  <section class="mx-auto w-full max-w-7xl space-y-6 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
-    <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+  <section class="admin-page sources-page mx-auto w-full max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7 lg:px-8">
+    <header class="page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <p class="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-accent-300">Source registry</p>
-        <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">音源管理</h1>
-        <p class="mt-1.5 max-w-2xl text-sm leading-relaxed text-neutral-400">管理搜索与下载使用的音源脚本、出口权限和近期诊断结果。</p>
+        <h1 class="page-title">音源管理</h1>
+        <p class="page-description">管理搜索与下载使用的音源脚本、出口权限和近期诊断结果。</p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
-        <span class="rounded-full border border-neutral-800 bg-neutral-900/35 px-3 py-2 text-xs text-neutral-400">{{ enabledCount }} / {{ sources.length }} 已启用</span>
+        <span class="status-count">{{ enabledCount }} / {{ sources.length }} 已启用</span>
         <button type="button" class="action-secondary" :disabled="loading" aria-label="刷新音源列表" @click="loadSources"><ArrowClockwise :size="16" />刷新</button>
         <button type="button" class="action-primary" @click="showImport = true"><Plus :size="18" weight="bold" />导入音源</button>
       </div>
@@ -15,22 +14,22 @@
 
     <p v-if="notice" role="status" class="rounded-xl border px-4 py-3 text-sm" :class="notice.tone === 'ok' ? 'border-success/20 bg-success/10 text-success' : 'border-danger/20 bg-danger/10 text-danger'">{{ notice.text }}</p>
 
-    <section aria-label="音源诊断" class="glass rounded-2xl p-4 sm:p-5">
+    <section aria-label="音源诊断" class="admin-panel diagnostic-panel glass">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div class="max-w-2xl"><p class="text-xs font-semibold uppercase tracking-[0.14em] text-accent-300">Health check</p><h2 class="mt-1 text-lg font-semibold">诊断音源</h2>
+        <div class="max-w-2xl"><h2 class="section-title">诊断音源</h2>
           <p class="mt-1.5 text-sm leading-relaxed text-neutral-400">仅运行有界搜索与元数据解析，不下载音频；每项最多尝试 3 个查询。音源版本改变后旧结果会标记为过期。</p></div>
         <div class="grid gap-2 sm:grid-cols-[minmax(12rem,1fr)_auto]">
           <label class="sr-only" for="diagnostic-query">诊断查询</label>
           <input id="diagnostic-query" v-model="diagnosticQuery" aria-label="诊断查询" maxlength="500" placeholder="默认：周杰伦 晴天" class="field-control w-full text-sm">
-          <button type="button" class="action-primary justify-center" :disabled="diagnosticBusy || !sources.some((source) => source.enabled)" @click="checkAll">{{ diagnosticBusy ? '提交中…' : '诊断全部启用音源' }}</button>
+          <button type="button" class="diagnostic-submit action-primary justify-center" :disabled="diagnosticBusy || !sources.some((source) => source.enabled)" @click="checkAll">{{ diagnosticBusy ? '提交中…' : '诊断全部启用音源' }}</button>
         </div>
       </div>
       <p v-if="diagnostics" class="mt-3 text-xs text-neutral-500">并发 {{ diagnostics.active }}/{{ diagnostics.active_limit }} · 等待 {{ diagnostics.pending }}/{{ diagnostics.pending_limit }}<span v-if="activeJobCount"> · {{ activeJobCount }} 项正在进行</span></p>
     </section>
 
     <p v-if="loading" role="status" class="py-8 text-center text-sm text-neutral-400">正在读取音源…</p>
-    <section v-else aria-label="已注册的音源" class="space-y-3">
-      <article v-for="source in sources" :key="source.id" class="glass rounded-2xl p-4 sm:p-5">
+    <section v-else aria-label="已注册的音源" class="source-list space-y-3">
+      <article v-for="source in sources" :key="source.id" class="source-card glass">
         <form v-if="editing === source.id" class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_8rem_8rem_auto_auto] sm:items-end" @submit.prevent="saveEditing(source)">
           <label class="text-xs text-neutral-400">显示名称
             <input v-model="form.name" :placeholder="source.id" :aria-label="'显示名称 ' + source.id" class="field-control mt-1 w-full text-sm">
@@ -45,7 +44,7 @@
           <button type="button" class="action-secondary justify-center" @click="editing = null"><X :size="17" />取消</button>
         </form>
         <template v-else>
-          <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div class="flex flex-col gap-4">
             <div class="flex min-w-0 flex-1 gap-3 sm:gap-4">
               <div class="grid size-11 shrink-0 place-items-center rounded-xl bg-accent-500/10 text-accent-300"><MusicNote :size="22" weight="duotone" /></div>
               <div class="min-w-0 flex-1">
@@ -71,7 +70,7 @@
                 </div>
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:w-auto xl:grid-cols-5">
+            <div class="source-actions grid grid-cols-2 gap-2 sm:grid-cols-3 xl:flex xl:flex-wrap">
               <button type="button" class="action-secondary justify-center px-2 text-xs" :disabled="!source.enabled || diagnosticBusy || Boolean(activeBySource[source.id])" :title="'执行有界搜索和元数据解析，不下载文件'" :aria-label="'诊断 ' + (source.name || source.id)" @click="checkOne(source)">诊断</button>
               <button type="button" class="action-secondary justify-center px-2 text-xs" :title="source.enabled ? '停用该音源' : '启用该音源'" :aria-label="source.enabled ? '停用该音源' : '启用该音源'" @click="toggleEnabled(source)"><Power :size="16" />{{ source.enabled ? '停用' : '启用' }}</button>
               <button type="button" class="action-secondary justify-center px-2 text-xs" :disabled="checking[source.id]" title="实测该渠道能否提供无损音质" aria-label="实测该渠道的无损能力" @click="checkLossless(source)"><SpinnerGap v-if="checking[source.id]" :size="16" class="animate-spin" /><Waveform v-else :size="16" />无损检查</button>
@@ -82,7 +81,7 @@
         </template>
       </article>
 
-      <div v-if="sources.length === 0" class="glass rounded-2xl px-6 py-12 text-center">
+      <div v-if="sources.length === 0" class="empty-panel glass">
         <FileCode :size="40" weight="duotone" class="mx-auto text-neutral-500" />
         <h2 class="mt-3 font-semibold">暂无音源</h2><p class="mt-1 text-sm text-neutral-400">导入 lx-music 格式的 JS 脚本即可开始搜索与下载。</p>
         <button type="button" class="action-primary mt-5" @click="showImport = true">导入第一个音源</button>
@@ -368,10 +367,26 @@ function dateTime(value: number | string | null): string {
 </script>
 
 <style scoped>
-.field-control { min-height: 2.65rem; border: 1px solid var(--glass-border); border-radius: .75rem; padding: .55rem .8rem; background: color-mix(in srgb, var(--color-neutral-900) 55%, transparent); color: var(--color-neutral-100); transition: border-color 150ms; }
-.field-control:focus { border-color: var(--color-accent-400); outline: none; }
+.admin-page { color: var(--color-neutral-100); font-size: 14px; }
+.page-header { min-height: 70px; }
+.page-title { margin: 0; color: var(--color-neutral-50); font-size: clamp(28px, 3vw, 34px); font-weight: 620; letter-spacing: -.045em; line-height: 1.2; }
+.page-description { max-width: 42rem; margin: 7px 0 0; color: var(--color-neutral-400); font-size: 14px; line-height: 1.65; }
+.section-title { margin: 0; color: var(--color-neutral-100); font-size: 17px; font-weight: 620; letter-spacing: -.025em; }
+.status-count { display: inline-flex; min-height: 36px; align-items: center; border: 1px solid var(--glass-border); border-radius: 999px; padding: 0 12px; color: var(--color-neutral-400); font-size: 12px; }
+.admin-panel { border-radius: 18px; padding: 16px; box-shadow: none; }
+.diagnostic-panel { background: color-mix(in srgb, var(--glass-bg) 72%, var(--color-neutral-950)); }
+.diagnostic-submit { flex-shrink: 0; white-space: nowrap; }
+.source-list { display: grid; gap: 10px; }
+.source-card { min-width: 0; border-radius: 18px; padding: 15px; box-shadow: none; transition: border-color 150ms; }
+.source-card h3 { color: var(--color-neutral-100); font-size: 15px; font-weight: 620; letter-spacing: -.015em; }
+.source-card .source-actions { align-content: start; }
+.source-card .source-actions button { min-height: 40px; border-radius: 11px; padding-right: 10px; padding-left: 10px; font-size: 11px; }
+.source-card .rounded-md { border-radius: 7px; }
+.empty-panel { border-radius: 18px; padding: 34px 20px; text-align: center; }
+.field-control { min-width: 0; min-height: 44px; border: 1px solid var(--glass-border); border-radius: 12px; padding: 9px 12px; background: color-mix(in srgb, var(--color-neutral-950) 24%, var(--glass-bg)); color: var(--color-neutral-100); font-size: 13px; transition: border-color 150ms, box-shadow 150ms; }
+.field-control:focus { border-color: var(--color-accent-400); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent-400) 14%, transparent); }
 .field-control:disabled { cursor: not-allowed; opacity: .55; }
-.action-primary, .action-secondary, .action-danger { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; min-height: 2.45rem; border-radius: .75rem; padding: .55rem .8rem; font-size: .875rem; font-weight: 600; transition: background-color 150ms, border-color 150ms, opacity 150ms; }
+.action-primary, .action-secondary, .action-danger { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; min-height: 44px; border-radius: 12px; padding: 9px 13px; font-size: 12px; font-weight: 580; transition: background-color 150ms, border-color 150ms, opacity 150ms; }
 .action-primary { background: var(--color-accent-500); color: var(--color-neutral-100); }
 .action-primary:hover:not(:disabled) { background: var(--color-accent-600); }
 .action-secondary { border: 1px solid var(--glass-border); background: color-mix(in srgb, var(--color-neutral-900) 45%, transparent); color: var(--color-neutral-200); }
@@ -379,4 +394,9 @@ function dateTime(value: number | string | null): string {
 .action-danger { border: 1px solid color-mix(in srgb, var(--color-danger) 22%, transparent); background: color-mix(in srgb, var(--color-danger) 9%, transparent); color: var(--color-danger); }
 .action-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 18%, transparent); }
 .action-primary:disabled, .action-secondary:disabled, .action-danger:disabled { cursor: not-allowed; opacity: .5; }
+@media (max-width: 560px) {
+  .admin-panel { padding: 14px; }
+  .source-card { padding: 13px; }
+  .source-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 </style>

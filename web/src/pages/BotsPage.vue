@@ -1,15 +1,14 @@
 <template>
-  <section class="mx-auto w-full max-w-6xl space-y-6 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
-    <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+  <section class="admin-page bots-page mx-auto w-full max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7 lg:px-8">
+    <header class="page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <p class="mb-2 text-xs font-semibold tracking-wide text-accent-300">Bot 接入</p>
-        <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">Bot 管理</h1>
-        <p class="mt-1.5 max-w-2xl text-sm leading-relaxed text-neutral-400">
+        <h1 class="page-title">Bot 管理</h1>
+        <p class="page-description max-w-2xl">
           管理参与音乐搜索的 Telegram Bot，并查看负责调用它们的账号会话。
         </p>
       </div>
       <div class="flex items-center gap-2">
-        <span class="rounded-full border border-neutral-800 bg-neutral-900/35 px-3 py-2 text-xs text-neutral-400">
+        <span class="status-count">
           {{ enabledCount }} / {{ bots.length }} 已启用
         </span>
         <button type="button" class="action-primary" :disabled="initialLoadPending" @click="openAdd">
@@ -25,9 +24,9 @@
     <TelegramAccountCard />
 
     <section aria-labelledby="bots-list-title" class="space-y-3">
-      <div class="flex items-center justify-between gap-3 px-1">
+      <div class="bots-list-header flex items-center justify-between gap-3 px-1">
         <div>
-          <h2 id="bots-list-title" class="text-lg font-semibold">已注册的 Bot</h2>
+          <h2 id="bots-list-title" class="section-title">已注册的 Bot</h2>
           <p class="mt-0.5 text-xs text-neutral-500">标识 ID 在管理端保持稳定；用户名、模板、优先级和超时控制调用方式。</p>
         </div>
         <button type="button" class="icon-action" :disabled="loading" aria-label="刷新 Bot 列表" @click="loadBots">
@@ -369,9 +368,23 @@ onBeforeUnmount(() => { mounted = false })
 
 <style scoped>
 @reference "../styles/globals.css";
+.admin-page { color: var(--color-neutral-100); font-size: 14px; }
+.page-header { min-height: 70px; }
+.page-title { margin: 0; color: var(--color-neutral-50); font-size: clamp(28px, 3vw, 34px); font-weight: 620; letter-spacing: -.045em; line-height: 1.2; }
+.page-description { margin: 7px 0 0; color: var(--color-neutral-400); font-size: 14px; line-height: 1.65; }
+.section-title { margin: 0; color: var(--color-neutral-100); font-size: 17px; font-weight: 620; letter-spacing: -.025em; }
+.status-count { display: inline-flex; min-height: 36px; align-items: center; border: 1px solid var(--glass-border); border-radius: 999px; padding: 0 12px; color: var(--color-neutral-400); font-size: 12px; }
+.bots-page :deep(.glass) { box-shadow: none; }
+.bots-list-header .icon-action { flex-shrink: 0; white-space: nowrap; }
 .field-group { @apply flex min-w-0 flex-col gap-1.5 text-sm font-medium text-neutral-300; }
 .field-group small { @apply text-xs font-normal leading-relaxed text-neutral-500; }
-.field-input { @apply w-full rounded-xl border border-neutral-800 bg-neutral-900/55 px-3.5 py-2.5 text-sm text-neutral-100 transition focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/20; }
-.action-primary { @apply inline-flex items-center justify-center gap-2 rounded-xl bg-accent-500 px-4 py-2.5 text-sm font-semibold text-neutral-100 transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50; }
-.action-secondary, .icon-action { @apply inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-sm font-medium text-neutral-300 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50; }
+.field-input { @apply min-h-11 w-full rounded-xl border border-neutral-800 bg-neutral-900/55 px-3.5 py-2 text-sm text-neutral-100 transition focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/20; }
+.action-primary { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-accent-500 px-4 py-2 text-sm font-semibold text-neutral-100 transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50; }
+.action-secondary, .icon-action { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-sm font-medium text-neutral-300 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50; }
+@media (max-width: 560px) {
+  .page-header { min-height: auto; }
+  .status-count { min-height: 40px; }
+  .bots-list-header { align-items: stretch; flex-direction: column; gap: 8px; }
+  .bots-list-header .icon-action { align-self: flex-end; }
+}
 </style>
