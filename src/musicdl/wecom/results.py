@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from collections.abc import Iterable, Sequence
+from itertools import islice
 
 from musicdl.media.models import DownloadResult
 from musicdl.sources.quality import format_bytes, bitrate_kbps
@@ -15,9 +16,9 @@ from musicdl.sources.models import Candidate, normalize_text
 # an unreadable name still beats hiding where the bytes will come from.
 PLATFORM_NAMES = {"kg": "酷狗", "kw": "酷我", "tx": "QQ音乐", "wy": "网易云"}
 
-# One row is ``1. title — artist《album》  ·  duration  ·  quality  ·  size  ·  catalogue``.
+# A candidate is a compact two-line card: identity first, catalogue details second.
 TITLE_ARTIST = " — "
-META_SEPARATOR = "  ·  "
+META_SEPARATOR = " · "
 SELECTION_PROMPT = "\n\n回复序号下载。"
 NO_RESULTS_TEXT = "没有找到匹配结果。"
 # A query somebody pasted by mistake may not spend the whole reply on itself.
@@ -25,6 +26,11 @@ HEADER_QUERY_LIMIT = 40
 # What a header has to leave behind: the smallest listing ``format_results``
 # will render at all.
 MIN_LISTING_BYTES = 128
+_ELLIPSIS = "…"
+_VERSION_MARKER = re.compile(
+    r"(?i)\b(?:live(?:\s+(?:version|recording))?|cover|instrumental(?:\s+version)?)\b"
+    r"|现场(?:演唱会)?(?:版)?|翻唱(?:版)?|伴奏(?:版)?|纯音乐"
+)
 
 
 def platform_name(value: str | None) -> str:
@@ -44,17 +50,13 @@ def _duration(value: int | None) -> str:
 
 
 def _quality(candidate: Candidate) -> str:
-    """``FLAC 1411kbps``, or whichever half of it the channel actually stated."""
+    """State the catalogue's advertised format without implying byte validation."""
     parts = []
     if candidate.format:
-        parts.append(candidate.format.upper())
+        parts.append(_safe_text(candidate.format).upper())
     if candidate.bitrate is not None:
-        parts.append(f"{candidate.bitrate}kbps")
-    return " ".join(parts)
-
-
-def _size(candidate: Candidate) -> str:
-    return format_bytes(candidate.size)
+        parts.append(f"{candidate.bitrate} kbps")
+    return f"标称 {' '.join(parts)}" if parts else ""
 
 
 def quality_summary(result) -> str:
@@ -84,23 +86,111 @@ def success_message(result: DownloadResult) -> str:
     return f"下载成功：{result.relative_path}（{details}）"
 
 
-def _album(candidate: Candidate) -> str:
-    """``《album》``, unless the album only repeats the song it belongs to."""
-    album = candidate.album
-    if not album or album.casefold() == candidate.title.casefold():
+def _album(candidate: Candidate, *, useful: bool) -> str:
+    """Include an album only when it distinguishes repeated title/artist rows."""
+    album = _safe_text(candidate.album) if candidate.album else ""
+    title = _safe_text(candidate.title)
+    if not useful or not album or album.casefold() == title.casefold():
         return ""
-    return f"《{album}》"
+    return f"专辑《{album}》"
 
 
-def _meta(candidate: Candidate) -> list[str]:
-    """What tells two rows with one title and artist apart."""
-    return [part for part in (_duration(candidate.duration), _quality(candidate),
-                              _size(candidate), platform_name(candidate.platform)) if part]
+def _row(index: int, title: str, artist: str, meta: Sequence[str]) -> str:
+    identity = f"{index}. {title}{TITLE_ARTIST}{artist}"
+    return identity + ("\n  " + META_SEPARATOR.join(meta) if meta else "")
 
 
-def _row(index: int, title: str, artist: str, album: str, meta: Sequence[str]) -> str:
-    return f"{index}. {title}{TITLE_ARTIST}{artist}{album}" + "".join(
-        META_SEPARATOR + part for part in meta)
+def _safe_text(value: str) -> str:
+    """Replace invalid UTF-16 surrogate code points before measuring/sending UTF-8."""
+    return value.encode("utf-8", errors="replace").decode("utf-8")
+
+
+def _byte_length(value: str) -> int:
+    return len(value.encode("utf-8"))
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    """Clip at Unicode code-point boundaries and visibly mark the omitted tail."""
+    value = _safe_text(value)
+    if _byte_length(value) <= max_bytes:
+        return value
+    marker = _ELLIPSIS if max_bytes >= _byte_length(_ELLIPSIS) else "."
+    content_budget = max(0, max_bytes - _byte_length(marker))
+    result: list[str] = []
+    used = 0
+    for char in value:
+        size = _byte_length(char)
+        if used + size > content_budget:
+            break
+        result.append(char)
+        used += size
+    return "".join(result) + marker
+
+
+def _version_suffix(value: str) -> str:
+    """Return a terminal version marker such as ``(Live)`` when present."""
+    for match in reversed(tuple(_VERSION_MARKER.finditer(value))):
+        tail = value[match.end():]
+        if tail.strip(" \t)]】）}·.-—"):
+            continue
+        start = match.start()
+        while start and value[start - 1] in " \t([{【（-—":
+            start -= 1
+        suffix = value[start:]
+        if _byte_length(suffix) <= 64:
+            return suffix
+    return ""
+
+
+def _truncate_title(value: str, max_bytes: int) -> str:
+    value = _safe_text(value)
+    if _byte_length(value) <= max_bytes:
+        return value
+    suffix = _version_suffix(value)
+    suffix_bytes = _byte_length(suffix)
+    if suffix and max_bytes >= suffix_bytes + _byte_length(_ELLIPSIS):
+        prefix = value[:-len(suffix)]
+        return _truncate_utf8(prefix, max_bytes - suffix_bytes) + suffix
+    return _truncate_utf8(value, max_bytes)
+
+
+def _minimum_text_budget(value: str, *, title: bool) -> int:
+    value = _safe_text(value)
+    if title:
+        suffix = _version_suffix(value)
+        if suffix:
+            return min(_byte_length(value), _byte_length(suffix) + _byte_length(_ELLIPSIS))
+    if not value:
+        return 0
+    return min(_byte_length(value), _byte_length(value[0]) + _byte_length(_ELLIPSIS))
+
+
+def _fit_names(title: str, artist: str, max_bytes: int) -> tuple[str, str] | None:
+    """Share a tight name budget across title and artist instead of losing one."""
+    title, artist = _safe_text(title), _safe_text(artist)
+    title_size, artist_size = _byte_length(title), _byte_length(artist)
+    if title_size + artist_size <= max_bytes:
+        return title, artist
+    title_min = _minimum_text_budget(title, title=True)
+    artist_min = _minimum_text_budget(artist, title=False)
+    if title_min + artist_min > max_bytes:
+        return None
+
+    extra = max_bytes - title_min - artist_min
+    title_room, artist_room = title_size - title_min, artist_size - artist_min
+    total_room = title_room + artist_room
+    title_extra = min(title_room, (extra * title_room // total_room) if total_room else 0)
+    artist_extra = min(artist_room, extra - title_extra)
+    leftover = extra - title_extra - artist_extra
+    if leftover:
+        add_title = min(leftover, title_room - title_extra)
+        title_extra += add_title
+        leftover -= add_title
+        artist_extra += min(leftover, artist_room - artist_extra)
+
+    return (_truncate_title(title, title_min + title_extra),
+            _truncate_utf8(artist, artist_min + artist_extra))
+
 
 def _bounded(value: int, low: int, high: int, code: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
@@ -108,61 +198,67 @@ def _bounded(value: int, low: int, high: int, code: str) -> int:
     return value
 
 
-def _fits(rows: Sequence[str], row: str, max_bytes: int) -> bool:
-    return len("\n".join((*rows, row)).encode("utf-8")) <= max_bytes
-
-
-def _fit_row(index: int, candidate: Candidate, rows: Sequence[str], max_bytes: int) -> str | None:
-    """One row, giving up what it can spare until it fits the budget.
-
-    What one row can spare, in the order it gives it up: the catalogue, the
-    size, the quality, the running time, the album, and only then a character of
-    the title or the artist, the two fields a row cannot lose.  A row that cannot fit even
-    then is not rendered -- and neither is anything after it, because a listing
-    with a hole in its numbering reads as the wrong answer to the number above
-    it.
-    """
-    title, artist = candidate.title, candidate.artist
-    album, meta = _album(candidate), _meta(candidate)
-
-    def render() -> str:
-        return _row(index, title, artist, album, meta)
-
-    while not _fits(rows, render(), max_bytes):
-        if meta:
-            meta.pop()
-        elif album:
+def _fit_row(index: int, candidate: Candidate, rows: Sequence[str], max_bytes: int,
+             *, row_limit: int, show_album: bool = False) -> str | None:
+    """Fit one numbered card, keeping identity and labelling source quality."""
+    used = _byte_length("\n".join(rows)) + (1 if rows else 0)
+    budget = min(row_limit, max_bytes - used)
+    if budget <= 0:
+        return None
+    title, artist = _safe_text(candidate.title), _safe_text(candidate.artist)
+    duration = _duration(candidate.duration)
+    quality = _quality(candidate)
+    source = platform_name(candidate.platform)
+    if source:
+        source = f"来源 {source}"
+    album = _album(candidate, useful=show_album)
+    while True:
+        meta = [part for part in (duration, quality, source, album) if part]
+        rendered = _row(index, title, artist, meta)
+        if _byte_length(rendered) <= budget:
+            return rendered
+        if album:
             album = ""
-        elif len(title) > 1 or len(artist) > 1:
-            longest = max((title, artist), key=lambda value: len(value.encode("utf-8")))
-            if longest == title:
-                title = title[:-1]
-            else:
-                artist = artist[:-1]
+            continue
+        if source:
+            source = ""
+            continue
+        fixed = _row(index, "", "", meta)
+        fitted = _fit_names(title, artist, budget - _byte_length(fixed))
+        if fitted is not None:
+            return _row(index, *fitted, meta)
+        if quality:
+            quality = ""
+        elif duration:
+            duration = ""
         else:
             return None
-    return render()
 
 
 def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_bytes: int = 2048,
                    start_index: int = 1) -> str:
-    """One short line per candidate, never more than ``max_bytes`` of UTF-8.
-
-    A row leads with what a person chooses by -- the title, the artist, the
-    album -- and spends whatever room is left on the running time, the quality,
-    the size and the catalogue.  A field the channel did not state is left out instead
-    of printed as ``未知``: ten rows of one catalogue's placeholders is what
-    made the reply unreadable.
-    """
+    """Two-line identity/details cards, bounded by UTF-8 bytes and row count."""
     _bounded(max_items, 1, 100, "invalid_max_items")
     _bounded(max_bytes, MIN_LISTING_BYTES, 2048, "invalid_max_bytes")
     _bounded(start_index, 1, 100, "invalid_start_index")
+    candidates = tuple(islice(candidates, min(max_items, 101 - start_index)))
+    if not candidates:
+        return ""
+    row_limit = max(MIN_LISTING_BYTES, max_bytes // len(candidates))
+    albums: dict[tuple[str, str], set[str | None]] = {}
+    for candidate in candidates:
+        key = (_safe_text(candidate.title).casefold(), _safe_text(candidate.artist).casefold())
+        album = _safe_text(candidate.album).casefold() if candidate.album else None
+        albums.setdefault(key, set()).add(album)
+
     rows: list[str] = []
     for offset, candidate in enumerate(candidates):
         index = start_index + offset
-        if offset >= max_items or index > 100:
+        if index > 100:
             break
-        row = _fit_row(index, candidate, rows, max_bytes)
+        key = (_safe_text(candidate.title).casefold(), _safe_text(candidate.artist).casefold())
+        show_album = len(albums[key]) > 1
+        row = _fit_row(index, candidate, rows, max_bytes, row_limit=row_limit, show_album=show_album)
         if row is None:
             break
         rows.append(row)
@@ -171,7 +267,7 @@ def format_results(candidates: Iterable[Candidate], *, max_items: int = 10, max_
 
 def _query_line(query: str, total: int) -> str:
     """What was searched, so a corrected phrase is visible as a corrected answer."""
-    name = normalize_text(query)
+    name = normalize_text(_safe_text(query))
     if not name:
         return ""
     if len(name) > HEADER_QUERY_LIMIT:
@@ -218,7 +314,7 @@ def selection_pages(query: str, candidates: Iterable[Candidate], *, max_items: i
     _bounded(max_bytes, 512, 2048, "invalid_max_bytes")
     if not isinstance(query, str):
         raise ValueError("invalid_query")
-    rows = tuple(candidates)[:100]
+    rows = tuple(islice(candidates, 100))
     if not rows:
         return (NO_RESULTS_TEXT,)
     plain = selection_message(query, rows, max_items=max_items, max_bytes=max_bytes, notice=notice)
@@ -239,7 +335,7 @@ def selection_pages(query: str, candidates: Iterable[Candidate], *, max_items: i
         if not listing:
             break
         pages.append(listing)
-        offset += len(listing.splitlines())
+        offset += sum(bool(re.match(r"^[0-9]+[.] ", line)) for line in listing.splitlines())
     return tuple((header if index == 1 else _header(query, len(rows), ""))
                  + f"第 {index}/{len(pages)} 页" + chr(10) * 2 + listing + tail
                  for index, listing in enumerate(pages, 1))

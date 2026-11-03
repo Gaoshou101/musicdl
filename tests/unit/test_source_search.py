@@ -467,6 +467,127 @@ def test_explicit_artist_request_outranks_a_higher_native_position():
         SourceRegistry([SourceEntry("a", "1", source)]), "泪海 许茹芸"))
 
     assert result.candidates[0].item_id == "original"
+
+
+def test_explicit_version_in_parentheses_matches_the_requested_recording():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="studio", title="夜曲",
+                      artist="周杰伦", format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="live", title="夜曲（Live）",
+                      artist="周杰伦", format="mp3", bitrate=128),
+            Candidate(source_id="a", source_version="1", item_id="instrumental",
+                      title="夜曲 - Instrumental", artist="周杰伦", format="mp3", bitrate=128),
+        ]
+
+    registry = SourceRegistry([SourceEntry("a", "1", source)])
+
+    live = asyncio.run(search_sources(registry, "夜曲 Live"))
+    instrumental = asyncio.run(search_sources(registry, "周杰伦 夜曲 Instrumental"))
+
+    assert live.candidates[0].item_id == "live"
+    assert instrumental.candidates[0].item_id == "instrumental"
+
+
+def test_version_and_artist_tokens_match_in_either_order():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="studio", title="晴天",
+                      artist="周杰伦", format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="live", title="晴天（Live）",
+                      artist="周杰伦", format="mp3", bitrate=128),
+            Candidate(source_id="a", source_version="1", item_id="wrong-artist", title="晴天",
+                      artist="翻唱歌手", format="flac", bitrate=320),
+        ]
+
+    registry = SourceRegistry([SourceEntry("a", "1", source)])
+    with_version = asyncio.run(search_sources(registry, "晴天 周杰伦 live"))
+    artist_first = asyncio.run(search_sources(registry, "周杰伦 晴天 live"))
+    without_version = asyncio.run(search_sources(registry, "周杰伦 晴天"))
+
+    assert with_version.candidates[0].item_id == "live"
+    assert artist_first.candidates[0].item_id == "live"
+    assert without_version.candidates[0].item_id == "studio"
+
+
+def test_exact_artist_query_beats_an_incidental_title_substring():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="incidental-title",
+                      title="周杰伦 Live", artist="其他歌手", format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="artist-match",
+                      title="夜曲", artist="周杰伦", format="mp3", bitrate=128),
+        ]
+
+    result = asyncio.run(search_sources(
+        SourceRegistry([SourceEntry("a", "1", source)]), "周杰伦"))
+
+    assert result.candidates[0].item_id == "artist-match"
+
+
+@pytest.mark.parametrize(("punctuated", "plain"), [("AC/DC", "ACDC"), ("P!nk", "Pink")])
+def test_punctuation_folding_keeps_meaningful_word_boundaries(punctuated, plain):
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="punctuated", title=punctuated,
+                      artist="Artist", format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="plain", title=plain,
+                      artist="Artist", format="mp3", bitrate=128),
+        ]
+
+    result = asyncio.run(search_sources(
+        SourceRegistry([SourceEntry("a", "1", source)]), plain))
+
+    assert result.candidates[0].item_id == "plain"
+
+
+def test_title_and_artist_match_across_punctuation_and_parentheses():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="wrong", title="晴天",
+                      artist="翻唱歌手", format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="asked", title="晴天",
+                      artist="周杰伦", format="mp3", bitrate=128),
+        ]
+
+    registry = SourceRegistry([SourceEntry("a", "1", source)])
+    result = asyncio.run(search_sources(registry, "周杰伦（晴天）"))
+
+    assert result.candidates[0].item_id == "asked"
+
+
+def test_title_match_outranks_album_only_and_artist_only_matches():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="artist-only", title="Blue",
+                      artist="晴天乐队", album="晴天", format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="album-only", title="雨天",
+                      artist="其他歌手", album="晴天", format="flac", bitrate=1000),
+            Candidate(source_id="a", source_version="1", item_id="title-match", title="晴天 Live",
+                      artist="现场歌手", album="巡演", format="mp3", bitrate=128),
+        ]
+
+    result = asyncio.run(search_sources(
+        SourceRegistry([SourceEntry("a", "1", source)]), "晴天"))
+
+    assert [candidate.item_id for candidate in result.candidates] == [
+        "title-match", "artist-only", "album-only"]
+
+
+def test_exact_title_stays_ahead_of_partial_title_even_when_quality_is_lower():
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="partial", title="晴天 Live",
+                      artist="周杰伦", format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="exact", title="晴天",
+                      artist="周杰伦", format="mp3", bitrate=128),
+        ]
+
+    result = asyncio.run(search_sources(
+        SourceRegistry([SourceEntry("a", "1", source)]), "晴天"))
+
+    assert [candidate.item_id for candidate in result.candidates] == ["exact", "partial"]
+
 # -- a measured lossless channel, and the order it is allowed to change ------
 #
 # A probe measures whether a channel can serve lossless; that measurement is a
@@ -570,3 +691,19 @@ def test_a_capability_verdict_is_never_written_onto_a_candidate():
     assert result.candidates[0].qualities == ()
     assert result.candidates[0].format == "mp3"
 
+
+
+@pytest.mark.parametrize(("query", "exact_title", "wrong_title", "artist"), [
+    ("Love You Artist", "Love You", "You Love", "Artist"),
+    ("Bye Bye NSYNC", "Bye Bye", "Bye", "NSYNC"),
+])
+def test_ordered_title_and_repeated_words_beat_a_lossless_token_match(query, exact_title, wrong_title, artist):
+    async def source(query):
+        return [
+            Candidate(source_id="a", source_version="1", item_id="wrong", title=wrong_title,
+                      artist=artist, format="flac", bitrate=1411),
+            Candidate(source_id="a", source_version="1", item_id="exact", title=exact_title,
+                      artist=artist, format="mp3", bitrate=128),
+        ]
+    result = asyncio.run(search_sources(SourceRegistry([SourceEntry("a", "1", source)]), query))
+    assert [candidate.item_id for candidate in result.candidates] == ["exact", "wrong"]
