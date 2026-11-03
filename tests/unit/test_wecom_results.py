@@ -1,8 +1,8 @@
 import pytest
 
-from musicdl.sources.models import Candidate
+from musicdl.sources.models import Candidate, normalize_text
 from musicdl.wecom.results import (NO_RESULTS_TEXT, SELECTION_PROMPT, format_results,
-                                   platform_name, selection_message)
+                                   platform_name, selection_message, selection_pages)
 
 
 def row(**fields):
@@ -14,7 +14,7 @@ def row(**fields):
 
 def test_a_row_leads_with_what_a_person_chooses_by_and_names_the_catalogue():
     text = format_results([row(album="Album", duration=65, format="mp3", bitrate=320, platform="wy")])
-    assert text == "1. Song \u2014 Artist\u300aAlbum\u300b  \u00b7  1:05  \u00b7  MP3 320kbps  \u00b7  \u7f51\u6613\u4e91"
+    assert text == "1. Song — Artist\n  1:05 · 标称 MP3 320 kbps · 来源 网易云"
 
 
 def test_a_field_the_channel_never_stated_is_left_out_instead_of_called_unknown():
@@ -37,7 +37,7 @@ def test_a_reply_never_shows_the_escaping_an_upstream_left_in_a_name():
 
 
 def test_a_recording_past_the_hour_reads_as_a_clock():
-    assert format_results([row(duration=3723)]) == "1. Song \u2014 Artist  \u00b7  1:02:03"
+    assert format_results([row(duration=3723)]) == "1. Song — Artist\n  1:02:03"
 
 
 @pytest.mark.parametrize(("token", "expected"), [
@@ -68,9 +68,11 @@ def test_an_oversized_row_spends_the_budget_on_the_row_and_not_on_the_extras():
     wide = row(title="\u6b4c" * 40, artist="\u827a" * 40, album="\u4e13\u8f91" * 20, duration=200,
                format="flac", size=33554432, platform="wy")
     roomy, tight = format_results([wide]), format_results([wide], max_bytes=256)
-    assert all(part in roomy for part in ("\u4e13\u8f91", "FLAC", "32.0 MB", "\u7f51\u6613\u4e91"))
+    assert all(part in roomy for part in ("标称 FLAC", "来源 网易云"))
+    assert "专辑" not in roomy and "MB" not in roomy
     assert len(tight.encode("utf-8")) <= 256
-    assert tight == "1. " + "\u6b4c" * 40 + " \u2014 " + "\u827a" * 40
+    assert tight.startswith("1. ") and " — " in tight
+    assert "…" in tight and "标称 FLAC" in tight
 
 
 def test_a_row_that_cannot_fit_ends_the_listing_instead_of_leaving_a_hole():
@@ -86,13 +88,13 @@ def test_a_listing_is_byte_bounded_even_when_every_field_is_long():
                       duration=86400, bitrate=10000, format="flac", platform="kg") for index in range(4)]
     text = format_results(candidates)
     assert len(text.encode("utf-8")) <= 2048 and "\ufffd" not in text
-    for index, line in enumerate(text.splitlines(), 1):
+    for index, line in enumerate((line for line in text.splitlines() if not line.startswith("  ")), 1):
         assert line.startswith(f"{index}. ")
 
 
 def test_the_reply_says_what_was_searched_and_how_to_choose():
     text = selection_message("\u6674\u5929-\u5468\u6770\u4f26", [row(title="\u6674\u5929", artist="\u5468\u6770\u4f26", format="mp3")])
-    assert text == "\u300c\u6674\u5929-\u5468\u6770\u4f26\u300d\u627e\u5230 1 \u4e2a\u7ed3\u679c\uff1a\n\n1. \u6674\u5929 \u2014 \u5468\u6770\u4f26  \u00b7  MP3" + SELECTION_PROMPT
+    assert text == "\u300c\u6674\u5929-\u5468\u6770\u4f26\u300d\u627e\u5230 1 \u4e2a\u7ed3\u679c\uff1a\n\n1. \u6674\u5929 \u2014 \u5468\u6770\u4f26\n  标称 MP3" + SELECTION_PROMPT
     assert SELECTION_PROMPT.strip() == "\u56de\u590d\u5e8f\u53f7\u4e0b\u8f7d\u3002"
 
 
@@ -134,20 +136,75 @@ def test_selection_message_refuses_a_query_that_is_not_text_and_a_budget_without
     with pytest.raises(ValueError): selection_message("q", [row()], max_items=0)
 
 
-def test_size_is_between_quality_and_platform_and_zero_is_known():
-    assert format_results([row(duration=65, format="flac", size=33554432, platform="wy")]) == "1. Song — Artist  ·  1:05  ·  FLAC  ·  32.0 MB  ·  网易云"
-    assert format_results([row(size=0)]).endswith("0 B")
+def test_catalogue_size_is_omitted_even_when_zero_is_known():
+    text = format_results([row(duration=65, format="flac", size=33554432, platform="wy")])
+    assert text == "1. Song — Artist\n  1:05 · 标称 FLAC · 来源 网易云"
+    assert format_results([row(size=0)]) == "1. Song — Artist"
 
 
-def test_metadata_degrades_platform_then_size_then_quality_then_duration():
+def test_albums_only_disambiguate_repeated_title_and_artist():
+    text = format_results([row(album="Album A"), row(item_id="b", album="Album B"),
+                           row(item_id="c", title="Other", album="Album C")])
+    assert "专辑《Album A》" in text and "专辑《Album B》" in text
+    assert "Album C" not in text
+
+
+def test_names_are_refitted_after_metadata_is_removed():
     from musicdl.wecom.results import _fit_row
-    candidate = row(album="Album", duration=65, format="flac", size=33554432, platform="wy")
-    stages = ["1. Song — Artist《Album》  ·  1:05  ·  FLAC  ·  32.0 MB",
-              "1. Song — Artist《Album》  ·  1:05  ·  FLAC",
-              "1. Song — Artist《Album》  ·  1:05",
-              "1. Song — Artist《Album》", "1. Song — Artist"]
-    for expected in stages:
-        assert _fit_row(1, candidate, [], len(expected.encode("utf-8"))) == expected
+    candidate = row(title="歌" * 100 + " (Live)", artist="艺" * 100, duration=65, format="flac")
+    text = _fit_row(1, candidate, [], 30, row_limit=30)
+    assert text is not None and len(text.encode("utf-8")) <= 30
+    assert "(Live)" in text and " — " in text and "…" in text
+
+
+@pytest.mark.parametrize("version", ["(Live)", "(Cover)", "(Instrumental)", "（现场版）", "（伴奏版）"])
+def test_clipping_preserves_terminal_recording_version_and_both_names(version):
+    text = format_results([row(title="歌" * 100 + version, artist="艺" * 100)], max_bytes=128)
+    title, artist = text.split(". ", 1)[1].split(" — ")
+    assert title.endswith(normalize_text(version)) and "…" in title
+    assert artist.startswith("艺") and artist.endswith("…")
+    assert len(text.encode("utf-8")) <= 128
+
+
+def test_format_results_consumes_only_the_requested_candidates():
+    def bounded_candidates():
+        for index in range(3):
+            yield row(item_id=str(index))
+        raise AssertionError("consumed beyond max_items")
+    assert format_results(bounded_candidates(), max_items=3).count(". Song") == 3
+
+
+def test_number_limit_does_not_consume_an_extra_candidate():
+    def bounded_candidates():
+        yield row()
+        raise AssertionError("consumed beyond selection 100")
+    assert format_results(bounded_candidates(), start_index=100).startswith("100. ")
+    for invalid in (0, 101, True):
+        with pytest.raises(ValueError):
+            format_results([], start_index=invalid)
+
+
+def test_two_line_cards_paginate_without_skipping_selection_numbers():
+    candidates = [row(item_id=str(index), title=f"晴天{index}", artist="周杰伦", duration=269,
+                      format="mp3", bitrate=320, platform="wy") for index in range(12)]
+    pages = selection_pages("晴天 周杰伦", candidates, max_items=5, notice="重试提示")
+    identities = [line for page in pages for line in page.splitlines()
+                  if line.split(". ", 1)[0].isdigit()]
+    assert [int(line.split(".", 1)[0]) for line in identities] == list(range(1, 13))
+    assert len(pages) == 3 and "第 2/3 页" in pages[1] and "6. 晴天5" in pages[1]
+    assert "重试提示" in pages[0] and all("重试提示" not in page for page in pages[1:])
+    assert all("n 下一页，p 上一页" in page and len(page.encode("utf-8")) <= 2048 for page in pages)
+
+
+def test_long_cards_keep_all_frozen_rows_across_byte_bounded_pages():
+    candidates = [row(item_id=str(index), title="歌" * 100 + " (Live)", artist="艺" * 100,
+                      duration=200, format="flac", platform="wy") for index in range(17)]
+    pages = selection_pages("长标题", candidates, max_items=5, max_bytes=512)
+    identities = [line for page in pages for line in page.splitlines()
+                  if line.split(". ", 1)[0].isdigit()]
+    assert [int(line.split(".", 1)[0]) for line in identities] == list(range(1, 18))
+    assert all("(Live)" in line for line in identities)
+    assert all(len(page.encode("utf-8")) <= 512 for page in pages)
 
 
 @pytest.mark.parametrize(("extension", "media_type", "size", "label"), [
@@ -173,3 +230,9 @@ def test_success_message_displays_requested_and_actual_quality():
 
     assert success_message(result) == (
         "下载成功：Song.mp3（MP3 320kbps · 1.00 KB · 未取到无损 · 音质 FLAC→320K）")
+
+
+def test_surrogate_query_remains_sendable_utf8():
+    text = selection_message("query\ud800", [row(format="mp3")])
+    assert len(text.encode("utf-8")) <= 2048
+    assert "1. Song — Artist" in text and "query?" in text

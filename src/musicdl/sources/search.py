@@ -5,7 +5,8 @@ import hashlib
 import json
 import math
 import inspect
-import re
+import unicodedata
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -48,16 +49,12 @@ def search_result_version(candidates: Sequence[Candidate]) -> str:
     return hashlib.sha256(json.dumps(public, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-# The separators people type between a song and its artist, and the space a
-# catalogue answers with.  Folding them is what makes "晴天-周杰伦" the same
-# request as "晴天 周杰伦": the hyphenated spelling used to miss the
-# exact-match tier entirely, and the quality sort then buried the recording
-# somebody had asked for by name under louder versions of the same title.
-_SEPARATORS = re.compile(r"[\s\-–—―－_·/]+")
-
-
 def _search_key(value: str) -> str:
-    return _SEPARATORS.sub(" ", value.casefold()).strip()
+    """Compare catalogue text without letting punctuation split a match."""
+    folded = unicodedata.normalize("NFKC", value).casefold()
+    words = (" " if unicodedata.category(char)[0] in {"P", "Z"} else char
+             for char in folded)
+    return " ".join("".join(words).split())
 
 
 async def _invoke(entry: SourceEntry, query: str, timeout: float, max_results: int) -> tuple[SourceStatus, list[Candidate]]:
@@ -176,18 +173,36 @@ async def search_sources(registry: SourceRegistry, query: str, *, timeout: float
     }
 
     def relevance_of(candidate: Candidate) -> int:
-        """How close one candidate is to what was typed, separators aside.
+        """Rank exact songs, then title hits, before artist-only fragments.
 
         A song is asked for as "title artist" or as "artist title", and the
         catalogue answers with one spelling of it.  Both spellings are checked,
         because a request that names the artist exactly is an exact request
         whichever way round it was written.
         """
+        title = _search_key(candidate.title)
+        artist = _search_key(candidate.artist)
         as_written = _search_key(f"{candidate.title} {candidate.artist}")
         swapped = _search_key(f"{candidate.artist} {candidate.title}")
-        if q in (_search_key(candidate.title), as_written, swapped):
+        query_terms = Counter(q.split())
+        song_terms = Counter(as_written.split())
+        if q and q in (title, as_written, swapped):
             return 0
-        return 1 if q in as_written or q in swapped else 2
+        # An exact artist-only query is intentional too; keep it ahead of a
+        # coincidental substring in a different recording's title.
+        if q and q == artist:
+            return 1
+        if q and q in title:
+            return 2
+        # The title, artist, and version words may be typed in a different
+        # order (for example, "晴天 周杰伦 Live"). Require whole query terms
+        # from the title/artist pair, retaining repeated words. This fallback
+        # stays below ordered exact matches so reordered titles cannot tie them.
+        if len(query_terms) > 1 and query_terms <= song_terms:
+            return 3
+        if q and (q in artist or q in as_written or q in swapped):
+            return 4
+        return 5
 
     def ordering(row):
         relevance, c, entry = row
