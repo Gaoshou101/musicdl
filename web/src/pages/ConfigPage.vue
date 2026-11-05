@@ -1,5 +1,5 @@
 <template>
-  <section class="admin-page config-page mx-auto w-full max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7 lg:px-8">
+  <section class="admin-page config-page">
     <header class="page-header flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
       <div>
         <h1 class="page-title">运行配置</h1>
@@ -29,8 +29,8 @@
     </div>
 
     <template v-else-if="report">
-      <p v-if="error" role="alert" class="rounded-xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">{{ error }} · 当前显示最近一次成功读取的配置。</p>
-      <p v-if="message" role="status" class="rounded-xl border px-4 py-3 text-sm" :class="message.type === 'success' ? 'border-success/20 bg-success/10 text-success' : message.type === 'error' ? 'border-danger/20 bg-danger/10 text-danger' : 'border-neutral-700 bg-neutral-800/50 text-neutral-300'">
+      <p v-if="error" role="alert" class="inline-message inline-message--danger">{{ error }} · 当前显示最近一次成功读取的配置。</p>
+      <p v-if="message" role="status" class="inline-message" :class="message.type === 'success' ? 'inline-message--success' : message.type === 'error' ? 'inline-message--danger' : ''">
         {{ message.text }}
       </p>
 
@@ -245,13 +245,12 @@ onBeforeUnmount(() => { mounted = false })
 
 <style scoped>
 @reference "../styles/globals.css";
-.admin-page { color: var(--color-neutral-100); font-size: 14px; }
 .page-header { min-height: 70px; }
-.page-title { margin: 0; color: var(--color-neutral-50); font-size: clamp(28px, 3vw, 34px); font-weight: 620; letter-spacing: -.045em; line-height: 1.2; }
-.page-description { margin: 7px 0 0; color: var(--color-neutral-400); font-size: 14px; line-height: 1.65; }
-.config-page :deep(.glass) { box-shadow: none; }
-.action-primary { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-accent-500 px-4 py-2 text-sm font-semibold text-neutral-100 transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50; }
-.action-secondary { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/45 px-3.5 py-2 text-sm font-medium text-neutral-300 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50; }
-.action-quiet { @apply rounded-lg px-2.5 py-2 text-sm text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-200 disabled:opacity-50; }
+.config-page :deep(.glass.rounded-2xl) { border-radius: var(--panel-radius); }
+.config-page :deep(.bg-accent-500\/15) { border: 1px solid color-mix(in oklab, var(--color-accent-400) 22%, transparent); background: linear-gradient(160deg, color-mix(in oklab, var(--color-accent-500) 16%, transparent), color-mix(in oklab, var(--color-accent-500) 6%, transparent)); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08); }
+.config-page :deep(.rounded-xl.bg-neutral-800) { border: 1px solid var(--hairline); background: var(--surface-raised); }
+.config-page :deep(.rounded-md) { border: 1px solid var(--hairline); border-radius: var(--chip-radius); background: var(--surface-raised); }
+.config-page :deep(.border-neutral-800\/70) { border-color: var(--hairline); background: var(--surface-field); }
+.config-page :deep(.divide-neutral-800\/70 > :not(:last-child)) { border-color: var(--hairline); }
 @media (max-width: 560px) { .page-header { min-height: auto; } }
 </style>

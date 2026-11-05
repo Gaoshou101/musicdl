@@ -1,5 +1,5 @@
 <template>
-  <div class="mt-4 rounded-2xl border border-neutral-800/80 bg-neutral-900/30 p-4 sm:p-5">
+  <div class="ai-probe-card mt-4 rounded-2xl border border-neutral-800/80 bg-neutral-900/30 p-4 sm:p-5">
     <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
       <div class="flex items-start gap-3">
         <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-500/15 text-accent-300">
@@ -20,8 +20,8 @@
     </div>
 
     <p v-if="dirty" class="mt-3 text-xs text-warning">有未保存的改动；此测试检查的是已经保存的配置。</p>
-    <p v-if="failure" class="mt-3 rounded-xl border border-danger/20 bg-danger/10 px-3.5 py-3 text-sm text-danger" role="alert">{{ failure }}</p>
-    <div v-if="report" class="mt-4 rounded-xl border px-3.5 py-3" :class="report.ok ? 'border-success/25 bg-success/10' : 'border-danger/25 bg-danger/10'" role="status">
+    <p v-if="failure" class="inline-message inline-message--danger mt-3" role="alert">{{ failure }}</p>
+    <div v-if="report" class="inline-message mt-4" :class="report.ok ? 'inline-message--success' : 'inline-message--danger'" role="status">
       <div class="flex flex-wrap items-center gap-2">
         <CheckCircle v-if="report.ok" :size="18" weight="fill" class="text-success" />
         <WarningCircle v-else :size="18" weight="fill" class="text-danger" />
@@ -78,5 +78,8 @@ onBeforeUnmount(() => { mounted = false })
 
 <style scoped>
 @reference "../../styles/globals.css";
-.action-secondary { @apply inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/50 px-4 py-2.5 text-sm font-medium text-neutral-200 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50; }
+.ai-probe-card { border-color: var(--hairline); border-radius: var(--card-radius); background: var(--surface-raised); box-shadow: var(--shadow-raised); }
+.ai-probe-card .bg-accent-500\/15 { border: 1px solid color-mix(in oklab, var(--color-accent-400) 22%, transparent); background: linear-gradient(160deg, color-mix(in oklab, var(--color-accent-500) 16%, transparent), color-mix(in oklab, var(--color-accent-500) 6%, transparent)); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08); }
+.ai-probe-card .inline-message dd,.ai-probe-card .inline-message dt,.ai-probe-card .inline-message .text-neutral-400 { color: var(--color-neutral-300); }
+.ai-probe-card .inline-message dt { color: var(--color-neutral-400); }
 </style>

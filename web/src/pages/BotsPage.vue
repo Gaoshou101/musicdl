@@ -1,5 +1,5 @@
 <template>
-  <section class="admin-page bots-page mx-auto w-full max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7 lg:px-8">
+  <section class="admin-page bots-page">
     <header class="page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h1 class="page-title">Bot 管理</h1>
@@ -17,7 +17,7 @@
       </div>
     </header>
 
-    <p v-if="notice" role="status" class="rounded-xl border px-4 py-3 text-sm" :class="notice.tone === 'ok' ? 'border-success/20 bg-success/10 text-success' : 'border-danger/20 bg-danger/10 text-danger'">
+    <p v-if="notice" role="status" class="inline-message" :class="notice.tone === 'ok' ? 'inline-message--success' : 'inline-message--danger'">
       {{ notice.text }}
     </p>
 
@@ -29,7 +29,7 @@
           <h2 id="bots-list-title" class="section-title">已注册的 Bot</h2>
           <p class="mt-0.5 text-xs text-neutral-500">标识 ID 在管理端保持稳定；用户名、模板、优先级和超时控制调用方式。</p>
         </div>
-        <button type="button" class="icon-action" :disabled="loading" aria-label="刷新 Bot 列表" @click="loadBots">
+        <button type="button" class="action-secondary" :disabled="loading" aria-label="刷新 Bot 列表" @click="loadBots">
           <ArrowClockwise :size="17" :class="loading ? 'animate-spin' : ''" />刷新
         </button>
       </div>
@@ -58,7 +58,7 @@
               <p class="text-xs font-medium uppercase tracking-wide text-accent-300">编辑 Bot</p>
               <h3 class="mt-1 font-mono text-sm text-neutral-300">{{ bot.id }}</h3>
             </div>
-            <button type="button" class="icon-action" @click="cancelEdit">取消</button>
+            <button type="button" class="action-secondary" @click="cancelEdit">取消</button>
           </div>
           <div class="grid gap-4 md:grid-cols-2">
             <label class="field-group">
@@ -111,11 +111,11 @@
             </div>
           </div>
           <div class="flex shrink-0 items-center gap-2 sm:pl-4">
-            <button type="button" class="icon-action" :disabled="busyId === bot.id" :aria-label="bot.enabled ? '停用该 Bot' : '启用该 Bot'" @click="toggleEnabled(bot)">
+            <button type="button" class="action-secondary" :disabled="busyId === bot.id" :aria-label="bot.enabled ? '停用该 Bot' : '启用该 Bot'" @click="toggleEnabled(bot)">
               <Power :size="17" />{{ bot.enabled ? '停用' : '启用' }}
             </button>
-            <button type="button" class="icon-action" :disabled="busyId === bot.id" aria-label="编辑该 Bot" @click="startEdit(bot)"><PencilSimple :size="17" />编辑</button>
-            <button type="button" class="icon-action text-danger hover:bg-danger/10" :disabled="busyId === bot.id" aria-label="删除该 Bot" @click="removeBot(bot)"><Trash :size="17" />删除</button>
+            <button type="button" class="action-secondary" :disabled="busyId === bot.id" aria-label="编辑该 Bot" @click="startEdit(bot)"><PencilSimple :size="17" />编辑</button>
+            <button type="button" class="action-danger" :disabled="busyId === bot.id" aria-label="删除该 Bot" @click="removeBot(bot)"><Trash :size="17" />删除</button>
           </div>
         </div>
       </article>
@@ -368,23 +368,18 @@ onBeforeUnmount(() => { mounted = false })
 
 <style scoped>
 @reference "../styles/globals.css";
-.admin-page { color: var(--color-neutral-100); font-size: 14px; }
 .page-header { min-height: 70px; }
-.page-title { margin: 0; color: var(--color-neutral-50); font-size: clamp(28px, 3vw, 34px); font-weight: 620; letter-spacing: -.045em; line-height: 1.2; }
-.page-description { margin: 7px 0 0; color: var(--color-neutral-400); font-size: 14px; line-height: 1.65; }
-.section-title { margin: 0; color: var(--color-neutral-100); font-size: 17px; font-weight: 620; letter-spacing: -.025em; }
-.status-count { display: inline-flex; min-height: 36px; align-items: center; border: 1px solid var(--glass-border); border-radius: 999px; padding: 0 12px; color: var(--color-neutral-400); font-size: 12px; }
-.bots-page :deep(.glass) { box-shadow: none; }
-.bots-list-header .icon-action { flex-shrink: 0; white-space: nowrap; }
-.field-group { @apply flex min-w-0 flex-col gap-1.5 text-sm font-medium text-neutral-300; }
-.field-group small { @apply text-xs font-normal leading-relaxed text-neutral-500; }
-.field-input { @apply min-h-11 w-full rounded-xl border border-neutral-800 bg-neutral-900/55 px-3.5 py-2 text-sm text-neutral-100 transition focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/20; }
-.action-primary { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-accent-500 px-4 py-2 text-sm font-semibold text-neutral-100 transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50; }
-.action-secondary, .icon-action { @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-sm font-medium text-neutral-300 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50; }
+.bots-list-header .action-secondary { flex-shrink: 0; white-space: nowrap; }
+.bots-page :deep(.glass.rounded-2xl) { border-radius: var(--panel-radius); }
+.bots-page .rounded-full { border: 1px solid var(--hairline); }
+.bots-page .bg-success\/10 { border-color: color-mix(in oklab, var(--color-success) 32%, transparent); background: color-mix(in oklab, var(--color-success) 12%, transparent); }
+.bots-page .bg-neutral-800 { background: var(--surface-raised); }
+.bots-page .bg-neutral-800\/70 { border: 1px solid var(--hairline); border-radius: var(--chip-radius); background: var(--surface-raised); }
+.bots-page .bg-accent-500\/15 { border: 1px solid color-mix(in oklab, var(--color-accent-400) 22%, transparent); background: linear-gradient(160deg, color-mix(in oklab, var(--color-accent-500) 16%, transparent), color-mix(in oklab, var(--color-accent-500) 6%, transparent)); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08); }
 @media (max-width: 560px) {
   .page-header { min-height: auto; }
   .status-count { min-height: 40px; }
   .bots-list-header { align-items: stretch; flex-direction: column; gap: 8px; }
-  .bots-list-header .icon-action { align-self: flex-end; }
+  .bots-list-header .action-secondary { align-self: flex-end; }
 }
 </style>

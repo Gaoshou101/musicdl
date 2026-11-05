@@ -11,7 +11,7 @@
           <label for="overview-search">从一首歌开始</label>
           <div class="hero-search-controls">
             <input id="overview-search" v-model="query" aria-label="搜索关键词" placeholder="歌曲名称或艺术家" />
-            <button class="primary-button" type="submit" :disabled="!query.trim()">搜索音乐 <span aria-hidden="true">↗</span></button>
+            <button class="primary-button" type="submit" :disabled="!query.trim()">搜索音乐<PhArrowRight :size="15" weight="bold" aria-hidden="true" /></button>
           </div>
         </form>
       </div>
@@ -30,7 +30,7 @@
       <div class="section-heading"><div><h2 id="overview-dependencies">依赖检查</h2><p class="muted">查看支撑搜索与下载流程的服务是否可用。</p></div><span class="subtle">实时读取</span></div>
       <div class="dependency-grid"><div v-for="name in checkNames" :key="name" class="dependency-chip" :class="checkTone(health.checks[name])"><span>{{ checkLabels[name] }}</span><small>{{ checkLabelsByState[health.checks[name]] }}</small></div></div>
     </section>
-    <section class="shortcut-grid" aria-label="快捷入口"><RouterLink v-for="link in shortcuts" :key="link.to" :to="link.to" class="panel shortcut-card"><span><strong>{{ link.title }}</strong><small>{{ link.detail }}</small></span><b aria-hidden="true">→</b></RouterLink></section>
+    <section class="shortcut-grid" aria-label="快捷入口"><RouterLink v-for="link in shortcuts" :key="link.to" :to="link.to" class="panel shortcut-card"><span><strong>{{ link.title }}</strong><small>{{ link.detail }}</small></span><b aria-hidden="true"><PhArrowRight :size="15" weight="bold" /></b></RouterLink></section>
   </div>
 </template>
 
@@ -39,6 +39,7 @@ import { computed, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { errorMessage, listBots, listSources, readHealth, type CheckState, type HealthReport } from '@/lib/api'
 import { usePolling } from '@/composables/usePolling'
+import { PhArrowRight } from '@phosphor-icons/vue'
 const router = useRouter()
 const sources = ref({ total: 0, enabled: 0 })
 const bots = ref({ total: 0, enabled: 0 })

@@ -304,8 +304,12 @@ onUnmounted(() => {
 
 <style scoped>
 @reference "../../styles/globals.css";
-.field-label { @apply mb-1.5 block text-xs font-medium text-neutral-400; }
-.field-input { @apply w-full rounded-xl border border-neutral-800 bg-neutral-900/55 px-3.5 py-2.5 text-sm transition focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/20 disabled:opacity-60; }
-.action-primary { @apply inline-flex items-center justify-center gap-2 rounded-xl bg-accent-500 px-4 py-2.5 text-sm font-semibold text-neutral-100 transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50; }
-.action-secondary { @apply inline-flex items-center justify-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-xs font-medium text-neutral-300 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm; }
+.field-label { display: block; margin-bottom: 6px; color: var(--color-neutral-300); font-size: 12.5px; font-weight: 550; }
+.glass.rounded-2xl { border-radius: var(--panel-radius); }
+.rounded-full { border: 1px solid var(--hairline); font-weight: 600; }
+.rounded-full.bg-success\/10 { border-color: color-mix(in oklab, var(--color-success) 32%, transparent); background: color-mix(in oklab, var(--color-success) 12%, transparent); }
+.rounded-full.bg-warning\/10 { border-color: color-mix(in oklab, var(--color-warning) 32%, transparent); background: color-mix(in oklab, var(--color-warning) 12%, transparent); }
+.rounded-full.bg-danger\/10 { border-color: color-mix(in oklab, var(--color-danger) 32%, transparent); background: color-mix(in oklab, var(--color-danger) 12%, transparent); }
+.rounded-full.bg-neutral-800 { background: var(--surface-raised); }
+.bg-accent-500\/15 { border: 1px solid color-mix(in oklab, var(--color-accent-400) 22%, transparent); background: linear-gradient(160deg, color-mix(in oklab, var(--color-accent-500) 16%, transparent), color-mix(in oklab, var(--color-accent-500) 6%, transparent)); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08); }
 </style>

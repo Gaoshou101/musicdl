@@ -1,5 +1,5 @@
 <template>
-  <section class="admin-page sources-page mx-auto w-full max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7 lg:px-8">
+  <section class="admin-page sources-page">
     <header class="page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h1 class="page-title">音源管理</h1>
@@ -12,7 +12,7 @@
       </div>
     </header>
 
-    <p v-if="notice" role="status" class="rounded-xl border px-4 py-3 text-sm" :class="notice.tone === 'ok' ? 'border-success/20 bg-success/10 text-success' : 'border-danger/20 bg-danger/10 text-danger'">{{ notice.text }}</p>
+    <p v-if="notice" role="status" class="inline-message" :class="notice.tone === 'ok' ? 'inline-message--success' : 'inline-message--danger'">{{ notice.text }}</p>
 
     <section aria-label="音源诊断" class="admin-panel diagnostic-panel glass">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -367,36 +367,30 @@ function dateTime(value: number | string | null): string {
 </script>
 
 <style scoped>
-.admin-page { color: var(--color-neutral-100); font-size: 14px; }
 .page-header { min-height: 70px; }
-.page-title { margin: 0; color: var(--color-neutral-50); font-size: clamp(28px, 3vw, 34px); font-weight: 620; letter-spacing: -.045em; line-height: 1.2; }
-.page-description { max-width: 42rem; margin: 7px 0 0; color: var(--color-neutral-400); font-size: 14px; line-height: 1.65; }
-.section-title { margin: 0; color: var(--color-neutral-100); font-size: 17px; font-weight: 620; letter-spacing: -.025em; }
-.status-count { display: inline-flex; min-height: 36px; align-items: center; border: 1px solid var(--glass-border); border-radius: 999px; padding: 0 12px; color: var(--color-neutral-400); font-size: 12px; }
-.admin-panel { border-radius: 18px; padding: 16px; box-shadow: none; }
-.diagnostic-panel { background: color-mix(in srgb, var(--glass-bg) 72%, var(--color-neutral-950)); }
+.admin-panel { border-radius: var(--panel-radius); padding: 18px 20px; }
 .diagnostic-submit { flex-shrink: 0; white-space: nowrap; }
-.source-list { display: grid; gap: 10px; }
-.source-card { min-width: 0; border-radius: 18px; padding: 15px; box-shadow: none; transition: border-color 150ms; }
-.source-card h3 { color: var(--color-neutral-100); font-size: 15px; font-weight: 620; letter-spacing: -.015em; }
+.source-list { display: grid; gap: 12px; }
+.source-card { min-width: 0; border-radius: var(--panel-radius); padding: 16px 18px; transition: border-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out); }
+.source-card:hover { transform: translateY(-1px); border-color: color-mix(in oklab, var(--color-accent-400) 30%, var(--hairline)); }
+.source-card h3 { color: var(--color-neutral-100); font-size: 15px; font-weight: 640; letter-spacing: -.015em; }
 .source-card .source-actions { align-content: start; }
-.source-card .source-actions button { min-height: 40px; border-radius: 11px; padding-right: 10px; padding-left: 10px; font-size: 11px; }
-.source-card .rounded-md { border-radius: 7px; }
-.empty-panel { border-radius: 18px; padding: 34px 20px; text-align: center; }
-.field-control { min-width: 0; min-height: 44px; border: 1px solid var(--glass-border); border-radius: 12px; padding: 9px 12px; background: color-mix(in srgb, var(--color-neutral-950) 24%, var(--glass-bg)); color: var(--color-neutral-100); font-size: 13px; transition: border-color 150ms, box-shadow 150ms; }
-.field-control:focus { border-color: var(--color-accent-400); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent-400) 14%, transparent); }
-.field-control:disabled { cursor: not-allowed; opacity: .55; }
-.action-primary, .action-secondary, .action-danger { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; min-height: 44px; border-radius: 12px; padding: 9px 13px; font-size: 12px; font-weight: 580; transition: background-color 150ms, border-color 150ms, opacity 150ms; }
-.action-primary { background: var(--color-accent-500); color: var(--color-neutral-100); }
-.action-primary:hover:not(:disabled) { background: var(--color-accent-600); }
-.action-secondary { border: 1px solid var(--glass-border); background: color-mix(in srgb, var(--color-neutral-900) 45%, transparent); color: var(--color-neutral-200); }
-.action-secondary:hover:not(:disabled) { background: var(--color-neutral-800); }
-.action-danger { border: 1px solid color-mix(in srgb, var(--color-danger) 22%, transparent); background: color-mix(in srgb, var(--color-danger) 9%, transparent); color: var(--color-danger); }
-.action-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 18%, transparent); }
-.action-primary:disabled, .action-secondary:disabled, .action-danger:disabled { cursor: not-allowed; opacity: .5; }
+.source-card .source-actions button { min-height: 38px; padding-right: 11px; padding-left: 11px; font-size: 12px; }
+.source-card .rounded-md { border: 1px solid var(--hairline); border-radius: var(--chip-radius); padding: 3px 9px; font-weight: 600; letter-spacing: .01em; }
+.source-card .bg-neutral-800 { background: var(--surface-raised); }
+.source-card .bg-success\/15 { border-color: color-mix(in oklab, var(--color-success) 32%, transparent); background: color-mix(in oklab, var(--color-success) 12%, transparent); }
+.source-card .bg-warning\/15 { border-color: color-mix(in oklab, var(--color-warning) 32%, transparent); background: color-mix(in oklab, var(--color-warning) 12%, transparent); }
+.source-card .bg-danger\/15 { border-color: color-mix(in oklab, var(--color-danger) 32%, transparent); background: color-mix(in oklab, var(--color-danger) 12%, transparent); }
+.source-card .size-11 { border: 1px solid color-mix(in oklab, var(--color-accent-400) 22%, transparent); background: linear-gradient(160deg, color-mix(in oklab, var(--color-accent-500) 16%, transparent), color-mix(in oklab, var(--color-accent-500) 6%, transparent)); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08); }
+.source-card .rounded-lg { border-radius: var(--card-radius); }
+.source-card .bg-neutral-950\/40 { border-color: var(--hairline); background: var(--surface-field); }
+.empty-panel { border-radius: var(--panel-radius); padding: 34px 20px; text-align: center; }
 @media (max-width: 560px) {
   .admin-panel { padding: 14px; }
   .source-card { padding: 13px; }
   .source-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (pointer: coarse) {
+  .source-card .source-actions button { min-height: 44px; }
 }
 </style>
