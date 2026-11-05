@@ -12,8 +12,8 @@
           <select v-model="filter" aria-label="过滤条件" class="toolbar-select"><option value="all">全部</option><option value="failed">仅失败与异常</option></select>
         </label>
         <label class="check-line compact"><input v-model="autoScroll" type="checkbox" /><span>自动滚动</span></label>
-        <button v-if="tab === 'service'" class="secondary-button" type="button" @click="paused = !paused">{{ paused ? '▶ 继续' : 'Ⅱ 暂停' }}</button>
-        <button class="secondary-button" type="button" @click="refresh">↻ 刷新</button>
+        <button v-if="tab === 'service'" class="secondary-button" type="button" @click="paused = !paused"><PhPlay v-if="paused" :size="15" weight="fill" aria-hidden="true" /><PhPause v-else :size="15" weight="fill" aria-hidden="true" />{{ paused ? '继续' : '暂停' }}</button>
+        <button class="secondary-button" type="button" @click="refresh"><PhArrowsClockwise :size="16" weight="bold" aria-hidden="true" />刷新</button>
       </div>
     </header>
     <div class="log-tabs" role="tablist" aria-label="日志类型">
@@ -45,6 +45,7 @@ import { computed, onBeforeUnmount, ref, shallowReactive, watch } from 'vue'
 import { errorMessage, mediaUrl, readAudit, readEvents, readServiceLogs, type AuditEntry, type DownloadEvent, type Page, type ServiceLogEntry } from '@/lib/api'
 import { formatBytes, shortHash } from '@/lib/format'
 import { usePolling } from '@/composables/usePolling'
+import { PhArrowsClockwise, PhPause, PhPlay } from '@phosphor-icons/vue'
 import { clockTime, EVENT_POLL_MS, mergeServiceLogs, readTail, SERVICE_POLL_MS, visibleEventRows } from '@/lib/logs'
 
 type Tab = 'events' | 'audit' | 'service'
