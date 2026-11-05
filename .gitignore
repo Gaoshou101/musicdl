@@ -30,3 +30,15 @@ artifacts/
 data/
 music/
 plugins/uploads/
+
+# Ad-hoc pytest --basetemp directories and temp paths that a shell mangled
+# into the repository root (for example "UsersXuAppDataLocalTemp...").
+.pytest-tmp*/
+.pytest-temp*/
+.audit-pytest*/
+/UsersXu*/
+
+# Copies left behind by cloud-drive sync conflicts, and local tool state.
+*(conflict copy*
+.clfs_history/
+.gstack/
