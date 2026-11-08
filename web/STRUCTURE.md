@@ -14,7 +14,7 @@
 - `src/styles/`、`public/`：全局主题样式和项目品牌资源。`globals.css` 定义色板与
   设计令牌（`--surface-*` 表面层级、`--hairline`、`--shadow-*`、`--*-radius`、动效时长）；
   `app.css` 提供后台壳层和所有页面共用的类（`.page-*`、`.action-*`、`.field-*`、
-  `.inline-message`、`.panel`/`.glass`）。页面 `<style scoped>` 只保留页面特有规则，不要
+  `.inline-message`；`.panel` 在 `app.css` 中，兼容旧样式的 `.glass` 在 `globals.css` 中）。页面 `<style scoped>` 只保留页面特有规则，不要
   重复定义这些共用类。
 - `scripts/`：真实后端契约及 Playwright 浏览器回归入口。
 
