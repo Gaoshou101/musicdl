@@ -1,5 +1,5 @@
 <template>
-  <div class="grid gap-3 border-t border-neutral-800/65 py-4 md:grid-cols-[minmax(0,1fr)_19rem] md:items-start">
+  <div class="config-field grid gap-3 border-t border-neutral-800/65 py-4 md:grid-cols-[minmax(0,1fr)_19rem] md:items-start">
     <div class="min-w-0">
       <div class="flex flex-wrap items-center gap-2">
         <label :for="inputId" class="text-sm font-semibold text-neutral-200">{{ field.label }}</label>
@@ -12,11 +12,11 @@
         </span>
       </div>
       <p class="mt-1.5 text-sm leading-relaxed text-neutral-400">{{ field.help }}</p>
-      <p class="mt-1 font-mono text-[11px] text-neutral-500">{{ field.env }}</p>
+      <p class="mt-1 font-mono text-[10.5px] text-neutral-500">{{ field.env }}</p>
     </div>
 
     <div class="space-y-2">
-      <div v-if="pendingClear" class="flex items-center justify-between gap-3 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2.5 text-sm">
+      <div v-if="pendingClear" class="inline-message inline-message--warning flex items-center justify-between gap-3">
         <span class="text-warning">保存后恢复为部署值</span>
         <button type="button" class="text-xs font-medium text-neutral-300 transition hover:text-neutral-100 disabled:opacity-50" :disabled="disabled" @click="$emit('undoClear', field.key)">撤销</button>
       </div>
@@ -28,11 +28,11 @@
         :aria-checked="Boolean(draft)"
         :aria-label="field.label"
         :disabled="disabled"
-        class="relative h-7 w-12 rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-400"
-        :class="Boolean(draft) ? 'bg-accent-500' : 'bg-neutral-700'"
+        class="config-switch relative h-7 w-12 rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-400"
+        :class="Boolean(draft) ? 'bg-accent-500 config-switch--on' : 'bg-neutral-700'"
         @click="$emit('updateDraft', field.key, !Boolean(draft))"
       >
-        <span class="absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-all" :class="Boolean(draft) ? 'left-6' : 'left-1'" />
+        <span class="config-switch__knob absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-all" :class="Boolean(draft) ? 'left-6' : 'left-1'" />
       </button>
       <input
         v-else
@@ -88,6 +88,13 @@ const sourceClass = computed(() => ({
 
 <style scoped>
 @reference "../../styles/globals.css";
-.pill { @apply rounded-full px-2.5 py-1 text-[10px] font-semibold; }
-.field-input { @apply w-full rounded-xl border border-neutral-800 bg-neutral-900/55 px-3.5 py-2.5 text-sm transition focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/20; }
+.config-field { border-top-color: var(--hairline); }
+.pill { display: inline-flex; align-items: center; border: 1px solid var(--hairline); border-radius: var(--chip-radius); padding: 3px 9px; background: var(--surface-raised); font-size: 10.5px; font-weight: 600; letter-spacing: .02em; line-height: 1.4; }
+.pill.bg-success\/10 { border-color: color-mix(in oklab, var(--color-success) 32%, transparent); background: color-mix(in oklab, var(--color-success) 12%, transparent); }
+.pill.bg-warning\/10 { border-color: color-mix(in oklab, var(--color-warning) 32%, transparent); background: color-mix(in oklab, var(--color-warning) 12%, transparent); }
+.pill.bg-accent-500\/10,.pill.bg-accent-500\/15 { border-color: color-mix(in oklab, var(--color-accent-500) 30%, transparent); background: color-mix(in oklab, var(--color-accent-500) 12%, transparent); }
+.pill.bg-neutral-800,.pill.bg-neutral-800\/60 { background: var(--surface-raised); }
+.config-switch { border: 1px solid var(--hairline-strong); background: var(--surface-raised); box-shadow: inset 0 1px 2px rgb(0 0 0 / .12); transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+.config-switch--on { border-color: color-mix(in oklab, var(--color-accent-500) 70%, black); background: linear-gradient(180deg, color-mix(in oklab, var(--color-accent-500) 92%, white), color-mix(in oklab, var(--color-accent-500) 80%, black)); box-shadow: inset 0 1px 0 rgb(255 255 255 / .18); }
+.config-switch__knob { box-shadow: 0 1px 2px rgb(0 0 0 / .3), 0 0 0 1px rgb(0 0 0 / .06); }
 </style>

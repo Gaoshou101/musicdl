@@ -336,25 +336,18 @@ async function installReady(): Promise<void> {
 </script>
 
 <style scoped>
-.source-import-dialog { max-height: calc(100dvh - 24px); overflow-y: auto; border-radius: 18px; padding: 18px; box-shadow: 0 16px 48px rgb(0 0 0 / .2); }
-.source-upload-target { border-radius: 12px; background: color-mix(in srgb, var(--glass-bg) 70%, var(--color-neutral-950)); }
-.source-batch-row { border-radius: 12px; background: color-mix(in srgb, var(--glass-bg) 72%, var(--color-neutral-950)); }
-.field-control { min-width: 0; min-height: 44px; border: 1px solid var(--glass-border); border-radius: 12px; padding: 9px 12px; background: color-mix(in srgb, var(--color-neutral-950) 24%, var(--glass-bg)); color: var(--color-neutral-100); font-size: 13px; transition: border-color 150ms, box-shadow 150ms; }
-.field-control:focus { border-color: var(--color-accent-400); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent-400) 14%, transparent); }
-.field-control:disabled { cursor: not-allowed; opacity: .55; }
-.field-control::placeholder { color: var(--color-neutral-500); }
-.action-primary, .action-secondary { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; min-height: 44px; border-radius: 12px; padding: 9px 13px; font-size: 12px; font-weight: 580; transition: background-color 150ms, border-color 150ms, opacity 150ms; }
-.action-primary { background: var(--color-accent-500); color: var(--color-neutral-100); }
-.action-primary:hover:not(:disabled) { background: var(--color-accent-600); }
-.action-secondary { border: 1px solid var(--glass-border); background: color-mix(in srgb, var(--color-neutral-900) 45%, transparent); color: var(--color-neutral-200); }
-.action-secondary:hover:not(:disabled) { background: var(--color-neutral-800); }
-.action-primary:disabled, .action-secondary:disabled { cursor: not-allowed; opacity: .5; }
+.source-import-dialog { max-height: calc(100dvh - 24px); overflow-y: auto; border-radius: 22px; padding: 20px; box-shadow: var(--shadow-float); }
+.source-upload-target { border-radius: var(--card-radius); border-color: var(--hairline-strong); background: var(--surface-field); transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out); }
+.group:hover .source-upload-target { background: color-mix(in oklab, var(--color-accent-500) 5%, var(--surface-field)); }
+.source-batch-row { border-radius: var(--card-radius); border-color: var(--hairline); background: var(--surface-raised); box-shadow: var(--shadow-raised); }
+.source-import-dialog textarea.field-control { min-height: 96px; padding-top: 10px; padding-bottom: 10px; }
+.source-import-dialog .border-neutral-800 { border-color: var(--hairline); }
 @media (max-width: 560px) {
   .source-import-dialog { margin-top: 0; padding: 14px; }
   .source-import-dialog header { margin-bottom: 16px; }
   .source-import-dialog h2 { font-size: 18px; }
   .source-upload-target { padding: 16px 12px; }
   .source-batch-row { padding: 11px; }
-  .source-import-dialog footer { position: sticky; bottom: -14px; z-index: 1; margin-right: -14px; margin-left: -14px; padding: 12px 14px 14px; background: var(--glass-opaque-bg); }
+  .source-import-dialog footer { position: sticky; bottom: -14px; z-index: 1; margin-right: -14px; margin-left: -14px; padding: 12px 14px 14px; background: var(--surface-panel); }
 }
 </style>

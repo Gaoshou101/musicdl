@@ -1,5 +1,5 @@
 <template>
-  <section class="admin-page downloads-page mx-auto w-full max-w-7xl space-y-5 px-4 py-5 sm:px-6 sm:py-7 lg:px-8">
+  <section class="admin-page downloads-page">
     <header class="page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h1 class="page-title">下载历史</h1>
@@ -12,7 +12,7 @@
       </div>
     </header>
 
-    <p v-if="error" role="alert" class="rounded-xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">{{ error }}</p>
+    <p v-if="error" role="alert" class="inline-message inline-message--danger">{{ error }}</p>
 
     <section aria-label="下载并发" class="capacity-panel glass">
       <div class="flex flex-wrap items-start justify-between gap-3">
@@ -293,41 +293,35 @@ const DownloadDetail = defineComponent({
 </script>
 
 <style scoped>
-.downloads-page { color: var(--color-neutral-100); font-size: 14px; }
-.page-title { margin: 0; color: var(--color-neutral-50); font-size: clamp(28px, 3vw, 34px); font-weight: 620; letter-spacing: -.045em; line-height: 1.2; }
-.page-description { max-width: 45rem; margin: 7px 0 0; color: var(--color-neutral-400); font-size: 14px; line-height: 1.65; }
-.page-meta { margin: 7px 0 0; color: var(--color-neutral-500); font-size: 12px; line-height: 1.55; }
-.capacity-panel { border-radius: 18px; padding: 16px; box-shadow: none; background: color-mix(in srgb, var(--glass-bg) 72%, var(--color-neutral-950)); }
-.capacity-panel h2 { color: var(--color-neutral-100); font-size: 16px; font-weight: 620; }
+.capacity-panel { border-radius: var(--panel-radius); padding: 18px 20px; }
+.capacity-panel h2 { color: var(--color-neutral-100); font-size: 16px; font-weight: 640; letter-spacing: -.015em; }
 .capacity-grid { gap: 8px; }
-.capacity-stat { min-width: 0; border-left: 2px solid var(--glass-border); padding: 2px 10px; }
+.capacity-stat { min-width: 0; border: 1px solid var(--hairline); border-radius: var(--card-radius); padding: 10px 12px; background: var(--surface-raised); box-shadow: var(--shadow-raised); }
 .capacity-stat dt { color: var(--color-neutral-500); font-size: 12px; line-height: 1.45; }
-.capacity-stat dd { margin: 5px 0 0; color: var(--color-neutral-100); font-size: 15px; font-weight: 620; font-variant-numeric: tabular-nums; line-height: 1.35; }
+.capacity-stat dd { margin: 5px 0 0; color: var(--color-neutral-100); font-size: 16px; font-weight: 640; font-variant-numeric: tabular-nums; letter-spacing: -.01em; line-height: 1.35; }
 .history-caption { display: flex; justify-content: space-between; gap: 12px; margin: 0 1px 9px; color: var(--color-neutral-500); font-size: 12px; }
-.history-row { display: block; min-width: 0; border: 1px solid var(--glass-border); border-radius: 14px; padding: 14px; background: color-mix(in srgb, var(--glass-bg) 58%, var(--color-neutral-950)); transition: border-color 140ms, background-color 140ms; }
-.history-row:hover { border-color: color-mix(in srgb, var(--color-neutral-500) 42%, var(--glass-border)); }
-.history-row--selected { border-color: color-mix(in srgb, var(--color-accent-500) 60%, var(--glass-border)); background: color-mix(in srgb, var(--color-accent-500) 8%, var(--glass-bg)); }
+.history-row { display: block; min-width: 0; border: 1px solid var(--hairline); border-radius: var(--card-radius); padding: 14px; background: var(--surface-raised); box-shadow: var(--shadow-raised); transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out); }
+.history-row:hover { border-color: var(--hairline-strong); background: var(--surface-hover); }
+.history-row--selected,.history-row--selected:hover { border-color: color-mix(in oklab, var(--color-accent-500) 55%, var(--hairline)); background: color-mix(in oklab, var(--color-accent-500) 10%, var(--surface-raised)); box-shadow: var(--ring-accent); }
+.history-row:focus-visible { outline: 2px solid var(--color-accent-400); outline-offset: 2px; }
 .history-row > span:nth-of-type(2) { color: var(--color-neutral-500); font-size: 12px; line-height: 1.55; }
 .history-row > span:nth-of-type(3) { font-size: 12px; line-height: 1.55; }
 .downloads-page nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .downloads-page nav > span { color: var(--color-neutral-500); font-size: 12px; }
-.downloads-page :deep(section[aria-label="下载详情"]) { border-radius: 18px; border-color: var(--glass-border); padding: 16px; box-shadow: none; }
-.downloads-page :deep(section[aria-label="下载详情"] h2) { font-size: 16px; font-weight: 620; }
+.downloads-page :deep(section[aria-label="下载详情"]) { border-radius: var(--panel-radius); border-color: var(--hairline); padding: 18px 20px; }
+.downloads-page :deep(section[aria-label="下载详情"] h2) { font-size: 16px; font-weight: 640; letter-spacing: -.015em; }
 .downloads-page :deep(section[aria-label="下载详情"] dl) { gap: 8px 14px; font-size: 12px; }
 .downloads-page :deep(section[aria-label="下载详情"] dd) { min-width: 0; color: var(--color-neutral-200); overflow-wrap: anywhere; }
-.downloads-page :deep(section[aria-label="下载详情"] ol li) { border-color: var(--glass-border); font-size: 12px; }
-.action-primary, .action-secondary { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; min-height: 44px; border-radius: 12px; padding: 9px 13px; font-size: 12px; font-weight: 580; transition: background-color 150ms, border-color 150ms, opacity 150ms; }
-.action-primary { background: var(--color-accent-500); color: var(--color-neutral-50); }
-.action-primary:hover:not(:disabled) { background: var(--color-accent-600); }
-.action-secondary { border: 1px solid var(--glass-border); background: color-mix(in srgb, var(--color-neutral-900) 45%, transparent); color: var(--color-neutral-200); }
-.action-secondary:hover:not(:disabled) { background: var(--color-neutral-800); }
-.action-primary:disabled, .action-secondary:disabled { cursor: not-allowed; opacity: .5; }
+.downloads-page :deep(section[aria-label="下载详情"] ol li) { border-color: var(--hairline); font-size: 12px; }
 @media (max-width: 560px) {
   .capacity-panel { padding: 14px; }
-  .capacity-stat { padding-right: 4px; padding-left: 8px; }
+  .capacity-stat { padding: 8px 10px; }
   .capacity-stat dd { font-size: 14px; }
   .history-caption { flex-wrap: wrap; font-size: 11px; }
   .history-row { padding: 12px; }
-  .downloads-page nav > button { min-height: 40px; padding: 8px 10px; font-size: 11px; }
+  .downloads-page nav > button { min-height: 38px; padding: 0 10px; font-size: 11px; }
+}
+@media (pointer: coarse) {
+  .downloads-page nav > button { min-height: 44px; }
 }
 </style>

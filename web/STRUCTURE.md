@@ -11,7 +11,11 @@
 - `src/composables/`：请求串行化、页面可见性及卸载清理等轮询逻辑。
 - `src/stores/`：会话和主题；兼容已有 `tgmusic.theme` 用户偏好。
 - `src/lib/`：唯一 API 客户端、格式化和音源导入工具。
-- `src/styles/`、`public/`：全局主题样式和项目品牌资源。
+- `src/styles/`、`public/`：全局主题样式和项目品牌资源。`globals.css` 定义色板与
+  设计令牌（`--surface-*` 表面层级、`--hairline`、`--shadow-*`、`--*-radius`、动效时长）；
+  `app.css` 提供后台壳层和所有页面共用的类（`.page-*`、`.action-*`、`.field-*`、
+  `.inline-message`、`.panel`/`.glass`）。页面 `<style scoped>` 只保留页面特有规则，不要
+  重复定义这些共用类。
 - `scripts/`：真实后端契约及 Playwright 浏览器回归入口。
 
 ## 开发

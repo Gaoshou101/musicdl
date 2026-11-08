@@ -1,11 +1,11 @@
 <template>
   <div class="page-stack">
-    <header class="page-heading-row"><div><p class="eyebrow">运行状况</p><h1>健康监控</h1><p class="muted">依赖状态每 30 秒自动更新一次。</p></div><button type="button" class="secondary-button" :disabled="refreshing" @click="refreshHealth()">↻ {{ refreshing ? '正在刷新' : '刷新' }}</button></header>
+    <header class="page-heading-row"><div><p class="eyebrow">运行状况</p><h1>健康监控</h1><p class="muted">依赖状态每 30 秒自动更新一次。</p></div><button type="button" class="secondary-button" :disabled="refreshing" @click="refreshHealth()"><PhArrowsClockwise :size="16" weight="bold" aria-hidden="true" />{{ refreshing ? '正在刷新' : '刷新' }}</button></header>
     <p v-if="error" role="alert" class="notice notice-error">{{ error }}</p>
     <div v-if="loading && !health" class="panel loading-panel"><span class="spinner" />正在读取健康状态</div>
     <template v-if="health">
-      <div class="panel overall-health" :class="health.status === 'degraded' ? 'tone-warning' : 'tone-success'"><span class="health-emblem">{{ health.status === 'degraded' ? '!' : '✓' }}</span><div><strong>{{ health.status === 'degraded' ? '存在异常的依赖项' : '所有依赖项正常' }}</strong><p class="muted">整体状态 <b>{{ health.status }}</b>：只有「异常」和「不可用」会让整体降级，「无需使用」不算故障。</p></div></div>
-      <section class="health-check-grid" aria-label="依赖检查"><article v-for="check in checks" :key="check.name" class="panel health-check"><div class="health-check-heading"><span class="summary-icon">⌁</span><div><h2>{{ check.title }}</h2><p class="muted">{{ check.detail }}</p></div></div><p class="state-line" :class="stateClass[health.checks[check.name]]"><span>●</span>{{ stateText[health.checks[check.name]] }} <small>{{ health.checks[check.name] }}</small></p></article></section>
+      <div class="panel overall-health" :class="health.status === 'degraded' ? 'tone-warning' : 'tone-success'"><span class="health-emblem"><PhWarning v-if="health.status === 'degraded'" :size="19" weight="bold" aria-hidden="true" /><PhCheck v-else :size="19" weight="bold" aria-hidden="true" /></span><div><strong>{{ health.status === 'degraded' ? '存在异常的依赖项' : '所有依赖项正常' }}</strong><p class="muted">整体状态 <b>{{ health.status }}</b>：只有「异常」和「不可用」会让整体降级，「无需使用」不算故障。</p></div></div>
+      <section class="health-check-grid" aria-label="依赖检查"><article v-for="check in checks" :key="check.name" class="panel health-check"><div class="health-check-heading"><span class="summary-icon"><component :is="check.icon" :size="19" aria-hidden="true" /></span><div><h2>{{ check.title }}</h2><p class="muted">{{ check.detail }}</p></div></div><p class="state-line" :class="stateClass[health.checks[check.name]]"><span aria-hidden="true">●</span>{{ stateText[health.checks[check.name]] }} <small>{{ health.checks[check.name] }}</small></p></article></section>
       <section v-if="channels" class="page-stack channel-section">
         <div><h2>渠道健康度</h2><p class="muted">搜索、来源下载尝试和无损交付分别统计，每类取最近 {{ channels.window }} 次结果。服务重启后统计清零；逐次记录可到「下载历史」查看。</p></div>
         <div v-if="channels.sources.length === 0" class="panel empty-state">还没有任何音源。先到「音源管理」导入一个脚本，再回到这里跑一次搜索。</div>
@@ -24,6 +24,7 @@
 import { ref } from 'vue'
 import { errorMessage, listSourceHealth, readHealth, type CheckState, type HealthReport, type SourceHealthReport, type SourceHealthVerdict } from '@/lib/api'
 import ChannelMetrics from '@/components/ChannelMetrics.vue'
+import { PhArrowsClockwise, PhCheck, PhCpu, PhDatabase, PhPlugsConnected, PhTelegramLogo, PhWarning } from '@phosphor-icons/vue'
 import { usePolling } from '@/composables/usePolling'
 const health = ref<HealthReport | null>(null)
 const channels = ref<SourceHealthReport | null>(null)
@@ -32,10 +33,10 @@ const loading = ref(true)
 const refreshing = ref(false)
 const error = ref('')
 const checks = [
-  { name: 'readyz', title: '主服务', detail: '消息与下载任务的后台工作进程是否还在运行' },
-  { name: 'plugin_runner', title: '插件执行器', detail: '在沙箱里真正抓取音频的执行器' },
-  { name: 'redis', title: 'Redis', detail: '缓存、去重与任务队列；未启用时无需使用' },
-  { name: 'telegram', title: 'Telegram', detail: 'Bot 连接与账号会话是否已授权' },
+  { name: 'readyz', title: '主服务', icon: PhCpu, detail: '消息与下载任务的后台工作进程是否还在运行' },
+  { name: 'plugin_runner', title: '插件执行器', icon: PhPlugsConnected, detail: '在沙箱里真正抓取音频的执行器' },
+  { name: 'redis', title: 'Redis', icon: PhDatabase, detail: '缓存、去重与任务队列；未启用时无需使用' },
+  { name: 'telegram', title: 'Telegram', icon: PhTelegramLogo, detail: 'Bot 连接与账号会话是否已授权' },
 ] as const
 const stateText: Record<CheckState, string> = { ok: '正常', failed: '异常', unavailable: '不可用', not_required: '无需使用' }
 const stateClass: Record<CheckState, string> = { ok: 'tone-success', failed: 'tone-danger', unavailable: 'tone-warning', not_required: 'tone-neutral' }

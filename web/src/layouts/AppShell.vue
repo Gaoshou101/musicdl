@@ -29,7 +29,7 @@
 
     <div class="workspace">
       <header class="topbar">
-        <button class="mobile-menu" type="button" aria-label="打开后台导航" :aria-expanded="menuOpen" @click="menuOpen = !menuOpen">☰</button>
+        <button class="mobile-menu" type="button" aria-label="打开后台导航" :aria-expanded="menuOpen" @click="menuOpen = !menuOpen"><PhList :size="22" aria-hidden="true" /></button>
         <div class="breadcrumb"><span>musicdl</span><span class="breadcrumb-sep">/</span><strong>{{ pageTitle }}</strong></div>
         <div class="toolbar">
           <ThemeControl />
@@ -45,7 +45,7 @@ import { computed, ref } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import ThemeControl from '@/components/ThemeControl.vue'
-import { PhHouse, PhMagnifyingGlass, PhDownloadSimple, PhPulse, PhListBullets, PhMusicNotes, PhRobot, PhSlidersHorizontal, PhGear } from '@phosphor-icons/vue'
+import { PhHouse, PhList, PhMagnifyingGlass, PhDownloadSimple, PhPulse, PhListBullets, PhMusicNotes, PhRobot, PhSlidersHorizontal, PhGear } from '@phosphor-icons/vue'
 import { errorMessage } from '@/lib/api'
 
 const route = useRoute()
